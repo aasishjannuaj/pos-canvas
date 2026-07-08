@@ -1,44 +1,22 @@
-import TemplateCard from "@/components/dashboard/TemplateCard";
-import { templates } from "@/data/templates";
+import PageContainer from "@/components/common/PageContainer";
+import DashboardHeader from "@/components/dashboard/DashboardHeader";
+import SearchBar from "@/components/dashboard/SearchBar";
+import RecentProjects from "@/components/dashboard/RecentProjects";
+import TrendingTemplates from "@/components/dashboard/TrendingTemplates";
+import CategorySection from "@/components/dashboard/CategorySection";
 
-export default function DashboardPage() {
+export default function DashboardHome() {
   return (
-    <main
-      style={{
-        padding: "40px",
-        fontFamily: "Arial",
-      }}
-    >
-      <h1>POS Canvas</h1>
-
-      <p>Welcome to your dashboard.</p>
-
-      <button
-        style={{
-          padding: "12px 24px",
-          fontSize: "18px",
-          marginBottom: "40px",
-        }}
-      >
-        + Create New POS
-      </button>
-
-      <h2>Templates</h2>
-
-      <div
-        style={{
-          display: "flex",
-          gap: "20px",
-          flexWrap: "wrap",
-        }}
-      >
-        {templates.map((template) => (
-          <TemplateCard
-            key={template.id}
-            template={template}
-          />
-        ))}
-      </div>
+    <main className="min-h-screen bg-neutral-50">
+      <PageContainer>
+        <div className="flex flex-col gap-14">
+          <DashboardHeader />
+          <SearchBar />
+          <RecentProjects />
+          <TrendingTemplates />
+          <CategorySection />
+        </div>
+      </PageContainer>
     </main>
   );
 }
