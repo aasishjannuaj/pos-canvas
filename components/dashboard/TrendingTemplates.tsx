@@ -1,10 +1,12 @@
+import Link from "next/link";
+
 const trendingTemplates = [
-  { icon: "🍔", title: "Restaurant" },
-  { icon: "☕", title: "Cafe" },
-  { icon: "🛍", title: "Retail" },
-  { icon: "🍺", title: "Liquor Store" },
-  { icon: "💇", title: "Salon" },
-  { icon: "🏪", title: "Convenience Store" },
+  { icon: "🍔", title: "Restaurant", id: "restaurant" },
+  { icon: "☕", title: "Cafe", id: "cafe" },
+  { icon: "🛍", title: "Retail", id: "retail" },
+  { icon: "🍺", title: "Liquor Store", id: "liquor-store" },
+  { icon: "💇", title: "Salon", id: "salon" },
+  { icon: "🏪", title: "Convenience Store", id: "convenience-store" },
 ];
 
 export default function TrendingTemplates() {
@@ -25,8 +27,9 @@ export default function TrendingTemplates() {
 
       <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-6">
         {trendingTemplates.map((template) => (
-          <div
-            key={template.title}
+          <Link
+            key={template.id}
+            href={`/templates/${template.id}`}
             className="group flex flex-col items-center gap-3 rounded-2xl border border-neutral-200 bg-white p-6 text-center transition-all hover:-translate-y-1 hover:shadow-md"
           >
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-neutral-100 text-2xl transition-colors group-hover:bg-blue-600">
@@ -38,7 +41,7 @@ export default function TrendingTemplates() {
             <span className="text-sm font-medium text-neutral-900">
               {template.title}
             </span>
-          </div>
+          </Link>
         ))}
       </div>
     </section>
