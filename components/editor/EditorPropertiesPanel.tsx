@@ -7,11 +7,17 @@ const categoryOptions: MenuCategory[] = ["Breakfast", "Lunch", "Drinks"];
 type EditorPropertiesPanelProps = {
   selectedItem: MenuItem | null;
   onUpdate: (id: string, changes: Partial<MenuItem>) => void;
+  onAdd: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
 };
 
 export default function EditorPropertiesPanel({
   selectedItem,
   onUpdate,
+  onAdd,
+  onDuplicate,
+  onDelete,
 }: EditorPropertiesPanelProps) {
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -19,8 +25,38 @@ export default function EditorPropertiesPanel({
         Properties
       </h2>
 
+      <div className="flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+        >
+          + Add Item
+        </button>
+
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onDuplicate}
+            disabled={!selectedItem}
+            className="flex-1 rounded-full border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:border-neutral-100 disabled:text-neutral-300 disabled:hover:border-neutral-100 disabled:hover:text-neutral-300"
+          >
+            Duplicate Item
+          </button>
+
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={!selectedItem}
+            className="flex-1 rounded-full border border-neutral-200 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:border-red-600 hover:bg-red-600 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:border-neutral-100 disabled:text-neutral-300 disabled:hover:border-neutral-100 disabled:hover:bg-transparent disabled:hover:text-neutral-300"
+          >
+            Delete Item
+          </button>
+        </div>
+      </div>
+
       {selectedItem ? (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-4 border-t border-neutral-200 pt-4">
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
               Item Name

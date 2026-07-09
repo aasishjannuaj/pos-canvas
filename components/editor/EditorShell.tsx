@@ -28,6 +28,10 @@ const initialMenuItems: MenuItem[] = [
   { id: "10", name: "Water", price: 1.49, category: "Drinks" },
 ];
 
+function createId(): string {
+  return Date.now().toString();
+}
+
 type EditorShellProps = {
   projectName: string;
 };
@@ -45,6 +49,41 @@ export default function EditorShell({ projectName }: EditorShellProps) {
     );
   }
 
+  function handleAddItem() {
+    const newItem: MenuItem = {
+      id: createId(),
+      name: "New Item",
+      price: 0,
+      category: "Breakfast",
+    };
+
+    setMenuItems((prev) => [...prev, newItem]);
+    setSelectedItemId(newItem.id);
+  }
+
+  function handleDuplicateItem() {
+    if (!selectedItem) {
+      return;
+    }
+
+    const duplicatedItem: MenuItem = {
+      ...selectedItem,
+      id: createId(),
+    };
+
+    setMenuItems((prev) => [...prev, duplicatedItem]);
+    setSelectedItemId(duplicatedItem.id);
+  }
+
+  function handleDeleteItem() {
+    if (!selectedItem) {
+      return;
+    }
+
+    setMenuItems((prev) => prev.filter((item) => item.id !== selectedItem.id));
+    setSelectedItemId(null);
+  }
+
   return (
     <div className="flex h-screen flex-col bg-neutral-50">
       <EditorTopBar projectName={projectName} />
@@ -59,6 +98,9 @@ export default function EditorShell({ projectName }: EditorShellProps) {
         <EditorPropertiesPanel
           selectedItem={selectedItem}
           onUpdate={handleUpdateItem}
+          onAdd={handleAddItem}
+          onDuplicate={handleDuplicateItem}
+          onDelete={handleDeleteItem}
         />
       </div>
     </div>
