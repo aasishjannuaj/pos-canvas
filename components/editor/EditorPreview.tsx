@@ -8,20 +8,27 @@ type EditorPreviewProps = {
   menuItems: MenuItem[];
   selectedItemId: string | null;
   onSelect: (id: string) => void;
+  businessName: string;
+  accentColor: string;
 };
 
 export default function EditorPreview({
   menuItems,
   selectedItemId,
   onSelect,
+  businessName,
+  accentColor,
 }: EditorPreviewProps) {
   return (
     <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-100 p-10">
       <div className="flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
         {/* POS Header */}
-        <div className="flex-none border-b border-neutral-200 bg-neutral-900 px-4 py-3">
+        <div
+          className="flex-none px-4 py-3"
+          style={{ backgroundColor: accentColor }}
+        >
           <span className="text-sm font-semibold tracking-tight text-white">
-            Restaurant POS
+            {businessName}
           </span>
         </div>
 
@@ -30,11 +37,12 @@ export default function EditorPreview({
           {sectionOrder.map((section, index) => (
             <span
               key={section}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+              className={
                 index === 0
-                  ? "bg-blue-600 text-white"
-                  : "bg-neutral-100 text-neutral-600"
-              }`}
+                  ? "rounded-full px-3 py-1.5 text-xs font-medium text-white"
+                  : "rounded-full bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-600"
+              }
+              style={index === 0 ? { backgroundColor: accentColor } : undefined}
             >
               {section}
             </span>
@@ -68,11 +76,19 @@ export default function EditorPreview({
                           key={item.id}
                           type="button"
                           onClick={() => onSelect(item.id)}
-                          className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+                          className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
                             isSelected
-                              ? "border-blue-600 bg-blue-600"
-                              : "border-neutral-200 bg-neutral-50 hover:border-blue-600"
+                              ? "text-white"
+                              : "border-neutral-200 bg-neutral-50 hover:border-neutral-300"
                           }`}
+                          style={
+                            isSelected
+                              ? {
+                                  backgroundColor: accentColor,
+                                  borderColor: accentColor,
+                                }
+                              : undefined
+                          }
                         >
                           <span
                             className={`text-xs font-medium leading-tight ${
@@ -82,9 +98,10 @@ export default function EditorPreview({
                             {item.name}
                           </span>
                           <span
-                            className={`text-xs font-semibold ${
-                              isSelected ? "text-white" : "text-blue-600"
-                            }`}
+                            className="text-xs font-semibold"
+                            style={{
+                              color: isSelected ? "#FFFFFF" : accentColor,
+                            }}
                           >
                             ${item.price.toFixed(2)}
                           </span>

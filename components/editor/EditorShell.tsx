@@ -15,6 +15,8 @@ export type MenuItem = {
   category: MenuCategory;
 };
 
+export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
+
 const initialMenuItems: MenuItem[] = [
   { id: "1", name: "Bacon Egg & Cheese", price: 6.49, category: "Breakfast" },
   { id: "2", name: "Egg & Cheese", price: 4.99, category: "Breakfast" },
@@ -39,6 +41,9 @@ type EditorShellProps = {
 export default function EditorShell({ projectName }: EditorShellProps) {
   const [menuItems, setMenuItems] = useState<MenuItem[]>(initialMenuItems);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
+  const [businessName, setBusinessName] = useState("Restaurant POS");
+  const [accentColor, setAccentColor] = useState("#2563EB");
 
   const selectedItem =
     menuItems.find((item) => item.id === selectedItemId) ?? null;
@@ -89,18 +94,28 @@ export default function EditorShell({ projectName }: EditorShellProps) {
       <EditorTopBar projectName={projectName} />
 
       <div className="flex flex-1 overflow-hidden">
-        <EditorSidebar />
+        <EditorSidebar
+          editorSection={editorSection}
+          setEditorSection={setEditorSection}
+        />
         <EditorPreview
           menuItems={menuItems}
           selectedItemId={selectedItemId}
           onSelect={setSelectedItemId}
+          businessName={businessName}
+          accentColor={accentColor}
         />
         <EditorPropertiesPanel
+          editorSection={editorSection}
           selectedItem={selectedItem}
           onUpdate={handleUpdateItem}
           onAdd={handleAddItem}
           onDuplicate={handleDuplicateItem}
           onDelete={handleDeleteItem}
+          businessName={businessName}
+          setBusinessName={setBusinessName}
+          accentColor={accentColor}
+          setAccentColor={setAccentColor}
         />
       </div>
     </div>
