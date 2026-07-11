@@ -1,8 +1,9 @@
 "use client";
 
-import type { EditorSection, MenuCategory, MenuItem } from "./EditorShell";
+import type { Currency, EditorSection, MenuCategory, MenuItem } from "./EditorShell";
 
 const categoryOptions: MenuCategory[] = ["Breakfast", "Lunch", "Drinks"];
+const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
 type EditorPropertiesPanelProps = {
   editorSection: EditorSection;
@@ -23,6 +24,14 @@ type EditorPropertiesPanelProps = {
   setPricesIncludeTax: (value: boolean) => void;
   showTaxSeparately: boolean;
   setShowTaxSeparately: (value: boolean) => void;
+  currency: Currency;
+  setCurrency: (value: Currency) => void;
+  receiptFooter: string;
+  setReceiptFooter: (value: string) => void;
+  orderPrefix: string;
+  setOrderPrefix: (value: string) => void;
+  tipsEnabled: boolean;
+  setTipsEnabled: (value: boolean) => void;
 };
 
 export default function EditorPropertiesPanel({
@@ -44,6 +53,14 @@ export default function EditorPropertiesPanel({
   setPricesIncludeTax,
   showTaxSeparately,
   setShowTaxSeparately,
+  currency,
+  setCurrency,
+  receiptFooter,
+  setReceiptFooter,
+  orderPrefix,
+  setOrderPrefix,
+  tipsEnabled,
+  setTipsEnabled,
 }: EditorPropertiesPanelProps) {
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -257,11 +274,59 @@ export default function EditorPropertiesPanel({
       )}
 
       {editorSection === "Settings" && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">
-          <span className="text-2xl">⚙️</span>
-          <p className="text-sm text-neutral-500">
-            Settings coming soon
-          </p>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+              Currency
+            </label>
+            <select
+              value={currency}
+              onChange={(event) => setCurrency(event.target.value as Currency)}
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+            >
+              {currencyOptions.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+              Receipt Footer
+            </label>
+            <textarea
+              value={receiptFooter}
+              onChange={(event) => setReceiptFooter(event.target.value)}
+              rows={3}
+              className="resize-none rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+              Order Prefix
+            </label>
+            <input
+              type="text"
+              value={orderPrefix}
+              onChange={(event) => setOrderPrefix(event.target.value)}
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+            />
+          </div>
+
+          <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">
+            <span className="text-sm font-medium text-neutral-900">
+              Enable Tips
+            </span>
+            <input
+              type="checkbox"
+              checked={tipsEnabled}
+              onChange={(event) => setTipsEnabled(event.target.checked)}
+              className="h-4 w-4 cursor-pointer accent-blue-600"
+            />
+          </label>
         </div>
       )}
     </aside>

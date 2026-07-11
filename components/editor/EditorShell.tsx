@@ -17,6 +17,8 @@ export type MenuItem = {
 
 export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
 
+export type Currency = "USD" | "CAD" | "EUR" | "GBP";
+
 const initialMenuItems: MenuItem[] = [
   { id: "1", name: "Bacon Egg & Cheese", price: 6.49, category: "Breakfast" },
   { id: "2", name: "Egg & Cheese", price: 4.99, category: "Breakfast" },
@@ -48,6 +50,12 @@ export default function EditorShell({ projectName }: EditorShellProps) {
   const [taxRate, setTaxRate] = useState(6.35);
   const [pricesIncludeTax, setPricesIncludeTax] = useState(false);
   const [showTaxSeparately, setShowTaxSeparately] = useState(true);
+
+  // Feature 5.8 — Settings state
+  const [currency, setCurrency] = useState<Currency>("USD");
+  const [receiptFooter, setReceiptFooter] = useState("Thank you for visiting!");
+  const [orderPrefix, setOrderPrefix] = useState("ORD-");
+  const [tipsEnabled, setTipsEnabled] = useState(false);
 
   const selectedItem =
     menuItems.find((item) => item.id === selectedItemId) ?? null;
@@ -112,6 +120,10 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           taxRate={taxRate}
           pricesIncludeTax={pricesIncludeTax}
           showTaxSeparately={showTaxSeparately}
+          currency={currency}
+          receiptFooter={receiptFooter}
+          orderPrefix={orderPrefix}
+          tipsEnabled={tipsEnabled}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -132,6 +144,14 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           setPricesIncludeTax={setPricesIncludeTax}
           showTaxSeparately={showTaxSeparately}
           setShowTaxSeparately={setShowTaxSeparately}
+          currency={currency}
+          setCurrency={setCurrency}
+          receiptFooter={receiptFooter}
+          setReceiptFooter={setReceiptFooter}
+          orderPrefix={orderPrefix}
+          setOrderPrefix={setOrderPrefix}
+          tipsEnabled={tipsEnabled}
+          setTipsEnabled={setTipsEnabled}
         />
       </div>
     </div>

@@ -1,8 +1,18 @@
 "use client";
 
-import type { MenuCategory, MenuItem } from "./EditorShell";
+import type { Currency, MenuCategory, MenuItem } from "./EditorShell";
 
 const sectionOrder: MenuCategory[] = ["Breakfast", "Lunch", "Drinks"];
+
+const currencySymbols: Record<Currency, string> = {
+  USD: "$",
+  CAD: "CA$",
+  EUR: "€",
+  GBP: "£",
+};
+
+// Static preview-only figure — the builder has no real order math yet.
+const STATIC_TIP = 3;
 
 type EditorPreviewProps = {
   menuItems: MenuItem[];
@@ -14,6 +24,10 @@ type EditorPreviewProps = {
   taxRate: number;
   pricesIncludeTax: boolean;
   showTaxSeparately: boolean;
+  currency: Currency;
+  receiptFooter: string;
+  orderPrefix: string;
+  tipsEnabled: boolean;
 };
 
 const STATIC_SUBTOTAL = 20;
@@ -53,12 +67,21 @@ export default function EditorPreview({
   taxRate,
   pricesIncludeTax,
   showTaxSeparately,
+  currency,
+  receiptFooter,
+  orderPrefix,
+  tipsEnabled,
 }: EditorPreviewProps) {
   const { subtotal, tax, total } = calculateOrderSummary({
     taxEnabled,
     taxRate,
     pricesIncludeTax,
   });
+
+  const currencySymbol = currencySymbols[currency];
+  const orderNumber = `${orderPrefix}1001`;
+  const finalTotal = tipsEnabled ? total + STATIC_TIP : total;
+
   return (
     <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-100 p-10">
       <div className="flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
@@ -143,7 +166,8 @@ export default function EditorPreview({
                               color: isSelected ? "#FFFFFF" : accentColor,
                             }}
                           >
-                            ${item.price.toFixed(2)}
+                            {currencySymbol}
+                            {item.price.toFixed(2)}
                           </span>
                         </button>
                       );
@@ -157,24 +181,51 @@ export default function EditorPreview({
 
         {/* Order Summary */}
         <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
+          <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+            Order {orderNumber}
+          </div>
+
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between text-xs text-neutral-600">
               <span>Subtotal</span>
-              <span>${subtotal.toFixed(2)}</span>
+              <span>
+                {currencySymbol}
+                {subtotal.toFixed(2)}
+              </span>
             </div>
 
             {taxEnabled && showTaxSeparately && (
               <div className="flex items-center justify-between text-xs text-neutral-600">
                 <span>Tax</span>
-                <span>${tax.toFixed(2)}</span>
+                <span>
+                  {currencySymbol}
+                  {tax.toFixed(2)}
+                </span>
+              </div>
+            )}
+
+            {tipsEnabled && (
+              <div className="flex items-center justify-between text-xs text-neutral-600">
+                <span>Tip</span>
+                <span>
+                  {currencySymbol}
+                  {STATIC_TIP.toFixed(2)}
+                </span>
               </div>
             )}
 
             <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
               <span>Total</span>
-              <span>${total.toFixed(2)}</span>
+              <span>
+                {currencySymbol}
+                {finalTotal.toFixed(2)}
+              </span>
             </div>
           </div>
+
+          <p className="mt-2 text-center text-[11px] text-neutral-400">
+            {receiptFooter}
+          </p>
         </div>
       </div>
     </div>
