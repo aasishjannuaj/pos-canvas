@@ -1,8 +1,8 @@
 "use client";
 
+import { MENU_CATEGORIES } from "./EditorShell";
 import type { Currency, EditorSection, MenuCategory, MenuItem } from "./EditorShell";
 
-const categoryOptions: MenuCategory[] = ["Breakfast", "Lunch", "Drinks"];
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
 type EditorPropertiesPanelProps = {
@@ -147,7 +147,7 @@ export default function EditorPropertiesPanel({
                   }
                   className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
                 >
-                  {categoryOptions.map((category) => (
+                  {MENU_CATEGORIES.map((category) => (
                     <option key={category} value={category}>
                       {category}
                     </option>

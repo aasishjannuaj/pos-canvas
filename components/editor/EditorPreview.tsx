@@ -1,8 +1,7 @@
 "use client";
 
-import type { Currency, MenuCategory, MenuItem } from "./EditorShell";
-
-const sectionOrder: MenuCategory[] = ["Breakfast", "Lunch", "Drinks"];
+import { MENU_CATEGORIES } from "./EditorShell";
+import type { Currency, MenuItem } from "./EditorShell";
 
 const currencySymbols: Record<Currency, string> = {
   USD: "$",
@@ -97,7 +96,7 @@ export default function EditorPreview({
 
         {/* Section Tabs */}
         <div className="flex flex-none gap-2 border-b border-neutral-200 bg-white px-3 py-2">
-          {sectionOrder.map((section, index) => (
+          {MENU_CATEGORIES.map((section, index) => (
             <span
               key={section}
               className={
@@ -115,7 +114,7 @@ export default function EditorPreview({
         {/* Menu Content */}
         <div className="flex-1 overflow-y-auto px-3 py-3">
           <div className="flex flex-col gap-4">
-            {sectionOrder.map((section) => {
+            {MENU_CATEGORIES.map((section) => {
               const sectionItems = menuItems.filter(
                 (item) => item.category === section
               );

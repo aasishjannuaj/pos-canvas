@@ -6,7 +6,9 @@ import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 
-export type MenuCategory = "Breakfast" | "Lunch" | "Drinks";
+export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
+
+export type MenuCategory = (typeof MENU_CATEGORIES)[number];
 
 export type MenuItem = {
   id: string;
@@ -33,7 +35,12 @@ const initialMenuItems: MenuItem[] = [
 ];
 
 function createId(): string {
-  return Date.now().toString();
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  // Fallback for environments without crypto.randomUUID (still collision-resistant enough for local state).
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 type EditorShellProps = {
