@@ -10,7 +10,38 @@ type EditorPreviewProps = {
   onSelect: (id: string) => void;
   businessName: string;
   accentColor: string;
+  taxEnabled: boolean;
+  taxRate: number;
+  pricesIncludeTax: boolean;
+  showTaxSeparately: boolean;
 };
+
+const STATIC_SUBTOTAL = 20;
+
+function calculateOrderSummary({
+  taxEnabled,
+  taxRate,
+  pricesIncludeTax,
+}: {
+  taxEnabled: boolean;
+  taxRate: number;
+  pricesIncludeTax: boolean;
+}) {
+  const subtotal = STATIC_SUBTOTAL;
+  const safeRate = Number.isFinite(taxRate) && taxRate > 0 ? taxRate : 0;
+
+  if (!taxEnabled) {
+    return { subtotal, tax: 0, total: subtotal };
+  }
+
+  if (pricesIncludeTax) {
+    const tax = subtotal - subtotal / (1 + safeRate / 100);
+    return { subtotal, tax, total: subtotal };
+  }
+
+  const tax = subtotal * (safeRate / 100);
+  return { subtotal, tax, total: subtotal + tax };
+}
 
 export default function EditorPreview({
   menuItems,
@@ -18,7 +49,16 @@ export default function EditorPreview({
   onSelect,
   businessName,
   accentColor,
+  taxEnabled,
+  taxRate,
+  pricesIncludeTax,
+  showTaxSeparately,
 }: EditorPreviewProps) {
+  const { subtotal, tax, total } = calculateOrderSummary({
+    taxEnabled,
+    taxRate,
+    pricesIncludeTax,
+  });
   return (
     <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-100 p-10">
       <div className="flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
@@ -112,6 +152,28 @@ export default function EditorPreview({
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        {/* Order Summary */}
+        <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between text-xs text-neutral-600">
+              <span>Subtotal</span>
+              <span>${subtotal.toFixed(2)}</span>
+            </div>
+
+            {taxEnabled && showTaxSeparately && (
+              <div className="flex items-center justify-between text-xs text-neutral-600">
+                <span>Tax</span>
+                <span>${tax.toFixed(2)}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
+              <span>Total</span>
+              <span>${total.toFixed(2)}</span>
+            </div>
           </div>
         </div>
       </div>

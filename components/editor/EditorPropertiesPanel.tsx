@@ -15,6 +15,14 @@ type EditorPropertiesPanelProps = {
   setBusinessName: (value: string) => void;
   accentColor: string;
   setAccentColor: (value: string) => void;
+  taxEnabled: boolean;
+  setTaxEnabled: (value: boolean) => void;
+  taxRate: number;
+  setTaxRate: (value: number) => void;
+  pricesIncludeTax: boolean;
+  setPricesIncludeTax: (value: boolean) => void;
+  showTaxSeparately: boolean;
+  setShowTaxSeparately: (value: boolean) => void;
 };
 
 export default function EditorPropertiesPanel({
@@ -28,6 +36,14 @@ export default function EditorPropertiesPanel({
   setBusinessName,
   accentColor,
   setAccentColor,
+  taxEnabled,
+  setTaxEnabled,
+  taxRate,
+  setTaxRate,
+  pricesIncludeTax,
+  setPricesIncludeTax,
+  showTaxSeparately,
+  setShowTaxSeparately,
 }: EditorPropertiesPanelProps) {
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -177,11 +193,66 @@ export default function EditorPropertiesPanel({
       )}
 
       {editorSection === "Taxes" && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">
-          <span className="text-2xl">🧾</span>
-          <p className="text-sm text-neutral-500">
-            Tax settings coming soon
-          </p>
+        <div className="flex flex-col gap-4">
+          <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">
+            <span className="text-sm font-medium text-neutral-900">
+              Enable Tax
+            </span>
+            <input
+              type="checkbox"
+              checked={taxEnabled}
+              onChange={(event) => setTaxEnabled(event.target.checked)}
+              className="h-4 w-4 cursor-pointer accent-blue-600"
+            />
+          </label>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+              Tax Rate
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={taxRate}
+                disabled={!taxEnabled}
+                onChange={(event) =>
+                  setTaxRate(
+                    Math.max(0, Number(event.target.value) || 0)
+                  )
+                }
+                className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
+              />
+              <span className="text-sm font-medium text-neutral-500">%</span>
+            </div>
+          </div>
+
+          <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">
+            <span className="text-sm font-medium text-neutral-900">
+              Prices Include Tax
+            </span>
+            <input
+              type="checkbox"
+              checked={pricesIncludeTax}
+              disabled={!taxEnabled}
+              onChange={(event) => setPricesIncludeTax(event.target.checked)}
+              className="h-4 w-4 cursor-pointer accent-blue-600 disabled:cursor-not-allowed"
+            />
+          </label>
+
+          <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">
+            <span className="text-sm font-medium text-neutral-900">
+              Show Tax Separately
+            </span>
+            <input
+              type="checkbox"
+              checked={showTaxSeparately}
+              disabled={!taxEnabled}
+              onChange={(event) => setShowTaxSeparately(event.target.checked)}
+              className="h-4 w-4 cursor-pointer accent-blue-600 disabled:cursor-not-allowed"
+            />
+          </label>
         </div>
       )}
 

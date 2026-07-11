@@ -44,6 +44,10 @@ export default function EditorShell({ projectName }: EditorShellProps) {
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
   const [businessName, setBusinessName] = useState("Restaurant POS");
   const [accentColor, setAccentColor] = useState("#2563EB");
+  const [taxEnabled, setTaxEnabled] = useState(true);
+  const [taxRate, setTaxRate] = useState(6.35);
+  const [pricesIncludeTax, setPricesIncludeTax] = useState(false);
+  const [showTaxSeparately, setShowTaxSeparately] = useState(true);
 
   const selectedItem =
     menuItems.find((item) => item.id === selectedItemId) ?? null;
@@ -104,6 +108,10 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           onSelect={setSelectedItemId}
           businessName={businessName}
           accentColor={accentColor}
+          taxEnabled={taxEnabled}
+          taxRate={taxRate}
+          pricesIncludeTax={pricesIncludeTax}
+          showTaxSeparately={showTaxSeparately}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -116,6 +124,14 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           setBusinessName={setBusinessName}
           accentColor={accentColor}
           setAccentColor={setAccentColor}
+          taxEnabled={taxEnabled}
+          setTaxEnabled={setTaxEnabled}
+          taxRate={taxRate}
+          setTaxRate={setTaxRate}
+          pricesIncludeTax={pricesIncludeTax}
+          setPricesIncludeTax={setPricesIncludeTax}
+          showTaxSeparately={showTaxSeparately}
+          setShowTaxSeparately={setShowTaxSeparately}
         />
       </div>
     </div>
