@@ -21,6 +21,32 @@ export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
+type TaxSettings = {
+  enabled: boolean;
+  rate: number;
+  pricesIncludeTax: boolean;
+  showTaxSeparately: boolean;
+};
+
+type ReceiptSettings = {
+  currency: Currency;
+  footer: string;
+  orderPrefix: string;
+  tipsEnabled: boolean;
+};
+
+type BrandingSettings = {
+  businessName: string;
+  accentColor: string;
+};
+
+export type ProjectConfig = {
+  menuItems: MenuItem[];
+  branding: BrandingSettings;
+  tax: TaxSettings;
+  receipt: ReceiptSettings;
+};
+
 const initialMenuItems: MenuItem[] = [
   { id: "1", name: "Bacon Egg & Cheese", price: 6.49, category: "Breakfast" },
   { id: "2", name: "Egg & Cheese", price: 4.99, category: "Breakfast" },
@@ -33,6 +59,26 @@ const initialMenuItems: MenuItem[] = [
   { id: "9", name: "Sprite", price: 1.99, category: "Drinks" },
   { id: "10", name: "Water", price: 1.49, category: "Drinks" },
 ];
+
+const initialProjectConfig: ProjectConfig = {
+  menuItems: initialMenuItems,
+  branding: {
+    businessName: "Restaurant POS",
+    accentColor: "#2563EB",
+  },
+  tax: {
+    enabled: true,
+    rate: 6.35,
+    pricesIncludeTax: false,
+    showTaxSeparately: true,
+  },
+  receipt: {
+    currency: "USD",
+    footer: "Thank you for visiting!",
+    orderPrefix: "ORD-",
+    tipsEnabled: false,
+  },
+};
 
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -48,29 +94,22 @@ type EditorShellProps = {
 };
 
 export default function EditorShell({ projectName }: EditorShellProps) {
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(initialMenuItems);
+  const [projectConfig, setProjectConfig] = useState<ProjectConfig>(initialProjectConfig);
+
+  // UI-only state — not part of the saved project, so it stays outside projectConfig.
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
-  const [businessName, setBusinessName] = useState("Restaurant POS");
-  const [accentColor, setAccentColor] = useState("#2563EB");
-  const [taxEnabled, setTaxEnabled] = useState(true);
-  const [taxRate, setTaxRate] = useState(6.35);
-  const [pricesIncludeTax, setPricesIncludeTax] = useState(false);
-  const [showTaxSeparately, setShowTaxSeparately] = useState(true);
-
-  // Feature 5.8 — Settings state
-  const [currency, setCurrency] = useState<Currency>("USD");
-  const [receiptFooter, setReceiptFooter] = useState("Thank you for visiting!");
-  const [orderPrefix, setOrderPrefix] = useState("ORD-");
-  const [tipsEnabled, setTipsEnabled] = useState(false);
 
   const selectedItem =
-    menuItems.find((item) => item.id === selectedItemId) ?? null;
+    projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
 
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
-    setMenuItems((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, ...changes } : item))
-    );
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) =>
+        item.id === id ? { ...item, ...changes } : item
+      ),
+    }));
   }
 
   function handleAddItem() {
@@ -81,7 +120,10 @@ export default function EditorShell({ projectName }: EditorShellProps) {
       category: "Breakfast",
     };
 
-    setMenuItems((prev) => [...prev, newItem]);
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: [...prev.menuItems, newItem],
+    }));
     setSelectedItemId(newItem.id);
   }
 
@@ -95,7 +137,10 @@ export default function EditorShell({ projectName }: EditorShellProps) {
       id: createId(),
     };
 
-    setMenuItems((prev) => [...prev, duplicatedItem]);
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: [...prev.menuItems, duplicatedItem],
+    }));
     setSelectedItemId(duplicatedItem.id);
   }
 
@@ -104,8 +149,32 @@ export default function EditorShell({ projectName }: EditorShellProps) {
       return;
     }
 
-    setMenuItems((prev) => prev.filter((item) => item.id !== selectedItem.id));
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.filter((item) => item.id !== selectedItem.id),
+    }));
     setSelectedItemId(null);
+  }
+
+  function handleBrandingChange(changes: Partial<BrandingSettings>) {
+    setProjectConfig((prev) => ({
+      ...prev,
+      branding: { ...prev.branding, ...changes },
+    }));
+  }
+
+  function handleTaxChange(changes: Partial<TaxSettings>) {
+    setProjectConfig((prev) => ({
+      ...prev,
+      tax: { ...prev.tax, ...changes },
+    }));
+  }
+
+  function handleReceiptChange(changes: Partial<ReceiptSettings>) {
+    setProjectConfig((prev) => ({
+      ...prev,
+      receipt: { ...prev.receipt, ...changes },
+    }));
   }
 
   return (
@@ -118,19 +187,12 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           setEditorSection={setEditorSection}
         />
         <EditorPreview
-          menuItems={menuItems}
+          menuItems={projectConfig.menuItems}
           selectedItemId={selectedItemId}
           onSelect={setSelectedItemId}
-          businessName={businessName}
-          accentColor={accentColor}
-          taxEnabled={taxEnabled}
-          taxRate={taxRate}
-          pricesIncludeTax={pricesIncludeTax}
-          showTaxSeparately={showTaxSeparately}
-          currency={currency}
-          receiptFooter={receiptFooter}
-          orderPrefix={orderPrefix}
-          tipsEnabled={tipsEnabled}
+          branding={projectConfig.branding}
+          tax={projectConfig.tax}
+          receipt={projectConfig.receipt}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -139,26 +201,12 @@ export default function EditorShell({ projectName }: EditorShellProps) {
           onAdd={handleAddItem}
           onDuplicate={handleDuplicateItem}
           onDelete={handleDeleteItem}
-          businessName={businessName}
-          setBusinessName={setBusinessName}
-          accentColor={accentColor}
-          setAccentColor={setAccentColor}
-          taxEnabled={taxEnabled}
-          setTaxEnabled={setTaxEnabled}
-          taxRate={taxRate}
-          setTaxRate={setTaxRate}
-          pricesIncludeTax={pricesIncludeTax}
-          setPricesIncludeTax={setPricesIncludeTax}
-          showTaxSeparately={showTaxSeparately}
-          setShowTaxSeparately={setShowTaxSeparately}
-          currency={currency}
-          setCurrency={setCurrency}
-          receiptFooter={receiptFooter}
-          setReceiptFooter={setReceiptFooter}
-          orderPrefix={orderPrefix}
-          setOrderPrefix={setOrderPrefix}
-          tipsEnabled={tipsEnabled}
-          setTipsEnabled={setTipsEnabled}
+          branding={projectConfig.branding}
+          onBrandingChange={handleBrandingChange}
+          tax={projectConfig.tax}
+          onTaxChange={handleTaxChange}
+          receipt={projectConfig.receipt}
+          onReceiptChange={handleReceiptChange}
         />
       </div>
     </div>

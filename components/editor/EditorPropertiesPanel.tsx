@@ -1,7 +1,13 @@
 "use client";
 
 import { MENU_CATEGORIES } from "./EditorShell";
-import type { Currency, EditorSection, MenuCategory, MenuItem } from "./EditorShell";
+import type {
+  Currency,
+  EditorSection,
+  MenuCategory,
+  MenuItem,
+  ProjectConfig,
+} from "./EditorShell";
 
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
@@ -12,26 +18,12 @@ type EditorPropertiesPanelProps = {
   onAdd: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
-  businessName: string;
-  setBusinessName: (value: string) => void;
-  accentColor: string;
-  setAccentColor: (value: string) => void;
-  taxEnabled: boolean;
-  setTaxEnabled: (value: boolean) => void;
-  taxRate: number;
-  setTaxRate: (value: number) => void;
-  pricesIncludeTax: boolean;
-  setPricesIncludeTax: (value: boolean) => void;
-  showTaxSeparately: boolean;
-  setShowTaxSeparately: (value: boolean) => void;
-  currency: Currency;
-  setCurrency: (value: Currency) => void;
-  receiptFooter: string;
-  setReceiptFooter: (value: string) => void;
-  orderPrefix: string;
-  setOrderPrefix: (value: string) => void;
-  tipsEnabled: boolean;
-  setTipsEnabled: (value: boolean) => void;
+  branding: ProjectConfig["branding"];
+  onBrandingChange: (changes: Partial<ProjectConfig["branding"]>) => void;
+  tax: ProjectConfig["tax"];
+  onTaxChange: (changes: Partial<ProjectConfig["tax"]>) => void;
+  receipt: ProjectConfig["receipt"];
+  onReceiptChange: (changes: Partial<ProjectConfig["receipt"]>) => void;
 };
 
 export default function EditorPropertiesPanel({
@@ -41,26 +33,12 @@ export default function EditorPropertiesPanel({
   onAdd,
   onDuplicate,
   onDelete,
-  businessName,
-  setBusinessName,
-  accentColor,
-  setAccentColor,
-  taxEnabled,
-  setTaxEnabled,
-  taxRate,
-  setTaxRate,
-  pricesIncludeTax,
-  setPricesIncludeTax,
-  showTaxSeparately,
-  setShowTaxSeparately,
-  currency,
-  setCurrency,
-  receiptFooter,
-  setReceiptFooter,
-  orderPrefix,
-  setOrderPrefix,
-  tipsEnabled,
-  setTipsEnabled,
+  branding,
+  onBrandingChange,
+  tax,
+  onTaxChange,
+  receipt,
+  onReceiptChange,
 }: EditorPropertiesPanelProps) {
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -174,8 +152,10 @@ export default function EditorPropertiesPanel({
             </label>
             <input
               type="text"
-              value={businessName}
-              onChange={(event) => setBusinessName(event.target.value)}
+              value={branding.businessName}
+              onChange={(event) =>
+                onBrandingChange({ businessName: event.target.value })
+              }
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
             />
           </div>
@@ -187,11 +167,13 @@ export default function EditorPropertiesPanel({
             <div className="flex items-center gap-3">
               <input
                 type="color"
-                value={accentColor}
-                onChange={(event) => setAccentColor(event.target.value)}
+                value={branding.accentColor}
+                onChange={(event) =>
+                  onBrandingChange({ accentColor: event.target.value })
+                }
                 className="h-10 w-14 cursor-pointer rounded-lg border border-neutral-200 p-1"
               />
-              <span className="text-sm text-neutral-600">{accentColor}</span>
+              <span className="text-sm text-neutral-600">{branding.accentColor}</span>
             </div>
           </div>
 
@@ -217,8 +199,8 @@ export default function EditorPropertiesPanel({
             </span>
             <input
               type="checkbox"
-              checked={taxEnabled}
-              onChange={(event) => setTaxEnabled(event.target.checked)}
+              checked={tax.enabled}
+              onChange={(event) => onTaxChange({ enabled: event.target.checked })}
               className="h-4 w-4 cursor-pointer accent-blue-600"
             />
           </label>
@@ -232,12 +214,12 @@ export default function EditorPropertiesPanel({
                 type="number"
                 step="0.01"
                 min="0"
-                value={taxRate}
-                disabled={!taxEnabled}
+                value={tax.rate}
+                disabled={!tax.enabled}
                 onChange={(event) =>
-                  setTaxRate(
-                    Math.max(0, Number(event.target.value) || 0)
-                  )
+                  onTaxChange({
+                    rate: Math.max(0, Number(event.target.value) || 0),
+                  })
                 }
                 className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
               />
@@ -251,9 +233,11 @@ export default function EditorPropertiesPanel({
             </span>
             <input
               type="checkbox"
-              checked={pricesIncludeTax}
-              disabled={!taxEnabled}
-              onChange={(event) => setPricesIncludeTax(event.target.checked)}
+              checked={tax.pricesIncludeTax}
+              disabled={!tax.enabled}
+              onChange={(event) =>
+                onTaxChange({ pricesIncludeTax: event.target.checked })
+              }
               className="h-4 w-4 cursor-pointer accent-blue-600 disabled:cursor-not-allowed"
             />
           </label>
@@ -264,9 +248,11 @@ export default function EditorPropertiesPanel({
             </span>
             <input
               type="checkbox"
-              checked={showTaxSeparately}
-              disabled={!taxEnabled}
-              onChange={(event) => setShowTaxSeparately(event.target.checked)}
+              checked={tax.showTaxSeparately}
+              disabled={!tax.enabled}
+              onChange={(event) =>
+                onTaxChange({ showTaxSeparately: event.target.checked })
+              }
               className="h-4 w-4 cursor-pointer accent-blue-600 disabled:cursor-not-allowed"
             />
           </label>
@@ -280,8 +266,10 @@ export default function EditorPropertiesPanel({
               Currency
             </label>
             <select
-              value={currency}
-              onChange={(event) => setCurrency(event.target.value as Currency)}
+              value={receipt.currency}
+              onChange={(event) =>
+                onReceiptChange({ currency: event.target.value as Currency })
+              }
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
             >
               {currencyOptions.map((code) => (
@@ -297,8 +285,8 @@ export default function EditorPropertiesPanel({
               Receipt Footer
             </label>
             <textarea
-              value={receiptFooter}
-              onChange={(event) => setReceiptFooter(event.target.value)}
+              value={receipt.footer}
+              onChange={(event) => onReceiptChange({ footer: event.target.value })}
               rows={3}
               className="resize-none rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
             />
@@ -310,8 +298,10 @@ export default function EditorPropertiesPanel({
             </label>
             <input
               type="text"
-              value={orderPrefix}
-              onChange={(event) => setOrderPrefix(event.target.value)}
+              value={receipt.orderPrefix}
+              onChange={(event) =>
+                onReceiptChange({ orderPrefix: event.target.value })
+              }
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
             />
           </div>
@@ -322,8 +312,10 @@ export default function EditorPropertiesPanel({
             </span>
             <input
               type="checkbox"
-              checked={tipsEnabled}
-              onChange={(event) => setTipsEnabled(event.target.checked)}
+              checked={receipt.tipsEnabled}
+              onChange={(event) =>
+                onReceiptChange({ tipsEnabled: event.target.checked })
+              }
               className="h-4 w-4 cursor-pointer accent-blue-600"
             />
           </label>

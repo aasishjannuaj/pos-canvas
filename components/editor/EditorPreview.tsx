@@ -1,7 +1,7 @@
 "use client";
 
 import { MENU_CATEGORIES } from "./EditorShell";
-import type { Currency, MenuItem } from "./EditorShell";
+import type { Currency, MenuItem, ProjectConfig } from "./EditorShell";
 
 const currencySymbols: Record<Currency, string> = {
   USD: "$",
@@ -13,73 +13,51 @@ const currencySymbols: Record<Currency, string> = {
 // Static preview-only figure — the builder has no real order math yet.
 const STATIC_TIP = 3;
 
+const STATIC_SUBTOTAL = 20;
+
 type EditorPreviewProps = {
   menuItems: MenuItem[];
   selectedItemId: string | null;
   onSelect: (id: string) => void;
-  businessName: string;
-  accentColor: string;
-  taxEnabled: boolean;
-  taxRate: number;
-  pricesIncludeTax: boolean;
-  showTaxSeparately: boolean;
-  currency: Currency;
-  receiptFooter: string;
-  orderPrefix: string;
-  tipsEnabled: boolean;
+  branding: ProjectConfig["branding"];
+  tax: ProjectConfig["tax"];
+  receipt: ProjectConfig["receipt"];
 };
 
-const STATIC_SUBTOTAL = 20;
-
-function calculateOrderSummary({
-  taxEnabled,
-  taxRate,
-  pricesIncludeTax,
-}: {
-  taxEnabled: boolean;
-  taxRate: number;
+function calculateOrderSummary(tax: {
+  enabled: boolean;
+  rate: number;
   pricesIncludeTax: boolean;
 }) {
   const subtotal = STATIC_SUBTOTAL;
-  const safeRate = Number.isFinite(taxRate) && taxRate > 0 ? taxRate : 0;
+  const safeRate = Number.isFinite(tax.rate) && tax.rate > 0 ? tax.rate : 0;
 
-  if (!taxEnabled) {
-    return { subtotal, tax: 0, total: subtotal };
+  if (!tax.enabled) {
+    return { subtotal, taxAmount: 0, total: subtotal };
   }
 
-  if (pricesIncludeTax) {
-    const tax = subtotal - subtotal / (1 + safeRate / 100);
-    return { subtotal, tax, total: subtotal };
+  if (tax.pricesIncludeTax) {
+    const taxAmount = subtotal - subtotal / (1 + safeRate / 100);
+    return { subtotal, taxAmount, total: subtotal };
   }
 
-  const tax = subtotal * (safeRate / 100);
-  return { subtotal, tax, total: subtotal + tax };
+  const taxAmount = subtotal * (safeRate / 100);
+  return { subtotal, taxAmount, total: subtotal + taxAmount };
 }
 
 export default function EditorPreview({
   menuItems,
   selectedItemId,
   onSelect,
-  businessName,
-  accentColor,
-  taxEnabled,
-  taxRate,
-  pricesIncludeTax,
-  showTaxSeparately,
-  currency,
-  receiptFooter,
-  orderPrefix,
-  tipsEnabled,
+  branding,
+  tax,
+  receipt,
 }: EditorPreviewProps) {
-  const { subtotal, tax, total } = calculateOrderSummary({
-    taxEnabled,
-    taxRate,
-    pricesIncludeTax,
-  });
+  const { subtotal, taxAmount, total } = calculateOrderSummary(tax);
 
-  const currencySymbol = currencySymbols[currency];
-  const orderNumber = `${orderPrefix}1001`;
-  const finalTotal = tipsEnabled ? total + STATIC_TIP : total;
+  const currencySymbol = currencySymbols[receipt.currency];
+  const orderNumber = `${receipt.orderPrefix}1001`;
+  const finalTotal = receipt.tipsEnabled ? total + STATIC_TIP : total;
 
   return (
     <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-100 p-10">
@@ -87,10 +65,10 @@ export default function EditorPreview({
         {/* POS Header */}
         <div
           className="flex-none px-4 py-3"
-          style={{ backgroundColor: accentColor }}
+          style={{ backgroundColor: branding.accentColor }}
         >
           <span className="text-sm font-semibold tracking-tight text-white">
-            {businessName}
+            {branding.businessName}
           </span>
         </div>
 
@@ -104,7 +82,7 @@ export default function EditorPreview({
                   ? "rounded-full px-3 py-1.5 text-xs font-medium text-white"
                   : "rounded-full bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-600"
               }
-              style={index === 0 ? { backgroundColor: accentColor } : undefined}
+              style={index === 0 ? { backgroundColor: branding.accentColor } : undefined}
             >
               {section}
             </span>
@@ -146,8 +124,8 @@ export default function EditorPreview({
                           style={
                             isSelected
                               ? {
-                                  backgroundColor: accentColor,
-                                  borderColor: accentColor,
+                                  backgroundColor: branding.accentColor,
+                                  borderColor: branding.accentColor,
                                 }
                               : undefined
                           }
@@ -162,7 +140,7 @@ export default function EditorPreview({
                           <span
                             className="text-xs font-semibold"
                             style={{
-                              color: isSelected ? "#FFFFFF" : accentColor,
+                              color: isSelected ? "#FFFFFF" : branding.accentColor,
                             }}
                           >
                             {currencySymbol}
@@ -193,17 +171,17 @@ export default function EditorPreview({
               </span>
             </div>
 
-            {taxEnabled && showTaxSeparately && (
+            {tax.enabled && tax.showTaxSeparately && (
               <div className="flex items-center justify-between text-xs text-neutral-600">
                 <span>Tax</span>
                 <span>
                   {currencySymbol}
-                  {tax.toFixed(2)}
+                  {taxAmount.toFixed(2)}
                 </span>
               </div>
             )}
 
-            {tipsEnabled && (
+            {receipt.tipsEnabled && (
               <div className="flex items-center justify-between text-xs text-neutral-600">
                 <span>Tip</span>
                 <span>
@@ -223,7 +201,7 @@ export default function EditorPreview({
           </div>
 
           <p className="mt-2 text-center text-[11px] text-neutral-400">
-            {receiptFooter}
+            {receipt.footer}
           </p>
         </div>
       </div>
