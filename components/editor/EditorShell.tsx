@@ -6,6 +6,7 @@ import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { saveNewProject, updateProject } from "@/lib/projects";
+import { completeSaleOrder } from "@/lib/orders";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -53,6 +54,8 @@ export type CartSummary = {
 export type PaymentMethod = "cash" | "card";
 
 export type CheckoutStatus = "idle" | "success";
+
+export type SaleSaveStatus = "idle" | "saving" | "success" | "error";
 
 export type CompletedOrder = {
   id: string;
@@ -289,13 +292,17 @@ export default function EditorShell({
   // Feature 7.2 — preview-only cart (never saved with the project)
   const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Feature 7.3 — preview-only checkout (never saved with the project, no transactions persisted)
+  // Feature 7.3 — preview-only checkout (never saved with the project)
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [selectedPaymentMethod, setSelectedPaymentMethod] =
     useState<PaymentMethod | null>(null);
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
 
-  // Feature 7.4 — completed orders & receipts (preview-only, not persisted yet)
+  // Feature 8.3 — persistence status for the current checkout attempt
+  const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
+  const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
+
+  // Feature 7.4 — completed orders & receipts (local cache; now backed by the DB via 8.3)
   const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>([]);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
@@ -412,9 +419,8 @@ export default function EditorShell({
       menuItems: prev.menuItems.filter((item) => item.id !== selectedItem.id),
     }));
 
-    // Stabilization fix — a deleted menu item can't be left behind as an
-    // orphaned line in the preview cart (it would have no matching item to
-    // look up, no inventory to deduct from, and would still count toward totals).
+    // A deleted menu item can't be left behind as an orphaned line in the
+    // preview cart (no matching item to look up, no inventory to deduct from).
     setCart((prev) =>
       prev.filter((cartItem) => cartItem.itemId !== selectedItem.id)
     );
@@ -525,23 +531,56 @@ export default function EditorShell({
     setCheckoutOpen(false);
     setSelectedPaymentMethod(null);
     setCheckoutStatus("idle");
+    setSaleSaveStatus("idle");
+    setSaleSaveError(null);
   }
 
   function selectPaymentMethod(method: PaymentMethod) {
     setSelectedPaymentMethod(method);
   }
 
-  function completeSale() {
-    // Stabilization fix — guard against double-submission and invalid state:
-    // an empty cart, no chosen payment method, or a sale that already
-    // succeeded should all be no-ops rather than creating a phantom order.
+  async function completeSale() {
+    // Preserve the existing guards — unchanged from before Feature 8.3.
     if (cart.length === 0 || !selectedPaymentMethod || checkoutStatus === "success") {
       return;
     }
 
+    setSaleSaveStatus("saving");
+    setSaleSaveError(null);
+
+    // A sale can only be persisted against a project that actually has a
+    // database row. Fail fast with a clear, actionable message instead of
+    // letting this surface as an opaque RPC error.
+    if (projectId === null) {
+      setSaleSaveStatus("error");
+      setSaleSaveError("Save this project before completing a sale.");
+      return;
+    }
+
+    const orderNumber = `${projectConfig.receipt.orderPrefix}${1001 + completedOrders.length}`;
+
+    const { orderId, error } = await completeSaleOrder({
+      projectId,
+      orderNumber,
+      paymentMethod: selectedPaymentMethod,
+      subtotal: cartSummary.subtotal,
+      taxAmount: cartSummary.taxAmount,
+      tipAmount: cartSummary.tip,
+      total: cartSummary.total,
+      items: cart,
+    });
+
+    if (error || !orderId) {
+      // Nothing local changes on failure — cart, inventory, and
+      // completedOrders are untouched so the cashier can just retry.
+      setSaleSaveStatus("error");
+      setSaleSaveError(error ?? "Something went wrong while completing the sale.");
+      return;
+    }
+
     const order: CompletedOrder = {
-      id: createId(),
-      orderNumber: `${projectConfig.receipt.orderPrefix}${1001 + completedOrders.length}`,
+      id: orderId,
+      orderNumber,
       items: [...cart],
       subtotal: cartSummary.subtotal,
       taxAmount: cartSummary.taxAmount,
@@ -553,7 +592,8 @@ export default function EditorShell({
 
     setCompletedOrders((prev) => [...prev, order]);
 
-    // Feature 7.5 — deduct sold quantities from tracked inventory, floored at 0.
+    // Deduct sold quantities from tracked inventory, floored at 0 — only
+    // now that the sale is actually persisted.
     markUnsaved();
     setProjectConfig((prev) => ({
       ...prev,
@@ -577,6 +617,7 @@ export default function EditorShell({
     // Show the success state first — closing is a separate, explicit action
     // (the "Done" button in the checkout panel) so the message stays visible.
     setCheckoutStatus("success");
+    setSaleSaveStatus("success");
     clearCart();
   }
 
@@ -663,6 +704,8 @@ export default function EditorShell({
           onCloseCheckout={closeCheckout}
           onSelectPaymentMethod={selectPaymentMethod}
           onCompleteSale={completeSale}
+          saleSaveStatus={saleSaveStatus}
+          saleSaveError={saleSaveError}
           completedOrders={completedOrders}
           selectedReceiptId={selectedReceiptId}
           onOpenReceipt={openReceipt}

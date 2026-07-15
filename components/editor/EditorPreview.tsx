@@ -10,6 +10,7 @@ import type {
   MenuItem,
   PaymentMethod,
   ProjectConfig,
+  SaleSaveStatus,
 } from "./EditorShell";
 
 // Static preview-only figures used only for the unchanged edit-mode mock below.
@@ -38,6 +39,8 @@ type EditorPreviewProps = {
   onCloseCheckout: () => void;
   onSelectPaymentMethod: (method: PaymentMethod) => void;
   onCompleteSale: () => void;
+  saleSaveStatus: SaleSaveStatus;
+  saleSaveError: string | null;
   completedOrders: CompletedOrder[];
   selectedReceiptId: string | null;
   onOpenReceipt: (orderId: string) => void;
@@ -116,6 +119,8 @@ export default function EditorPreview({
   onCloseCheckout,
   onSelectPaymentMethod,
   onCompleteSale,
+  saleSaveStatus,
+  saleSaveError,
   completedOrders,
   selectedReceiptId,
   onOpenReceipt,
@@ -556,13 +561,25 @@ export default function EditorPreview({
                 </div>
 
                 <div className="flex flex-col gap-2">
+                  {saleSaveStatus === "saving" && (
+                    <p className="text-center text-xs text-neutral-500">
+                      Saving sale...
+                    </p>
+                  )}
+
+                  {saleSaveStatus === "error" && saleSaveError && (
+                    <p className="text-center text-xs text-red-600">
+                      {saleSaveError}
+                    </p>
+                  )}
+
                   <button
                     type="button"
                     onClick={onCompleteSale}
-                    disabled={!selectedPaymentMethod}
+                    disabled={!selectedPaymentMethod || saleSaveStatus === "saving"}
                     className="w-full rounded-full bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Complete Sale
+                    {saleSaveStatus === "saving" ? "Saving..." : "Complete Sale"}
                   </button>
 
                   <button
