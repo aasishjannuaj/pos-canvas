@@ -43,3 +43,12 @@ export async function saveNewProject({
 
   return { project: data, error: null };
 }
+
+export type SavedProject = {
+  id: string;
+  name: string;
+  template_id: string;
+  config: ProjectConfig;
+  created_at: string;
+  updated_at: string;
+};
