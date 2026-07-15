@@ -22,9 +22,31 @@ export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
+export const CURRENCY_SYMBOLS: Record<Currency, string> = {
+  USD: "$",
+  CAD: "CA$",
+  EUR: "€",
+  GBP: "£",
+};
+
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 export type EditorMode = "edit" | "preview";
+
+export type CartItem = {
+  itemId: string;
+  name: string;
+  price: number;
+  quantity: number;
+};
+
+export type CartSummary = {
+  itemCount: number;
+  subtotal: number;
+  taxAmount: number;
+  tip: number;
+  total: number;
+};
 
 type TaxSettings = {
   enabled: boolean;
@@ -85,6 +107,43 @@ const initialProjectConfig: ProjectConfig = {
   },
 };
 
+// Static preview-only figure — the builder has no real payment/tip math yet.
+const STATIC_TIP = 3;
+
+function calculateCartSummary(
+  cart: CartItem[],
+  tax: TaxSettings,
+  tipsEnabled: boolean
+): CartSummary {
+  const itemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  const safeRate = Number.isFinite(tax.rate) && tax.rate > 0 ? tax.rate : 0;
+
+  let taxAmount = 0;
+  let totalBeforeTip = subtotal;
+
+  if (tax.enabled) {
+    if (tax.pricesIncludeTax) {
+      taxAmount = subtotal - subtotal / (1 + safeRate / 100);
+      totalBeforeTip = subtotal;
+    } else {
+      taxAmount = subtotal * (safeRate / 100);
+      totalBeforeTip = subtotal + taxAmount;
+    }
+  }
+
+  const tip = tipsEnabled ? STATIC_TIP : 0;
+
+  return {
+    itemCount,
+    subtotal,
+    taxAmount,
+    tip,
+    total: totalBeforeTip + tip,
+  };
+}
+
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -118,6 +177,9 @@ export default function EditorShell({
   // Feature 7.1 — edit/preview mode (UI-only, does not affect saved data)
   const [editorMode, setEditorMode] = useState<EditorMode>("edit");
 
+  // Feature 7.2 — preview-only cart (never saved with the project)
+  const [cart, setCart] = useState<CartItem[]>([]);
+
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
@@ -125,6 +187,12 @@ export default function EditorShell({
 
   const selectedItem =
     projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
+
+  const cartSummary = calculateCartSummary(
+    cart,
+    projectConfig.tax,
+    projectConfig.receipt.tipsEnabled
+  );
 
   // Once a save has succeeded, any further edit to persisted project data
   // reverts the button back to "Save" — no autosave, just a status reset.
@@ -220,6 +288,60 @@ export default function EditorShell({
     }));
   }
 
+  function addToCart(menuItem: MenuItem) {
+    setCart((prev) => {
+      const existing = prev.find((cartItem) => cartItem.itemId === menuItem.id);
+
+      if (existing) {
+        return prev.map((cartItem) =>
+          cartItem.itemId === menuItem.id
+            ? { ...cartItem, quantity: cartItem.quantity + 1 }
+            : cartItem
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          itemId: menuItem.id,
+          name: menuItem.name,
+          price: menuItem.price,
+          quantity: 1,
+        },
+      ];
+    });
+  }
+
+  function increaseQuantity(itemId: string) {
+    setCart((prev) =>
+      prev.map((cartItem) =>
+        cartItem.itemId === itemId
+          ? { ...cartItem, quantity: cartItem.quantity + 1 }
+          : cartItem
+      )
+    );
+  }
+
+  function decreaseQuantity(itemId: string) {
+    setCart((prev) =>
+      prev
+        .map((cartItem) =>
+          cartItem.itemId === itemId
+            ? { ...cartItem, quantity: cartItem.quantity - 1 }
+            : cartItem
+        )
+        .filter((cartItem) => cartItem.quantity > 0)
+    );
+  }
+
+  function removeFromCart(itemId: string) {
+    setCart((prev) => prev.filter((cartItem) => cartItem.itemId !== itemId));
+  }
+
+  function clearCart() {
+    setCart([]);
+  }
+
   async function handleSave() {
     setSaveStatus("saving");
     setSaveError(null);
@@ -281,6 +403,13 @@ export default function EditorShell({
           tax={projectConfig.tax}
           receipt={projectConfig.receipt}
           editorMode={editorMode}
+          cart={cart}
+          cartSummary={cartSummary}
+          onAddToCart={addToCart}
+          onIncreaseQuantity={increaseQuantity}
+          onDecreaseQuantity={decreaseQuantity}
+          onRemoveFromCart={removeFromCart}
+          onClearCart={clearCart}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -296,6 +425,7 @@ export default function EditorShell({
           receipt={projectConfig.receipt}
           onReceiptChange={handleReceiptChange}
           editorMode={editorMode}
+          cartSummary={cartSummary}
         />
       </div>
     </div>

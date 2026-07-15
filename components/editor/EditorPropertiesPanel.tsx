@@ -1,7 +1,8 @@
 "use client";
 
-import { MENU_CATEGORIES } from "./EditorShell";
+import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
 import type {
+  CartSummary,
   Currency,
   EditorMode,
   EditorSection,
@@ -26,6 +27,7 @@ type EditorPropertiesPanelProps = {
   receipt: ProjectConfig["receipt"];
   onReceiptChange: (changes: Partial<ProjectConfig["receipt"]>) => void;
   editorMode: EditorMode;
+  cartSummary: CartSummary;
 };
 
 export default function EditorPropertiesPanel({
@@ -42,16 +44,51 @@ export default function EditorPropertiesPanel({
   receipt,
   onReceiptChange,
   editorMode,
+  cartSummary,
 }: EditorPropertiesPanelProps) {
+  const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
+
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
       {editorMode === "preview" ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">
-          <p className="text-sm font-medium text-neutral-900">Preview mode</p>
-          <p className="text-sm text-neutral-500">
-            Return to Edit mode to customize this POS.
-          </p>
-        </div>
+        <>
+          <h2 className="text-sm font-semibold tracking-tight text-neutral-900">
+            Cart Summary
+          </h2>
+
+          <div className="flex flex-col gap-3 rounded-xl border border-neutral-200 p-4">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-neutral-600">Items</span>
+              <span className="font-medium text-neutral-900">
+                {cartSummary.itemCount}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-neutral-600">Subtotal</span>
+              <span className="font-medium text-neutral-900">
+                {currencySymbol}
+                {cartSummary.subtotal.toFixed(2)}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-neutral-600">Tax</span>
+              <span className="font-medium text-neutral-900">
+                {currencySymbol}
+                {cartSummary.taxAmount.toFixed(2)}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between border-t border-neutral-200 pt-3 text-sm font-semibold text-neutral-900">
+              <span>Total</span>
+              <span>
+                {currencySymbol}
+                {cartSummary.total.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        </>
       ) : (
         <>
           <h2 className="text-sm font-semibold tracking-tight text-neutral-900">

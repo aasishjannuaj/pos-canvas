@@ -1,18 +1,16 @@
 "use client";
 
-import { MENU_CATEGORIES } from "./EditorShell";
-import type { Currency, EditorMode, MenuItem, ProjectConfig } from "./EditorShell";
+import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
+import type {
+  CartItem,
+  CartSummary,
+  EditorMode,
+  MenuItem,
+  ProjectConfig,
+} from "./EditorShell";
 
-const currencySymbols: Record<Currency, string> = {
-  USD: "$",
-  CAD: "CA$",
-  EUR: "€",
-  GBP: "£",
-};
-
-// Static preview-only figure — the builder has no real order math yet.
+// Static preview-only figures used only for the unchanged edit-mode mock below.
 const STATIC_TIP = 3;
-
 const STATIC_SUBTOTAL = 20;
 
 type EditorPreviewProps = {
@@ -23,6 +21,13 @@ type EditorPreviewProps = {
   tax: ProjectConfig["tax"];
   receipt: ProjectConfig["receipt"];
   editorMode: EditorMode;
+  cart: CartItem[];
+  cartSummary: CartSummary;
+  onAddToCart: (menuItem: MenuItem) => void;
+  onIncreaseQuantity: (itemId: string) => void;
+  onDecreaseQuantity: (itemId: string) => void;
+  onRemoveFromCart: (itemId: string) => void;
+  onClearCart: () => void;
 };
 
 function calculateOrderSummary(tax: {
@@ -54,12 +59,22 @@ export default function EditorPreview({
   tax,
   receipt,
   editorMode,
+  cart,
+  cartSummary,
+  onAddToCart,
+  onIncreaseQuantity,
+  onDecreaseQuantity,
+  onRemoveFromCart,
+  onClearCart,
 }: EditorPreviewProps) {
-  const { subtotal, taxAmount, total } = calculateOrderSummary(tax);
-
-  const currencySymbol = currencySymbols[receipt.currency];
+  const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
-  const finalTotal = receipt.tipsEnabled ? total + STATIC_TIP : total;
+
+  // Edit-mode summary math — unchanged from before Feature 7.2.
+  const editModeSummary = calculateOrderSummary(tax);
+  const editModeFinalTotal = receipt.tipsEnabled
+    ? editModeSummary.total + STATIC_TIP
+    : editModeSummary.total;
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 overflow-auto bg-neutral-100 p-10">
@@ -127,6 +142,8 @@ export default function EditorPreview({
                           onClick={() => {
                             if (editorMode === "edit") {
                               onSelect(item.id);
+                            } else {
+                              onAddToCart(item);
                             }
                           }}
                           className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
@@ -169,54 +186,171 @@ export default function EditorPreview({
           </div>
         </div>
 
-        {/* Order Summary */}
-        <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
-          <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
-            Order {orderNumber}
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between text-xs text-neutral-600">
-              <span>Subtotal</span>
-              <span>
-                {currencySymbol}
-                {subtotal.toFixed(2)}
+        {/* Order Summary / Cart */}
+        {editorMode === "preview" ? (
+          <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+                Order {orderNumber}
               </span>
+              {cart.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onClearCart}
+                  className="text-[11px] font-medium text-neutral-500 transition-colors hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                >
+                  Clear Cart
+                </button>
+              )}
             </div>
 
-            {tax.enabled && tax.showTaxSeparately && (
-              <div className="flex items-center justify-between text-xs text-neutral-600">
-                <span>Tax</span>
-                <span>
-                  {currencySymbol}
-                  {taxAmount.toFixed(2)}
-                </span>
+            {cart.length === 0 ? (
+              <div className="flex flex-col items-center gap-1 py-4 text-center">
+                <p className="text-xs font-medium text-neutral-600">Cart is empty</p>
+                <p className="text-xs text-neutral-400">Tap a menu item to add it.</p>
+              </div>
+            ) : (
+              <div className="mb-2 flex max-h-28 flex-col gap-2 overflow-y-auto">
+                {cart.map((cartItem) => (
+                  <div
+                    key={cartItem.itemId}
+                    className="flex items-center justify-between gap-2 text-xs text-neutral-600"
+                  >
+                    <span className="flex-1 truncate text-neutral-900">
+                      {cartItem.name}
+                    </span>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onDecreaseQuantity(cartItem.itemId)}
+                        aria-label={`Decrease ${cartItem.name} quantity`}
+                        className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                      >
+                        −
+                      </button>
+                      <span className="w-4 text-center text-neutral-900">
+                        {cartItem.quantity}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onIncreaseQuantity(cartItem.itemId)}
+                        aria-label={`Increase ${cartItem.name} quantity`}
+                        className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                      >
+                        +
+                      </button>
+                    </div>
+
+                    <span className="w-12 text-right font-medium text-neutral-900">
+                      {currencySymbol}
+                      {(cartItem.price * cartItem.quantity).toFixed(2)}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => onRemoveFromCart(cartItem.itemId)}
+                      aria-label={`Remove ${cartItem.name} from cart`}
+                      className="text-neutral-400 transition-colors hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
 
-            {receipt.tipsEnabled && (
+            <div className="flex flex-col gap-1 border-t border-neutral-200 pt-2">
               <div className="flex items-center justify-between text-xs text-neutral-600">
-                <span>Tip</span>
+                <span>Subtotal</span>
                 <span>
                   {currencySymbol}
-                  {STATIC_TIP.toFixed(2)}
+                  {cartSummary.subtotal.toFixed(2)}
                 </span>
               </div>
-            )}
 
-            <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
-              <span>Total</span>
-              <span>
-                {currencySymbol}
-                {finalTotal.toFixed(2)}
-              </span>
+              {tax.enabled && tax.showTaxSeparately && (
+                <div className="flex items-center justify-between text-xs text-neutral-600">
+                  <span>Tax</span>
+                  <span>
+                    {currencySymbol}
+                    {cartSummary.taxAmount.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {receipt.tipsEnabled && (
+                <div className="flex items-center justify-between text-xs text-neutral-600">
+                  <span>Tip</span>
+                  <span>
+                    {currencySymbol}
+                    {cartSummary.tip.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
+                <span>Total</span>
+                <span>
+                  {currencySymbol}
+                  {cartSummary.total.toFixed(2)}
+                </span>
+              </div>
             </div>
-          </div>
 
-          <p className="mt-2 text-center text-[11px] text-neutral-400">
-            {receipt.footer}
-          </p>
-        </div>
+            <p className="mt-2 text-center text-[11px] text-neutral-400">
+              {receipt.footer}
+            </p>
+          </div>
+        ) : (
+          <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+              Order {orderNumber}
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between text-xs text-neutral-600">
+                <span>Subtotal</span>
+                <span>
+                  {currencySymbol}
+                  {editModeSummary.subtotal.toFixed(2)}
+                </span>
+              </div>
+
+              {tax.enabled && tax.showTaxSeparately && (
+                <div className="flex items-center justify-between text-xs text-neutral-600">
+                  <span>Tax</span>
+                  <span>
+                    {currencySymbol}
+                    {editModeSummary.taxAmount.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {receipt.tipsEnabled && (
+                <div className="flex items-center justify-between text-xs text-neutral-600">
+                  <span>Tip</span>
+                  <span>
+                    {currencySymbol}
+                    {STATIC_TIP.toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
+                <span>Total</span>
+                <span>
+                  {currencySymbol}
+                  {editModeFinalTotal.toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            <p className="mt-2 text-center text-[11px] text-neutral-400">
+              {receipt.footer}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
