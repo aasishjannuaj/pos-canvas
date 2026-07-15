@@ -411,6 +411,14 @@ export default function EditorShell({
       ...prev,
       menuItems: prev.menuItems.filter((item) => item.id !== selectedItem.id),
     }));
+
+    // Stabilization fix — a deleted menu item can't be left behind as an
+    // orphaned line in the preview cart (it would have no matching item to
+    // look up, no inventory to deduct from, and would still count toward totals).
+    setCart((prev) =>
+      prev.filter((cartItem) => cartItem.itemId !== selectedItem.id)
+    );
+
     setSelectedItemId(null);
   }
 
@@ -524,7 +532,10 @@ export default function EditorShell({
   }
 
   function completeSale() {
-    if (!selectedPaymentMethod) {
+    // Stabilization fix — guard against double-submission and invalid state:
+    // an empty cart, no chosen payment method, or a sale that already
+    // succeeded should all be no-ops rather than creating a phantom order.
+    if (cart.length === 0 || !selectedPaymentMethod || checkoutStatus === "success") {
       return;
     }
 
