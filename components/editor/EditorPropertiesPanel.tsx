@@ -3,11 +3,13 @@
 import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
 import type {
   CartSummary,
+  CheckoutStatus,
   Currency,
   EditorMode,
   EditorSection,
   MenuCategory,
   MenuItem,
+  PaymentMethod,
   ProjectConfig,
 } from "./EditorShell";
 
@@ -28,6 +30,8 @@ type EditorPropertiesPanelProps = {
   onReceiptChange: (changes: Partial<ProjectConfig["receipt"]>) => void;
   editorMode: EditorMode;
   cartSummary: CartSummary;
+  selectedPaymentMethod: PaymentMethod | null;
+  checkoutStatus: CheckoutStatus;
 };
 
 export default function EditorPropertiesPanel({
@@ -45,6 +49,8 @@ export default function EditorPropertiesPanel({
   onReceiptChange,
   editorMode,
   cartSummary,
+  selectedPaymentMethod,
+  checkoutStatus,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
 
@@ -88,6 +94,30 @@ export default function EditorPropertiesPanel({
               </span>
             </div>
           </div>
+
+          {checkoutStatus === "success" ? (
+            <p className="rounded-xl bg-emerald-50 px-4 py-3 text-center text-sm font-medium text-emerald-700">
+              Sale completed
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-neutral-600">Checkout Status</span>
+                <span className="font-medium text-neutral-900">
+                  {cartSummary.itemCount > 0 ? "Ready to checkout" : "Cart empty"}
+                </span>
+              </div>
+
+              {selectedPaymentMethod && (
+                <div className="flex items-center justify-between">
+                  <span className="text-neutral-600">Payment Method</span>
+                  <span className="font-medium text-neutral-900">
+                    {selectedPaymentMethod === "cash" ? "Cash" : "Card"}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <>

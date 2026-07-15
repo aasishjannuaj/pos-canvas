@@ -4,8 +4,10 @@ import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
 import type {
   CartItem,
   CartSummary,
+  CheckoutStatus,
   EditorMode,
   MenuItem,
+  PaymentMethod,
   ProjectConfig,
 } from "./EditorShell";
 
@@ -28,6 +30,13 @@ type EditorPreviewProps = {
   onDecreaseQuantity: (itemId: string) => void;
   onRemoveFromCart: (itemId: string) => void;
   onClearCart: () => void;
+  checkoutOpen: boolean;
+  selectedPaymentMethod: PaymentMethod | null;
+  checkoutStatus: CheckoutStatus;
+  onOpenCheckout: () => void;
+  onCloseCheckout: () => void;
+  onSelectPaymentMethod: (method: PaymentMethod) => void;
+  onCompleteSale: () => void;
 };
 
 function calculateOrderSummary(tax: {
@@ -66,6 +75,13 @@ export default function EditorPreview({
   onDecreaseQuantity,
   onRemoveFromCart,
   onClearCart,
+  checkoutOpen,
+  selectedPaymentMethod,
+  checkoutStatus,
+  onOpenCheckout,
+  onCloseCheckout,
+  onSelectPaymentMethod,
+  onCompleteSale,
 }: EditorPreviewProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
@@ -84,7 +100,7 @@ export default function EditorPreview({
         </span>
       )}
 
-      <div className="flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
+      <div className="relative flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
         {/* POS Header */}
         <div
           className="flex-none px-4 py-3"
@@ -298,6 +314,15 @@ export default function EditorPreview({
               </div>
             </div>
 
+            <button
+              type="button"
+              onClick={onOpenCheckout}
+              disabled={cart.length === 0}
+              className="mt-2 w-full rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Checkout
+            </button>
+
             <p className="mt-2 text-center text-[11px] text-neutral-400">
               {receipt.footer}
             </p>
@@ -349,6 +374,110 @@ export default function EditorPreview({
             <p className="mt-2 text-center text-[11px] text-neutral-400">
               {receipt.footer}
             </p>
+          </div>
+        )}
+
+        {/* Checkout overlay */}
+        {editorMode === "preview" && checkoutOpen && (
+          <div className="absolute inset-0 z-10 flex flex-col justify-between bg-white p-4">
+            {checkoutStatus === "success" ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+                <span className="text-2xl">✅</span>
+                <p className="text-sm font-semibold text-neutral-900">
+                  Sale completed
+                </p>
+                <p className="text-xs text-neutral-500">The cart has been cleared.</p>
+
+                <button
+                  type="button"
+                  onClick={onCloseCheckout}
+                  className="mt-4 rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-col gap-4">
+                  <p className="text-sm font-semibold text-neutral-900">Checkout</p>
+
+                  <div className="flex items-center justify-between rounded-xl border border-neutral-200 px-4 py-3">
+                    <span className="text-sm text-neutral-600">Order Total</span>
+                    <span className="text-lg font-semibold text-neutral-900">
+                      {currencySymbol}
+                      {cartSummary.total.toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Payment Method
+                    </span>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onSelectPaymentMethod("cash")}
+                        className={`rounded-xl border px-4 py-3 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+                          selectedPaymentMethod === "cash"
+                            ? "text-white"
+                            : "border-neutral-200 text-neutral-700 hover:border-blue-600 hover:text-blue-600"
+                        }`}
+                        style={
+                          selectedPaymentMethod === "cash"
+                            ? {
+                                backgroundColor: branding.accentColor,
+                                borderColor: branding.accentColor,
+                              }
+                            : undefined
+                        }
+                      >
+                        Cash
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onSelectPaymentMethod("card")}
+                        className={`rounded-xl border px-4 py-3 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+                          selectedPaymentMethod === "card"
+                            ? "text-white"
+                            : "border-neutral-200 text-neutral-700 hover:border-blue-600 hover:text-blue-600"
+                        }`}
+                        style={
+                          selectedPaymentMethod === "card"
+                            ? {
+                                backgroundColor: branding.accentColor,
+                                borderColor: branding.accentColor,
+                              }
+                            : undefined
+                        }
+                      >
+                        Card
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={onCompleteSale}
+                    disabled={!selectedPaymentMethod}
+                    className="w-full rounded-full bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Complete Sale
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={onCloseCheckout}
+                    className="w-full rounded-full border border-neutral-200 px-5 py-2.5 text-sm font-medium text-neutral-700 transition-colors hover:border-neutral-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>

@@ -48,6 +48,10 @@ export type CartSummary = {
   total: number;
 };
 
+export type PaymentMethod = "cash" | "card";
+
+export type CheckoutStatus = "idle" | "success";
+
 type TaxSettings = {
   enabled: boolean;
   rate: number;
@@ -179,6 +183,12 @@ export default function EditorShell({
 
   // Feature 7.2 — preview-only cart (never saved with the project)
   const [cart, setCart] = useState<CartItem[]>([]);
+
+  // Feature 7.3 — preview-only checkout (never saved with the project, no transactions persisted)
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<PaymentMethod | null>(null);
+  const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
 
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
@@ -342,6 +352,34 @@ export default function EditorShell({
     setCart([]);
   }
 
+  function openCheckout() {
+    if (cart.length === 0) {
+      return;
+    }
+    setCheckoutOpen(true);
+  }
+
+  function closeCheckout() {
+    setCheckoutOpen(false);
+    setSelectedPaymentMethod(null);
+    setCheckoutStatus("idle");
+  }
+
+  function selectPaymentMethod(method: PaymentMethod) {
+    setSelectedPaymentMethod(method);
+  }
+
+  function completeSale() {
+    if (!selectedPaymentMethod) {
+      return;
+    }
+
+    // Show the success state first — closing is a separate, explicit action
+    // (the "Done" button in the checkout panel) so the message stays visible.
+    setCheckoutStatus("success");
+    clearCart();
+  }
+
   async function handleSave() {
     setSaveStatus("saving");
     setSaveError(null);
@@ -410,6 +448,13 @@ export default function EditorShell({
           onDecreaseQuantity={decreaseQuantity}
           onRemoveFromCart={removeFromCart}
           onClearCart={clearCart}
+          checkoutOpen={checkoutOpen}
+          selectedPaymentMethod={selectedPaymentMethod}
+          checkoutStatus={checkoutStatus}
+          onOpenCheckout={openCheckout}
+          onCloseCheckout={closeCheckout}
+          onSelectPaymentMethod={selectPaymentMethod}
+          onCompleteSale={completeSale}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -426,6 +471,8 @@ export default function EditorShell({
           onReceiptChange={handleReceiptChange}
           editorMode={editorMode}
           cartSummary={cartSummary}
+          selectedPaymentMethod={selectedPaymentMethod}
+          checkoutStatus={checkoutStatus}
         />
       </div>
     </div>
