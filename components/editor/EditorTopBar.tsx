@@ -1,11 +1,13 @@
 import Link from "next/link";
-import type { SaveStatus } from "./EditorShell";
+import type { EditorMode, SaveStatus } from "./EditorShell";
 
 type EditorTopBarProps = {
   projectName: string;
   onSave: () => void;
   saveStatus: SaveStatus;
   saveError: string | null;
+  editorMode: EditorMode;
+  onToggleEditorMode: () => void;
 };
 
 const SAVE_BUTTON_LABEL: Record<SaveStatus, string> = {
@@ -20,6 +22,8 @@ export default function EditorTopBar({
   onSave,
   saveStatus,
   saveError,
+  editorMode,
+  onToggleEditorMode,
 }: EditorTopBarProps) {
   return (
     <header className="flex h-16 flex-none items-center justify-between border-b border-neutral-200 bg-white px-6">
@@ -41,9 +45,10 @@ export default function EditorTopBar({
       <div className="flex items-center gap-3">
         <button
           type="button"
+          onClick={onToggleEditorMode}
           className="rounded-full border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
         >
-          Preview
+          {editorMode === "edit" ? "Preview" : "Back to Edit"}
         </button>
 
         <div className="flex flex-col items-end gap-1">

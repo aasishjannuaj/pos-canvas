@@ -1,7 +1,7 @@
 "use client";
 
 import { MENU_CATEGORIES } from "./EditorShell";
-import type { Currency, MenuItem, ProjectConfig } from "./EditorShell";
+import type { Currency, EditorMode, MenuItem, ProjectConfig } from "./EditorShell";
 
 const currencySymbols: Record<Currency, string> = {
   USD: "$",
@@ -22,6 +22,7 @@ type EditorPreviewProps = {
   branding: ProjectConfig["branding"];
   tax: ProjectConfig["tax"];
   receipt: ProjectConfig["receipt"];
+  editorMode: EditorMode;
 };
 
 function calculateOrderSummary(tax: {
@@ -52,6 +53,7 @@ export default function EditorPreview({
   branding,
   tax,
   receipt,
+  editorMode,
 }: EditorPreviewProps) {
   const { subtotal, taxAmount, total } = calculateOrderSummary(tax);
 
@@ -60,7 +62,13 @@ export default function EditorPreview({
   const finalTotal = receipt.tipsEnabled ? total + STATIC_TIP : total;
 
   return (
-    <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-100 p-10">
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 overflow-auto bg-neutral-100 p-10">
+      {editorMode === "preview" && (
+        <span className="rounded-full bg-neutral-900/80 px-3 py-1 text-xs font-medium uppercase tracking-wide text-white">
+          Preview Mode
+        </span>
+      )}
+
       <div className="flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
         {/* POS Header */}
         <div
@@ -109,13 +117,18 @@ export default function EditorPreview({
 
                   <div className="grid grid-cols-2 gap-2">
                     {sectionItems.map((item) => {
-                      const isSelected = selectedItemId === item.id;
+                      const isSelected =
+                        editorMode === "edit" && selectedItemId === item.id;
 
                       return (
                         <button
                           key={item.id}
                           type="button"
-                          onClick={() => onSelect(item.id)}
+                          onClick={() => {
+                            if (editorMode === "edit") {
+                              onSelect(item.id);
+                            }
+                          }}
                           className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
                             isSelected
                               ? "text-white"

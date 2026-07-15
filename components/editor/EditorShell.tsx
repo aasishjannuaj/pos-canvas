@@ -24,6 +24,8 @@ export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
+export type EditorMode = "edit" | "preview";
+
 type TaxSettings = {
   enabled: boolean;
   rate: number;
@@ -113,6 +115,9 @@ export default function EditorShell({
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
 
+  // Feature 7.1 — edit/preview mode (UI-only, does not affect saved data)
+  const [editorMode, setEditorMode] = useState<EditorMode>("edit");
+
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
@@ -125,6 +130,10 @@ export default function EditorShell({
   // reverts the button back to "Save" — no autosave, just a status reset.
   function markUnsaved() {
     setSaveStatus((prev) => (prev === "saved" ? "idle" : prev));
+  }
+
+  function handleToggleEditorMode() {
+    setEditorMode((prev) => (prev === "edit" ? "preview" : "edit"));
   }
 
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
@@ -255,6 +264,8 @@ export default function EditorShell({
         onSave={handleSave}
         saveStatus={saveStatus}
         saveError={saveError}
+        editorMode={editorMode}
+        onToggleEditorMode={handleToggleEditorMode}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -269,6 +280,7 @@ export default function EditorShell({
           branding={projectConfig.branding}
           tax={projectConfig.tax}
           receipt={projectConfig.receipt}
+          editorMode={editorMode}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -283,6 +295,7 @@ export default function EditorShell({
           onTaxChange={handleTaxChange}
           receipt={projectConfig.receipt}
           onReceiptChange={handleReceiptChange}
+          editorMode={editorMode}
         />
       </div>
     </div>
