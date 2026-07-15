@@ -5,7 +5,7 @@ import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
-import { saveNewProject } from "@/lib/projects";
+import { saveNewProject, updateProject } from "@/lib/projects";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -113,7 +113,7 @@ export default function EditorShell({
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
 
-  // Feature 6.4/6.5.2 — save state
+  // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -121,7 +121,14 @@ export default function EditorShell({
   const selectedItem =
     projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
 
+  // Once a save has succeeded, any further edit to persisted project data
+  // reverts the button back to "Save" — no autosave, just a status reset.
+  function markUnsaved() {
+    setSaveStatus((prev) => (prev === "saved" ? "idle" : prev));
+  }
+
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
+    markUnsaved();
     setProjectConfig((prev) => ({
       ...prev,
       menuItems: prev.menuItems.map((item) =>
@@ -131,6 +138,8 @@ export default function EditorShell({
   }
 
   function handleAddItem() {
+    markUnsaved();
+
     const newItem: MenuItem = {
       id: createId(),
       name: "New Item",
@@ -150,6 +159,8 @@ export default function EditorShell({
       return;
     }
 
+    markUnsaved();
+
     const duplicatedItem: MenuItem = {
       ...selectedItem,
       id: createId(),
@@ -167,6 +178,8 @@ export default function EditorShell({
       return;
     }
 
+    markUnsaved();
+
     setProjectConfig((prev) => ({
       ...prev,
       menuItems: prev.menuItems.filter((item) => item.id !== selectedItem.id),
@@ -175,6 +188,7 @@ export default function EditorShell({
   }
 
   function handleBrandingChange(changes: Partial<BrandingSettings>) {
+    markUnsaved();
     setProjectConfig((prev) => ({
       ...prev,
       branding: { ...prev.branding, ...changes },
@@ -182,6 +196,7 @@ export default function EditorShell({
   }
 
   function handleTaxChange(changes: Partial<TaxSettings>) {
+    markUnsaved();
     setProjectConfig((prev) => ({
       ...prev,
       tax: { ...prev.tax, ...changes },
@@ -189,6 +204,7 @@ export default function EditorShell({
   }
 
   function handleReceiptChange(changes: Partial<ReceiptSettings>) {
+    markUnsaved();
     setProjectConfig((prev) => ({
       ...prev,
       receipt: { ...prev.receipt, ...changes },
@@ -196,19 +212,30 @@ export default function EditorShell({
   }
 
   async function handleSave() {
-    // Updating an existing project isn't implemented yet — a second click
-    // after a successful save (or opening an already-saved project) is a
-    // no-op rather than a dead-end.
-    if (projectId !== null) {
-      return;
-    }
-
     setSaveStatus("saving");
     setSaveError(null);
 
-    const { project, error } = await saveNewProject({
+    if (projectId === null) {
+      const { project, error } = await saveNewProject({
+        name: projectName,
+        templateId,
+        config: projectConfig,
+      });
+
+      if (error || !project) {
+        setSaveStatus("error");
+        setSaveError(error ?? "Something went wrong while saving.");
+        return;
+      }
+
+      setProjectId(project.id);
+      setSaveStatus("saved");
+      return;
+    }
+
+    const { project, error } = await updateProject({
+      projectId,
       name: projectName,
-      templateId,
       config: projectConfig,
     });
 
@@ -218,7 +245,6 @@ export default function EditorShell({
       return;
     }
 
-    setProjectId(project.id);
     setSaveStatus("saved");
   }
 

@@ -44,6 +44,49 @@ export async function saveNewProject({
   return { project: data, error: null };
 }
 
+type UpdateProjectInput = {
+  projectId: string;
+  name: string;
+  config: ProjectConfig;
+};
+
+export async function updateProject({
+  projectId,
+  name,
+  config,
+}: UpdateProjectInput) {
+  const supabase = createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return {
+      project: null,
+      error: "You must be signed in to update a project.",
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("projects")
+    .update({
+      name,
+      config,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", projectId)
+    .select()
+    .single();
+
+  if (error) {
+    return { project: null, error: error.message };
+  }
+
+  return { project: data, error: null };
+}
+
 export type SavedProject = {
   id: string;
   name: string;
