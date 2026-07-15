@@ -16,6 +16,8 @@ export type MenuItem = {
   name: string;
   price: number;
   category: MenuCategory;
+  trackInventory: boolean;
+  stockQuantity: number;
 };
 
 export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
@@ -91,16 +93,86 @@ export type ProjectConfig = {
 };
 
 const initialMenuItems: MenuItem[] = [
-  { id: "1", name: "Bacon Egg & Cheese", price: 6.49, category: "Breakfast" },
-  { id: "2", name: "Egg & Cheese", price: 4.99, category: "Breakfast" },
-  { id: "3", name: "Hash Browns", price: 2.49, category: "Breakfast" },
-  { id: "4", name: "Coffee", price: 2.25, category: "Breakfast" },
-  { id: "5", name: "Turkey Grinder", price: 8.95, category: "Lunch" },
-  { id: "6", name: "Roast Beef", price: 9.25, category: "Lunch" },
-  { id: "7", name: "Chicken Grinder", price: 8.75, category: "Lunch" },
-  { id: "8", name: "Coke", price: 1.99, category: "Drinks" },
-  { id: "9", name: "Sprite", price: 1.99, category: "Drinks" },
-  { id: "10", name: "Water", price: 1.49, category: "Drinks" },
+  {
+    id: "1",
+    name: "Bacon Egg & Cheese",
+    price: 6.49,
+    category: "Breakfast",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "2",
+    name: "Egg & Cheese",
+    price: 4.99,
+    category: "Breakfast",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "3",
+    name: "Hash Browns",
+    price: 2.49,
+    category: "Breakfast",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "4",
+    name: "Coffee",
+    price: 2.25,
+    category: "Breakfast",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "5",
+    name: "Turkey Grinder",
+    price: 8.95,
+    category: "Lunch",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "6",
+    name: "Roast Beef",
+    price: 9.25,
+    category: "Lunch",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "7",
+    name: "Chicken Grinder",
+    price: 8.75,
+    category: "Lunch",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "8",
+    name: "Coke",
+    price: 1.99,
+    category: "Drinks",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "9",
+    name: "Sprite",
+    price: 1.99,
+    category: "Drinks",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
+  {
+    id: "10",
+    name: "Water",
+    price: 1.49,
+    category: "Drinks",
+    trackInventory: true,
+    stockQuantity: 20,
+  },
 ];
 
 const initialProjectConfig: ProjectConfig = {
@@ -160,6 +232,27 @@ function calculateCartSummary(
   };
 }
 
+// Feature 7.5 — normalize menu items loaded from older saved projects that
+// predate stockQuantity/trackInventory, so the app never crashes on missing fields.
+function normalizeMenuItem(item: MenuItem): MenuItem {
+  return {
+    ...item,
+    trackInventory:
+      typeof item.trackInventory === "boolean" ? item.trackInventory : false,
+    stockQuantity:
+      typeof item.stockQuantity === "number" && Number.isFinite(item.stockQuantity)
+        ? item.stockQuantity
+        : 0,
+  };
+}
+
+function normalizeProjectConfig(config: ProjectConfig): ProjectConfig {
+  return {
+    ...config,
+    menuItems: config.menuItems.map(normalizeMenuItem),
+  };
+}
+
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -182,8 +275,8 @@ export default function EditorShell({
   initialConfig,
   initialProjectId,
 }: EditorShellProps) {
-  const [projectConfig, setProjectConfig] = useState<ProjectConfig>(
-    initialConfig ?? initialProjectConfig
+  const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
+    normalizeProjectConfig(initialConfig ?? initialProjectConfig)
   );
 
   // UI-only state — not part of the saved project, so it stays outside projectConfig.
@@ -232,12 +325,41 @@ export default function EditorShell({
 
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
     markUnsaved();
+
     setProjectConfig((prev) => ({
       ...prev,
       menuItems: prev.menuItems.map((item) =>
         item.id === id ? { ...item, ...changes } : item
       ),
     }));
+
+    // Feature 7.5 — if inventory fields changed, clamp/remove any cart
+    // quantity that now exceeds the new stock level (simple, no extra effects).
+    if ("stockQuantity" in changes || "trackInventory" in changes) {
+      setCart((prev) => {
+        const oldItem = projectConfig.menuItems.find((item) => item.id === id);
+        if (!oldItem) {
+          return prev;
+        }
+
+        const updatedItem: MenuItem = { ...oldItem, ...changes };
+
+        if (!updatedItem.trackInventory) {
+          return prev;
+        }
+
+        return prev
+          .map((cartItem) =>
+            cartItem.itemId === id
+              ? {
+                  ...cartItem,
+                  quantity: Math.min(cartItem.quantity, updatedItem.stockQuantity),
+                }
+              : cartItem
+          )
+          .filter((cartItem) => cartItem.quantity > 0);
+      });
+    }
   }
 
   function handleAddItem() {
@@ -248,6 +370,8 @@ export default function EditorShell({
       name: "New Item",
       price: 0,
       category: "Breakfast",
+      trackInventory: true,
+      stockQuantity: 0,
     };
 
     setProjectConfig((prev) => ({
@@ -317,6 +441,12 @@ export default function EditorShell({
   function addToCart(menuItem: MenuItem) {
     setCart((prev) => {
       const existing = prev.find((cartItem) => cartItem.itemId === menuItem.id);
+      const currentQuantity = existing?.quantity ?? 0;
+
+      if (menuItem.trackInventory && currentQuantity >= menuItem.stockQuantity) {
+        // Already at (or beyond) available stock — do nothing.
+        return prev;
+      }
 
       if (existing) {
         return prev.map((cartItem) =>
@@ -340,11 +470,19 @@ export default function EditorShell({
 
   function increaseQuantity(itemId: string) {
     setCart((prev) =>
-      prev.map((cartItem) =>
-        cartItem.itemId === itemId
-          ? { ...cartItem, quantity: cartItem.quantity + 1 }
-          : cartItem
-      )
+      prev.map((cartItem) => {
+        if (cartItem.itemId !== itemId) {
+          return cartItem;
+        }
+
+        const menuItem = projectConfig.menuItems.find((item) => item.id === itemId);
+
+        if (menuItem?.trackInventory && cartItem.quantity >= menuItem.stockQuantity) {
+          return cartItem;
+        }
+
+        return { ...cartItem, quantity: cartItem.quantity + 1 };
+      })
     );
   }
 
@@ -403,6 +541,27 @@ export default function EditorShell({
     };
 
     setCompletedOrders((prev) => [...prev, order]);
+
+    // Feature 7.5 — deduct sold quantities from tracked inventory, floored at 0.
+    markUnsaved();
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) => {
+        if (!item.trackInventory) {
+          return item;
+        }
+
+        const soldItem = cart.find((cartItem) => cartItem.itemId === item.id);
+        if (!soldItem) {
+          return item;
+        }
+
+        return {
+          ...item,
+          stockQuantity: Math.max(0, item.stockQuantity - soldItem.quantity),
+        };
+      }),
+    }));
 
     // Show the success state first — closing is a separate, explicit action
     // (the "Done" button in the checkout panel) so the message stays visible.

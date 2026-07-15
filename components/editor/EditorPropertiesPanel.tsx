@@ -243,6 +243,44 @@ export default function EditorPropertiesPanel({
                       ))}
                     </select>
                   </div>
+
+                  <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">
+                    <span className="text-sm font-medium text-neutral-900">
+                      Track Inventory
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={selectedItem.trackInventory}
+                      onChange={(event) =>
+                        onUpdate(selectedItem.id, {
+                          trackInventory: event.target.checked,
+                        })
+                      }
+                      className="h-4 w-4 cursor-pointer accent-blue-600"
+                    />
+                  </label>
+
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Stock Quantity
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={selectedItem.stockQuantity}
+                      disabled={!selectedItem.trackInventory}
+                      onChange={(event) =>
+                        onUpdate(selectedItem.id, {
+                          stockQuantity: Math.max(
+                            0,
+                            Math.floor(Number(event.target.value) || 0)
+                          ),
+                        })
+                      }
+                      className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
+                    />
+                  </div>
                 </div>
               ) : (
                 <div className="mt-4 flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">

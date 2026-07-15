@@ -82,6 +82,18 @@ function formatReceiptDateTime(createdAt: string): string {
   });
 }
 
+function getStockLabel(item: MenuItem): string {
+  if (!item.trackInventory) {
+    return "Inventory off";
+  }
+
+  if (item.stockQuantity <= 0) {
+    return "Out of stock";
+  }
+
+  return `Stock: ${item.stockQuantity}`;
+}
+
 export default function EditorPreview({
   menuItems,
   selectedItemId,
@@ -180,15 +192,20 @@ export default function EditorPreview({
                     {sectionItems.map((item) => {
                       const isSelected =
                         editorMode === "edit" && selectedItemId === item.id;
+                      const isOutOfStock =
+                        editorMode === "preview" &&
+                        item.trackInventory &&
+                        item.stockQuantity <= 0;
 
                       return (
                         <button
                           key={item.id}
                           type="button"
+                          disabled={isOutOfStock}
                           onClick={() => {
                             if (editorMode === "edit") {
                               onSelect(item.id);
-                            } else {
+                            } else if (!isOutOfStock) {
                               onAddToCart(item);
                             }
                           }}
@@ -196,7 +213,7 @@ export default function EditorPreview({
                             isSelected
                               ? "text-white"
                               : "border-neutral-200 bg-neutral-50 hover:border-neutral-300"
-                          }`}
+                          } ${isOutOfStock ? "cursor-not-allowed opacity-40" : ""}`}
                           style={
                             isSelected
                               ? {
@@ -222,6 +239,11 @@ export default function EditorPreview({
                             {currencySymbol}
                             {item.price.toFixed(2)}
                           </span>
+                          {editorMode === "edit" && (
+                            <span className="text-[10px] font-normal text-neutral-400">
+                              {getStockLabel(item)}
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -257,52 +279,64 @@ export default function EditorPreview({
               </div>
             ) : (
               <div className="mb-2 flex max-h-28 flex-col gap-2 overflow-y-auto">
-                {cart.map((cartItem) => (
-                  <div
-                    key={cartItem.itemId}
-                    className="flex items-center justify-between gap-2 text-xs text-neutral-600"
-                  >
-                    <span className="flex-1 truncate text-neutral-900">
-                      {cartItem.name}
-                    </span>
+                {cart.map((cartItem) => {
+                  const menuItem = menuItems.find(
+                    (item) => item.id === cartItem.itemId
+                  );
+                  const atStockLimit =
+                    !!menuItem?.trackInventory &&
+                    cartItem.quantity >= menuItem.stockQuantity;
 
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onDecreaseQuantity(cartItem.itemId)}
-                        aria-label={`Decrease ${cartItem.name} quantity`}
-                        className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                      >
-                        −
-                      </button>
-                      <span className="w-4 text-center text-neutral-900">
-                        {cartItem.quantity}
+                  return (
+                    <div
+                      key={cartItem.itemId}
+                      className="flex items-center justify-between gap-2 text-xs text-neutral-600"
+                    >
+                      <span className="flex-1 truncate text-neutral-900">
+                        {cartItem.name}
                       </span>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onDecreaseQuantity(cartItem.itemId)}
+                          aria-label={`Decrease ${cartItem.name} quantity`}
+                          className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                        >
+                          −
+                        </button>
+                        <span className="w-4 text-center text-neutral-900">
+                          {cartItem.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onIncreaseQuantity(cartItem.itemId)}
+                          disabled={atStockLimit}
+                          aria-label={`Increase ${cartItem.name} quantity`}
+                          className={`flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
+                            atStockLimit ? "cursor-not-allowed opacity-40" : ""
+                          }`}
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      <span className="w-12 text-right font-medium text-neutral-900">
+                        {currencySymbol}
+                        {(cartItem.price * cartItem.quantity).toFixed(2)}
+                      </span>
+
                       <button
                         type="button"
-                        onClick={() => onIncreaseQuantity(cartItem.itemId)}
-                        aria-label={`Increase ${cartItem.name} quantity`}
-                        className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                        onClick={() => onRemoveFromCart(cartItem.itemId)}
+                        aria-label={`Remove ${cartItem.name} from cart`}
+                        className="text-neutral-400 transition-colors hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                       >
-                        +
+                        ×
                       </button>
                     </div>
-
-                    <span className="w-12 text-right font-medium text-neutral-900">
-                      {currencySymbol}
-                      {(cartItem.price * cartItem.quantity).toFixed(2)}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={() => onRemoveFromCart(cartItem.itemId)}
-                      aria-label={`Remove ${cartItem.name} from cart`}
-                      className="text-neutral-400 transition-colors hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
