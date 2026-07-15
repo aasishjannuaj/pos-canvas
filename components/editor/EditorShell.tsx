@@ -5,6 +5,7 @@ import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
+import { saveNewProject } from "@/lib/projects";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -20,6 +21,8 @@ export type MenuItem = {
 export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
+
+export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 type TaxSettings = {
   enabled: boolean;
@@ -91,14 +94,20 @@ function createId(): string {
 
 type EditorShellProps = {
   projectName: string;
+  templateId: string;
 };
 
-export default function EditorShell({ projectName }: EditorShellProps) {
+export default function EditorShell({ projectName, templateId }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(initialProjectConfig);
 
   // UI-only state — not part of the saved project, so it stays outside projectConfig.
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
+
+  // Feature 6.4 — save state
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const selectedItem =
     projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
@@ -177,9 +186,40 @@ export default function EditorShell({ projectName }: EditorShellProps) {
     }));
   }
 
+  async function handleSave() {
+    // Updating an existing project isn't implemented yet — a second click
+    // after a successful save is a no-op rather than a dead-end.
+    if (projectId !== null) {
+      return;
+    }
+
+    setSaveStatus("saving");
+    setSaveError(null);
+
+    const { project, error } = await saveNewProject({
+      name: projectName,
+      templateId,
+      config: projectConfig,
+    });
+
+    if (error || !project) {
+      setSaveStatus("error");
+      setSaveError(error ?? "Something went wrong while saving.");
+      return;
+    }
+
+    setProjectId(project.id);
+    setSaveStatus("saved");
+  }
+
   return (
     <div className="flex h-screen flex-col bg-neutral-50">
-      <EditorTopBar projectName={projectName} />
+      <EditorTopBar
+        projectName={projectName}
+        onSave={handleSave}
+        saveStatus={saveStatus}
+        saveError={saveError}
+      />
 
       <div className="flex flex-1 overflow-hidden">
         <EditorSidebar

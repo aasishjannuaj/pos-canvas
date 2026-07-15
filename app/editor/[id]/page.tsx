@@ -24,5 +24,5 @@ export default async function EditorPage({
   const { id } = await params;
   const projectName = projectNames[id] ?? formatFallbackName(id);
 
-  return <EditorShell projectName={projectName} />;
+  return <EditorShell projectName={projectName} templateId={id} />;
 }

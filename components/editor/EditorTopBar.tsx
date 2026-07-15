@@ -1,10 +1,26 @@
 import Link from "next/link";
+import type { SaveStatus } from "./EditorShell";
 
 type EditorTopBarProps = {
   projectName: string;
+  onSave: () => void;
+  saveStatus: SaveStatus;
+  saveError: string | null;
 };
 
-export default function EditorTopBar({ projectName }: EditorTopBarProps) {
+const SAVE_BUTTON_LABEL: Record<SaveStatus, string> = {
+  idle: "Save",
+  saving: "Saving...",
+  saved: "Saved",
+  error: "Try Again",
+};
+
+export default function EditorTopBar({
+  projectName,
+  onSave,
+  saveStatus,
+  saveError,
+}: EditorTopBarProps) {
   return (
     <header className="flex h-16 flex-none items-center justify-between border-b border-neutral-200 bg-white px-6">
       <div className="flex items-center gap-4">
@@ -30,12 +46,18 @@ export default function EditorTopBar({ projectName }: EditorTopBarProps) {
           Preview
         </button>
 
-        <button
-          type="button"
-          className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-        >
-          Save
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saveStatus === "saving"}
+            className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {SAVE_BUTTON_LABEL[saveStatus]}
+          </button>
+
+          {saveError && <span className="text-xs text-red-600">{saveError}</span>}
+        </div>
       </div>
     </header>
   );
