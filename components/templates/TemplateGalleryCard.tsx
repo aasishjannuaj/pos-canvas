@@ -21,7 +21,7 @@ export default function TemplateGalleryCard({
 
   return (
     <Link
-      href={`/templates/${templateId}`}
+      href={`/editor/${templateId}`}
       className="group flex flex-col gap-4 rounded-2xl border border-neutral-200 bg-white p-6 transition-all hover:-translate-y-1 hover:shadow-lg hover:shadow-neutral-200/60"
     >
       <div className="flex items-center justify-between">

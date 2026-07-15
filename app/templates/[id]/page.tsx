@@ -131,7 +131,7 @@ export default async function TemplateDetailPage({
             </div>
 
             <div className="lg:col-span-1">
-              <TemplateActionPanel />
+              <TemplateActionPanel templateId={id} />
             </div>
           </div>
         </div>

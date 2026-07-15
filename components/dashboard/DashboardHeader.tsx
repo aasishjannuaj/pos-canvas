@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "@/lib/supabase/auth";
 
@@ -23,12 +24,12 @@ export default function DashboardHeader() {
       </div>
 
       <div className="flex items-center gap-4">
-        <button
-          type="button"
+        <Link
+          href="/templates"
           className="rounded-full bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
         >
           New Project
-        </button>
+        </Link>
 
         <button
           type="button"
