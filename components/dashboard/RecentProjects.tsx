@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { SavedProject } from "@/lib/projects";
 
 type RecentProjectsProps = {
@@ -51,9 +52,10 @@ export default function RecentProjects({ projects }: RecentProjectsProps) {
       ) : (
         <div className="grid grid-cols-2 gap-5 md:grid-cols-4">
           {visibleProjects.map((project, index) => (
-            <div
+            <Link
               key={project.id}
-              className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-3 transition-shadow hover:shadow-md"
+              href={`/editor/project-${project.id}`}
+              className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-3 transition-shadow hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
             >
               <div
                 className={`aspect-video w-full rounded-xl ${
@@ -70,7 +72,7 @@ export default function RecentProjects({ projects }: RecentProjectsProps) {
                   {formatUpdatedAt(project.updated_at)}
                 </span>
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       )}

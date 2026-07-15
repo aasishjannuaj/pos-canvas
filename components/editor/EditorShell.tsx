@@ -95,17 +95,26 @@ function createId(): string {
 type EditorShellProps = {
   projectName: string;
   templateId: string;
+  initialConfig?: ProjectConfig;
+  initialProjectId?: string | null;
 };
 
-export default function EditorShell({ projectName, templateId }: EditorShellProps) {
-  const [projectConfig, setProjectConfig] = useState<ProjectConfig>(initialProjectConfig);
+export default function EditorShell({
+  projectName,
+  templateId,
+  initialConfig,
+  initialProjectId,
+}: EditorShellProps) {
+  const [projectConfig, setProjectConfig] = useState<ProjectConfig>(
+    initialConfig ?? initialProjectConfig
+  );
 
   // UI-only state — not part of the saved project, so it stays outside projectConfig.
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [editorSection, setEditorSection] = useState<EditorSection>("Menu");
 
-  // Feature 6.4 — save state
-  const [projectId, setProjectId] = useState<string | null>(null);
+  // Feature 6.4/6.5.2 — save state
+  const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -188,7 +197,8 @@ export default function EditorShell({ projectName, templateId }: EditorShellProp
 
   async function handleSave() {
     // Updating an existing project isn't implemented yet — a second click
-    // after a successful save is a no-op rather than a dead-end.
+    // after a successful save (or opening an already-saved project) is a
+    // no-op rather than a dead-end.
     if (projectId !== null) {
       return;
     }

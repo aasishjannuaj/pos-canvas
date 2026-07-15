@@ -31,4 +31,33 @@ export async function getUserProjects(): Promise<{
   return { projects: data ?? [], error: null };
 }
 
+export async function getProjectById(projectId: string): Promise<{
+  project: SavedProject | null;
+  error: string | null;
+}> {
+  const supabase = await createClient();
+
+  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+  const claims = claimsData?.claims ?? null;
+
+  if (claimsError || !claims) {
+    return {
+      project: null,
+      error: "You must be signed in to view this project.",
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("projects")
+    .select("id, name, template_id, config, created_at, updated_at")
+    .eq("id", projectId)
+    .single();
+
+  if (error) {
+    return { project: null, error: error.message };
+  }
+
+  return { project: data, error: null };
+}
+
 export type { SavedProject };
