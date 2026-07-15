@@ -4,6 +4,7 @@ import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
 import type {
   CartSummary,
   CheckoutStatus,
+  CompletedOrder,
   Currency,
   EditorMode,
   EditorSection,
@@ -32,6 +33,7 @@ type EditorPropertiesPanelProps = {
   cartSummary: CartSummary;
   selectedPaymentMethod: PaymentMethod | null;
   checkoutStatus: CheckoutStatus;
+  completedOrders: CompletedOrder[];
 };
 
 export default function EditorPropertiesPanel({
@@ -51,8 +53,10 @@ export default function EditorPropertiesPanel({
   cartSummary,
   selectedPaymentMethod,
   checkoutStatus,
+  completedOrders,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
+  const latestOrder = completedOrders[completedOrders.length - 1] ?? null;
 
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -118,6 +122,34 @@ export default function EditorPropertiesPanel({
               )}
             </div>
           )}
+
+          <div className="flex flex-col gap-2 border-t border-neutral-200 pt-4 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-neutral-600">Completed Orders</span>
+              <span className="font-medium text-neutral-900">
+                {completedOrders.length}
+              </span>
+            </div>
+
+            {latestOrder && (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-neutral-600">Latest Order</span>
+                  <span className="font-medium text-neutral-900">
+                    {latestOrder.orderNumber}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-neutral-600">Latest Total</span>
+                  <span className="font-medium text-neutral-900">
+                    {currencySymbol}
+                    {latestOrder.total.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
         </>
       ) : (
         <>

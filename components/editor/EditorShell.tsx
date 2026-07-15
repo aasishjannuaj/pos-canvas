@@ -52,6 +52,18 @@ export type PaymentMethod = "cash" | "card";
 
 export type CheckoutStatus = "idle" | "success";
 
+export type CompletedOrder = {
+  id: string;
+  orderNumber: string;
+  items: CartItem[];
+  subtotal: number;
+  taxAmount: number;
+  tip: number;
+  total: number;
+  paymentMethod: PaymentMethod;
+  createdAt: string;
+};
+
 type TaxSettings = {
   enabled: boolean;
   rate: number;
@@ -189,6 +201,10 @@ export default function EditorShell({
   const [selectedPaymentMethod, setSelectedPaymentMethod] =
     useState<PaymentMethod | null>(null);
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
+
+  // Feature 7.4 — completed orders & receipts (preview-only, not persisted yet)
+  const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>([]);
+  const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
@@ -374,10 +390,32 @@ export default function EditorShell({
       return;
     }
 
+    const order: CompletedOrder = {
+      id: createId(),
+      orderNumber: `${projectConfig.receipt.orderPrefix}${1001 + completedOrders.length}`,
+      items: [...cart],
+      subtotal: cartSummary.subtotal,
+      taxAmount: cartSummary.taxAmount,
+      tip: cartSummary.tip,
+      total: cartSummary.total,
+      paymentMethod: selectedPaymentMethod,
+      createdAt: new Date().toISOString(),
+    };
+
+    setCompletedOrders((prev) => [...prev, order]);
+
     // Show the success state first — closing is a separate, explicit action
     // (the "Done" button in the checkout panel) so the message stays visible.
     setCheckoutStatus("success");
     clearCart();
+  }
+
+  function openReceipt(orderId: string) {
+    setSelectedReceiptId(orderId);
+  }
+
+  function closeReceipt() {
+    setSelectedReceiptId(null);
   }
 
   async function handleSave() {
@@ -455,6 +493,10 @@ export default function EditorShell({
           onCloseCheckout={closeCheckout}
           onSelectPaymentMethod={selectPaymentMethod}
           onCompleteSale={completeSale}
+          completedOrders={completedOrders}
+          selectedReceiptId={selectedReceiptId}
+          onOpenReceipt={openReceipt}
+          onCloseReceipt={closeReceipt}
         />
         <EditorPropertiesPanel
           editorSection={editorSection}
@@ -473,6 +515,7 @@ export default function EditorShell({
           cartSummary={cartSummary}
           selectedPaymentMethod={selectedPaymentMethod}
           checkoutStatus={checkoutStatus}
+          completedOrders={completedOrders}
         />
       </div>
     </div>

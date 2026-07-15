@@ -5,6 +5,7 @@ import type {
   CartItem,
   CartSummary,
   CheckoutStatus,
+  CompletedOrder,
   EditorMode,
   MenuItem,
   PaymentMethod,
@@ -37,6 +38,10 @@ type EditorPreviewProps = {
   onCloseCheckout: () => void;
   onSelectPaymentMethod: (method: PaymentMethod) => void;
   onCompleteSale: () => void;
+  completedOrders: CompletedOrder[];
+  selectedReceiptId: string | null;
+  onOpenReceipt: (orderId: string) => void;
+  onCloseReceipt: () => void;
 };
 
 function calculateOrderSummary(tax: {
@@ -58,6 +63,23 @@ function calculateOrderSummary(tax: {
 
   const taxAmount = subtotal * (safeRate / 100);
   return { subtotal, taxAmount, total: subtotal + taxAmount };
+}
+
+function formatOrderTime(createdAt: string): string {
+  return new Date(createdAt).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatReceiptDateTime(createdAt: string): string {
+  return new Date(createdAt).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export default function EditorPreview({
@@ -82,6 +104,10 @@ export default function EditorPreview({
   onCloseCheckout,
   onSelectPaymentMethod,
   onCompleteSale,
+  completedOrders,
+  selectedReceiptId,
+  onOpenReceipt,
+  onCloseReceipt,
 }: EditorPreviewProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
@@ -91,6 +117,10 @@ export default function EditorPreview({
   const editModeFinalTotal = receipt.tipsEnabled
     ? editModeSummary.total + STATIC_TIP
     : editModeSummary.total;
+
+  const recentOrders = completedOrders.slice(-5).reverse();
+  const selectedOrder =
+    completedOrders.find((order) => order.id === selectedReceiptId) ?? null;
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 overflow-auto bg-neutral-100 p-10">
@@ -326,6 +356,39 @@ export default function EditorPreview({
             <p className="mt-2 text-center text-[11px] text-neutral-400">
               {receipt.footer}
             </p>
+
+            {completedOrders.length > 0 && (
+              <div className="mt-3 border-t border-neutral-200 pt-3">
+                <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+                  Recent Orders
+                </p>
+
+                <div className="flex max-h-24 flex-col gap-1 overflow-y-auto">
+                  {recentOrders.map((order) => (
+                    <button
+                      key={order.id}
+                      type="button"
+                      onClick={() => onOpenReceipt(order.id)}
+                      className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-neutral-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      <span className="font-medium text-neutral-900">
+                        {order.orderNumber}
+                      </span>
+                      <span className="text-neutral-500">
+                        {order.paymentMethod === "cash" ? "Cash" : "Card"}
+                      </span>
+                      <span className="text-neutral-400">
+                        {formatOrderTime(order.createdAt)}
+                      </span>
+                      <span className="font-medium text-neutral-900">
+                        {currencySymbol}
+                        {order.total.toFixed(2)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex-none border-t border-neutral-200 bg-neutral-50 px-4 py-3">
@@ -478,6 +541,107 @@ export default function EditorPreview({
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* Receipt preview overlay */}
+        {editorMode === "preview" && selectedOrder && (
+          <div className="absolute inset-0 z-10 flex flex-col bg-white p-4">
+            <div className="flex-1 overflow-y-auto">
+              <div className="flex flex-col items-center gap-1 border-b border-neutral-200 pb-3 text-center">
+                <p className="text-sm font-semibold text-neutral-900">
+                  {branding.businessName}
+                </p>
+                <p className="text-xs text-neutral-500">{selectedOrder.orderNumber}</p>
+                <p className="text-xs text-neutral-400">
+                  {formatReceiptDateTime(selectedOrder.createdAt)}
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-1.5 py-3">
+                {selectedOrder.items.map((item) => (
+                  <div
+                    key={item.itemId}
+                    className="flex items-center justify-between text-xs text-neutral-600"
+                  >
+                    <span className="flex-1 truncate text-neutral-900">
+                      {item.quantity} × {item.name}
+                    </span>
+                    <span className="font-medium text-neutral-900">
+                      {currencySymbol}
+                      {(item.price * item.quantity).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-col gap-1 border-t border-neutral-200 pt-2 text-xs text-neutral-600">
+                <div className="flex items-center justify-between">
+                  <span>Subtotal</span>
+                  <span>
+                    {currencySymbol}
+                    {selectedOrder.subtotal.toFixed(2)}
+                  </span>
+                </div>
+
+                {selectedOrder.taxAmount > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span>Tax</span>
+                    <span>
+                      {currencySymbol}
+                      {selectedOrder.taxAmount.toFixed(2)}
+                    </span>
+                  </div>
+                )}
+
+                {selectedOrder.tip > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span>Tip</span>
+                    <span>
+                      {currencySymbol}
+                      {selectedOrder.tip.toFixed(2)}
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
+                  <span>Total</span>
+                  <span>
+                    {currencySymbol}
+                    {selectedOrder.total.toFixed(2)}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span>Payment</span>
+                  <span className="font-medium text-neutral-900">
+                    {selectedOrder.paymentMethod === "cash" ? "Cash" : "Card"}
+                  </span>
+                </div>
+              </div>
+
+              <p className="mt-3 text-center text-[11px] text-neutral-400">
+                {receipt.footer}
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-3">
+              <button
+                type="button"
+                disabled
+                className="w-full cursor-not-allowed rounded-full border border-neutral-200 px-5 py-2.5 text-sm font-medium text-neutral-400"
+              >
+                Print Receipt (coming soon)
+              </button>
+
+              <button
+                type="button"
+                onClick={onCloseReceipt}
+                className="w-full rounded-full bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+              >
+                Close
+              </button>
+            </div>
           </div>
         )}
       </div>
