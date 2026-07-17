@@ -135,7 +135,10 @@ export default function EditorPreview({
     ? editModeSummary.total + STATIC_TIP
     : editModeSummary.total;
 
-  const recentOrders = completedOrders.slice(-5).reverse();
+  // Feature 8.4 — completedOrders is now newest-first (loaded history is
+  // queried that way, and new sales are prepended), so the first 5 entries
+  // already are the 5 most recent orders.
+  const recentOrders = completedOrders.slice(0, 5);
   const selectedOrder =
     completedOrders.find((order) => order.id === selectedReceiptId) ?? null;
 

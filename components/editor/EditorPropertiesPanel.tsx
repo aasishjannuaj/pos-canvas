@@ -56,7 +56,10 @@ export default function EditorPropertiesPanel({
   completedOrders,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
-  const latestOrder = completedOrders[completedOrders.length - 1] ?? null;
+  // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
+  // order (previously this read the last array element, back when new
+  // orders were appended rather than prepended).
+  const latestOrder = completedOrders[0] ?? null;
 
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">

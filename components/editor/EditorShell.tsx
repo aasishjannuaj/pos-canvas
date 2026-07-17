@@ -270,6 +270,7 @@ type EditorShellProps = {
   templateId: string;
   initialConfig?: ProjectConfig;
   initialProjectId?: string | null;
+  initialCompletedOrders?: CompletedOrder[];
 };
 
 export default function EditorShell({
@@ -277,6 +278,7 @@ export default function EditorShell({
   templateId,
   initialConfig,
   initialProjectId,
+  initialCompletedOrders,
 }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
     normalizeProjectConfig(initialConfig ?? initialProjectConfig)
@@ -302,8 +304,12 @@ export default function EditorShell({
   const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
   const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
 
-  // Feature 7.4 — completed orders & receipts (local cache; now backed by the DB via 8.3)
-  const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>([]);
+  // Feature 7.4/8.4 — completed orders & receipts. Seeded from server-loaded
+  // history when available (newest first); new sales are prepended so the
+  // ordering convention stays consistent throughout.
+  const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>(
+    initialCompletedOrders ?? []
+  );
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
   // Feature 6.4/6.5.2/6.5.3 — save state
@@ -590,7 +596,8 @@ export default function EditorShell({
       createdAt: new Date().toISOString(),
     };
 
-    setCompletedOrders((prev) => [...prev, order]);
+    // Feature 8.4 — newest orders stay first; prepend rather than append.
+    setCompletedOrders((prev) => [order, ...prev]);
 
     // Deduct sold quantities from tracked inventory, floored at 0 — only
     // now that the sale is actually persisted.

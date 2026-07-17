@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import EditorShell from "@/components/editor/EditorShell";
 import { getProjectById } from "@/lib/projects.server";
+import { getProjectOrders } from "@/lib/orders.server";
 import type { ProjectConfig } from "@/components/editor/EditorShell";
 
 const projectNames: Record<string, string> = {
@@ -58,12 +59,18 @@ export default async function EditorPage({
       ? project.config
       : undefined;
 
+    // Order history loading is independent of the project lookup above —
+    // a failure here should never turn a valid project into a 404, it
+    // just means the editor opens with an empty order list.
+    const { orders } = await getProjectOrders(project.id);
+
     return (
       <EditorShell
         projectName={project.name}
         templateId={project.template_id}
         initialConfig={initialConfig}
         initialProjectId={project.id}
+        initialCompletedOrders={orders}
       />
     );
   }
