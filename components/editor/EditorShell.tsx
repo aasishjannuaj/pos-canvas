@@ -5,7 +5,7 @@ import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
-import { saveNewProject, updateProject } from "@/lib/projects";
+import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
 import { completeSaleOrder } from "@/lib/orders";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
@@ -300,7 +300,10 @@ export default function EditorShell({
     useState<PaymentMethod | null>(null);
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
 
-  // Feature 8.3 — persistence status for the current checkout attempt
+  // Feature 8.3/9.3 — persistence status for the current checkout attempt.
+  // After a successful sale, saleSaveError may hold a non-blocking inventory
+  // refresh WARNING even while saleSaveStatus stays "success" — it is not
+  // reused to mean "the sale failed" in that case.
   const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
   const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
 
@@ -577,13 +580,16 @@ export default function EditorShell({
     });
 
     if (error || !orderId) {
-      // Nothing local changes on failure — cart, inventory, and
-      // completedOrders are untouched so the cashier can just retry.
+      // RPC failed — the sale did not happen. Nothing local changes, so the
+      // cashier can safely retry: cart, checkout, and inventory are untouched.
       setSaleSaveStatus("error");
       setSaleSaveError(error ?? "Something went wrong while completing the sale.");
       return;
     }
 
+    // RPC succeeded — the sale is now real. complete_sale (9.2) already
+    // validated and deducted inventory and recorded inventory_transactions
+    // atomically; the client does none of that math anymore.
     const order: CompletedOrder = {
       id: orderId,
       orderNumber,
@@ -596,36 +602,52 @@ export default function EditorShell({
       createdAt: new Date().toISOString(),
     };
 
-    // Feature 8.4 — newest orders stay first; prepend rather than append.
     setCompletedOrders((prev) => [order, ...prev]);
+    clearCart();
 
-    // Deduct sold quantities from tracked inventory, floored at 0 — only
-    // now that the sale is actually persisted.
-    markUnsaved();
+    // Lock the UI into the success view *before* attempting the reload, so
+    // there is no window where Complete Sale could be clicked again for a
+    // sale that already succeeded.
+    setCheckoutStatus("success");
+
+    const { config: latestConfig, error: reloadError } =
+      await getProjectConfig(projectId);
+
+    if (reloadError || !latestConfig) {
+      // The sale already happened — this is a read-only refresh failure,
+      // not a failed sale. Show a warning, not an error, and do not retry.
+      setSaleSaveStatus("success");
+      setSaleSaveError(
+        "Sale completed, but inventory could not be refreshed. Reload the project to see the latest stock."
+      );
+      return;
+    }
+
+    // Merge only stockQuantity/trackInventory per matching item id from the
+    // database-confirmed config — never overwrite unrelated unsaved local
+    // edits (name/price/category, or branding/tax/receipt) with the whole
+    // database config. No markUnsaved() here: this reconciles already-
+    // persisted inventory, it is not a new local edit that needs saving.
     setProjectConfig((prev) => ({
       ...prev,
       menuItems: prev.menuItems.map((item) => {
-        if (!item.trackInventory) {
-          return item;
-        }
+        const dbItem = latestConfig.menuItems.find(
+          (dbMenuItem) => dbMenuItem.id === item.id
+        );
 
-        const soldItem = cart.find((cartItem) => cartItem.itemId === item.id);
-        if (!soldItem) {
+        if (!dbItem) {
           return item;
         }
 
         return {
           ...item,
-          stockQuantity: Math.max(0, item.stockQuantity - soldItem.quantity),
+          stockQuantity: dbItem.stockQuantity,
+          trackInventory: dbItem.trackInventory,
         };
       }),
     }));
 
-    // Show the success state first — closing is a separate, explicit action
-    // (the "Done" button in the checkout panel) so the message stays visible.
-    setCheckoutStatus("success");
     setSaleSaveStatus("success");
-    clearCart();
   }
 
   function openReceipt(orderId: string) {

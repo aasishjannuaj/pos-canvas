@@ -135,9 +135,6 @@ export default function EditorPreview({
     ? editModeSummary.total + STATIC_TIP
     : editModeSummary.total;
 
-  // Feature 8.4 — completedOrders is now newest-first (loaded history is
-  // queried that way, and new sales are prepended), so the first 5 entries
-  // already are the 5 most recent orders.
   const recentOrders = completedOrders.slice(0, 5);
   const selectedOrder =
     completedOrders.find((order) => order.id === selectedReceiptId) ?? null;
@@ -492,6 +489,15 @@ export default function EditorPreview({
                   Sale completed
                 </p>
                 <p className="text-xs text-neutral-500">The cart has been cleared.</p>
+
+                {/* Feature 9.3 — non-blocking inventory refresh warning. The
+                    sale already succeeded; this is informational only, never
+                    styled or worded as a failure. */}
+                {saleSaveError && (
+                  <p className="mt-1 max-w-[220px] text-xs text-amber-600">
+                    {saleSaveError}
+                  </p>
+                )}
 
                 <button
                   type="button"

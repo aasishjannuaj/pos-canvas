@@ -87,6 +87,41 @@ export async function updateProject({
   return { project: data, error: null };
 }
 
+// Feature 9.3 — read-only reload of the latest database config for a project.
+// Used after a completed sale to pull back the inventory numbers the
+// complete_sale RPC just computed, without the client ever writing inventory
+// itself. Selects only the config column; relies on RLS, no service-role key.
+export async function getProjectConfig(projectId: string): Promise<{
+  config: ProjectConfig | null;
+  error: string | null;
+}> {
+  const supabase = createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return {
+      config: null,
+      error: "You must be signed in to reload this project.",
+    };
+  }
+
+  const { data, error } = await supabase
+    .from("projects")
+    .select("config")
+    .eq("id", projectId)
+    .single();
+
+  if (error) {
+    return { config: null, error: error.message };
+  }
+
+  return { config: data.config as ProjectConfig, error: null };
+}
+
 export type SavedProject = {
   id: string;
   name: string;
