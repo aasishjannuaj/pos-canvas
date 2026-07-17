@@ -7,6 +7,7 @@ import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
 import { completeSaleOrder } from "@/lib/orders";
+import type { InventoryTransaction } from "@/lib/inventory.types";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -271,6 +272,7 @@ type EditorShellProps = {
   initialConfig?: ProjectConfig;
   initialProjectId?: string | null;
   initialCompletedOrders?: CompletedOrder[];
+  initialInventoryTransactions?: InventoryTransaction[];
 };
 
 export default function EditorShell({
@@ -279,6 +281,7 @@ export default function EditorShell({
   initialConfig,
   initialProjectId,
   initialCompletedOrders,
+  initialInventoryTransactions,
 }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
     normalizeProjectConfig(initialConfig ?? initialProjectConfig)
@@ -314,6 +317,13 @@ export default function EditorShell({
     initialCompletedOrders ?? []
   );
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
+
+  // Feature 9.4 — inventory activity log (newest first), seeded from
+  // server-loaded history only. Revised: the client never fabricates local
+  // entries for a just-completed sale (see completeSale for why), so this
+  // never changes locally — only a fresh server load (mount or reload)
+  // can update it.
+  const inventoryTransactions = initialInventoryTransactions ?? [];
 
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
@@ -647,6 +657,15 @@ export default function EditorShell({
       }),
     }));
 
+    // Feature 9.4 (revised) — inventoryTransactions is deliberately left
+    // unchanged here. The refreshed config only carries final stock
+    // quantities, not the authoritative inventory_transactions row ids, and
+    // can't reliably reconstruct one row per sold line — especially if the
+    // same item appears in more than one cart line. Inventing rows with
+    // client-generated ids risked showing data that doesn't match what the
+    // database actually recorded. The sale itself succeeded normally, so no
+    // warning is shown for this; the activity log simply catches up the
+    // next time the project is loaded or reloaded.
     setSaleSaveStatus("success");
   }
 
@@ -758,6 +777,7 @@ export default function EditorShell({
           selectedPaymentMethod={selectedPaymentMethod}
           checkoutStatus={checkoutStatus}
           completedOrders={completedOrders}
+          inventoryTransactions={inventoryTransactions}
         />
       </div>
     </div>

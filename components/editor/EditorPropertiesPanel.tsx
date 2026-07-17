@@ -13,6 +13,7 @@ import type {
   PaymentMethod,
   ProjectConfig,
 } from "./EditorShell";
+import type { InventoryTransaction } from "@/lib/inventory.types";
 
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
@@ -34,7 +35,17 @@ type EditorPropertiesPanelProps = {
   selectedPaymentMethod: PaymentMethod | null;
   checkoutStatus: CheckoutStatus;
   completedOrders: CompletedOrder[];
+  inventoryTransactions: InventoryTransaction[];
 };
+
+function formatTransactionTime(createdAt: string): string {
+  return new Date(createdAt).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 export default function EditorPropertiesPanel({
   editorSection,
@@ -54,12 +65,15 @@ export default function EditorPropertiesPanel({
   selectedPaymentMethod,
   checkoutStatus,
   completedOrders,
+  inventoryTransactions,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
   // order (previously this read the last array element, back when new
   // orders were appended rather than prepended).
   const latestOrder = completedOrders[0] ?? null;
+  // Feature 9.4 — inventoryTransactions is also newest-first.
+  const recentTransactions = inventoryTransactions.slice(0, 10);
 
   return (
     <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
@@ -151,6 +165,49 @@ export default function EditorPropertiesPanel({
                   </span>
                 </div>
               </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 border-t border-neutral-200 pt-4">
+            <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
+              Inventory Activity
+            </h3>
+
+            {recentTransactions.length === 0 ? (
+              <p className="text-sm text-neutral-500">No inventory activity yet.</p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {recentTransactions.map((transaction) => (
+                  <div key={transaction.id} className="flex flex-col gap-0.5">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium text-neutral-900">
+                        {transaction.itemName}
+                      </span>
+                      <span
+                        className={
+                          transaction.quantityChange < 0
+                            ? "font-medium text-red-600"
+                            : "font-medium text-emerald-600"
+                        }
+                      >
+                        {transaction.quantityChange > 0 ? "+" : ""}
+                        {transaction.quantityChange}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs text-neutral-500">
+                      <span className="capitalize">{transaction.transactionType}</span>
+                      <span>
+                        {transaction.quantityBefore} → {transaction.quantityAfter}
+                      </span>
+                    </div>
+
+                    <span className="text-xs text-neutral-400">
+                      {formatTransactionTime(transaction.createdAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </>

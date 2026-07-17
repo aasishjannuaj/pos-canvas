@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import EditorShell from "@/components/editor/EditorShell";
 import { getProjectById } from "@/lib/projects.server";
 import { getProjectOrders } from "@/lib/orders.server";
+import { getProjectInventoryTransactions } from "@/lib/inventory.server";
 import type { ProjectConfig } from "@/components/editor/EditorShell";
 
 const projectNames: Record<string, string> = {
@@ -59,10 +60,12 @@ export default async function EditorPage({
       ? project.config
       : undefined;
 
-    // Order history loading is independent of the project lookup above —
-    // a failure here should never turn a valid project into a 404, it
-    // just means the editor opens with an empty order list.
+    // Order history and inventory-activity history are both independent of
+    // the project lookup above — a failure in either should never turn a
+    // valid project into a 404, it just means the editor opens with an
+    // empty list for that section.
     const { orders } = await getProjectOrders(project.id);
+    const { transactions } = await getProjectInventoryTransactions(project.id);
 
     return (
       <EditorShell
@@ -71,6 +74,7 @@ export default async function EditorPage({
         initialConfig={initialConfig}
         initialProjectId={project.id}
         initialCompletedOrders={orders}
+        initialInventoryTransactions={transactions}
       />
     );
   }
