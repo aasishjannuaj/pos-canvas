@@ -11,3 +11,12 @@ export type InventoryTransaction = {
   quantityAfter: number;
   createdAt: string;
 };
+
+export type RestockInventoryResult = {
+  transactionId: string;
+  itemId: string;
+  itemName: string;
+  quantityBefore: number;
+  quantityChange: number;
+  quantityAfter: number;
+};

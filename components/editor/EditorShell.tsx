@@ -7,6 +7,7 @@ import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
 import { completeSaleOrder } from "@/lib/orders";
+import { restockInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
@@ -57,6 +58,8 @@ export type PaymentMethod = "cash" | "card";
 export type CheckoutStatus = "idle" | "success";
 
 export type SaleSaveStatus = "idle" | "saving" | "success" | "error";
+
+export type RestockStatus = "idle" | "saving" | "success" | "error";
 
 export type CompletedOrder = {
   id: string;
@@ -310,6 +313,13 @@ export default function EditorShell({
   const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
   const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
 
+  // Feature 9.6 — restock status for the current restock attempt.
+  const [restockStatus, setRestockStatus] = useState<RestockStatus>("idle");
+  const [restockError, setRestockError] = useState<string | null>(null);
+  const [restockSuccessMessage, setRestockSuccessMessage] = useState<
+    string | null
+  >(null);
+
   // Feature 7.4/8.4 — completed orders & receipts. Seeded from server-loaded
   // history when available (newest first); new sales are prepended so the
   // ordering convention stays consistent throughout.
@@ -319,10 +329,10 @@ export default function EditorShell({
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
   // Feature 9.4 — inventory activity log (newest first), seeded from
-  // server-loaded history only. Revised: the client never fabricates local
-  // entries for a just-completed sale (see completeSale for why), so this
-  // never changes locally — only a fresh server load (mount or reload)
-  // can update it.
+  // server-loaded history only. The client never fabricates local entries
+  // for a just-completed sale or a just-completed restock (see completeSale
+  // and handleRestock for why) — this never changes locally, only a fresh
+  // server load (mount or reload) can update it.
   const inventoryTransactions = initialInventoryTransactions ?? [];
 
   // Feature 6.4/6.5.2/6.5.3 — save state
@@ -657,15 +667,8 @@ export default function EditorShell({
       }),
     }));
 
-    // Feature 9.4 (revised) — inventoryTransactions is deliberately left
-    // unchanged here. The refreshed config only carries final stock
-    // quantities, not the authoritative inventory_transactions row ids, and
-    // can't reliably reconstruct one row per sold line — especially if the
-    // same item appears in more than one cart line. Inventing rows with
-    // client-generated ids risked showing data that doesn't match what the
-    // database actually recorded. The sale itself succeeded normally, so no
-    // warning is shown for this; the activity log simply catches up the
-    // next time the project is loaded or reloaded.
+    // inventoryTransactions is deliberately left unchanged here — see the
+    // comment where it is declared above.
     setSaleSaveStatus("success");
   }
 
@@ -675,6 +678,64 @@ export default function EditorShell({
 
   function closeReceipt() {
     setSelectedReceiptId(null);
+  }
+
+  // Feature 9.6 — restock an inventory-tracked item via the atomic
+  // restock_inventory RPC. The RPC's returned quantityAfter is authoritative;
+  // this handler never computes a new stock number itself.
+  async function handleRestock(itemId: string, quantity: number) {
+    if (restockStatus === "saving") {
+      return;
+    }
+
+    if (projectId === null) {
+      setRestockStatus("error");
+      setRestockError("Save this project before restocking inventory.");
+      setRestockSuccessMessage(null);
+      return;
+    }
+
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      setRestockStatus("error");
+      setRestockError("Quantity must be a positive whole number.");
+      setRestockSuccessMessage(null);
+      return;
+    }
+
+    setRestockStatus("saving");
+    setRestockError(null);
+    setRestockSuccessMessage(null);
+
+    const { result, error } = await restockInventory({
+      projectId,
+      itemId,
+      quantity,
+    });
+
+    if (error || !result) {
+      // RPC failed — nothing local changes, so this can be retried freely.
+      setRestockStatus("error");
+      setRestockError(error ?? "Something went wrong while restocking.");
+      return;
+    }
+
+    // Use the RPC's authoritative quantityAfter directly — no client math,
+    // and no markUnsaved(): the database already persisted this change, so
+    // there is nothing new for Save to do. Any other unsaved edits (or lack
+    // thereof) are left exactly as they were.
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) =>
+        item.id === result.itemId
+          ? { ...item, stockQuantity: result.quantityAfter }
+          : item
+      ),
+    }));
+
+    setRestockStatus("success");
+    setRestockSuccessMessage(
+      `${result.itemName} restocked by ${result.quantityChange}. New stock: ${result.quantityAfter}.`
+    );
   }
 
   async function handleSave() {
@@ -778,6 +839,12 @@ export default function EditorShell({
           checkoutStatus={checkoutStatus}
           completedOrders={completedOrders}
           inventoryTransactions={inventoryTransactions}
+          menuItems={projectConfig.menuItems}
+          projectId={projectId}
+          restockStatus={restockStatus}
+          restockError={restockError}
+          restockSuccessMessage={restockSuccessMessage}
+          onRestock={handleRestock}
         />
       </div>
     </div>
