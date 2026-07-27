@@ -11,6 +11,7 @@ import { restockInventory, adjustInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
+import SalesReport from "@/components/dashboard/SalesReport";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -30,7 +31,8 @@ export type EditorSection =
   | "Branding"
   | "Taxes"
   | "Settings"
-  | "Dashboard";
+  | "Dashboard"
+  | "Sales Report";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
@@ -660,17 +662,28 @@ export default function EditorShell({
 
     setCompletedOrders((prev) => [order, ...prev]);
 
-    // Feature 10.1 — reuse the same confirmed values used for the receipt
-    // above (order.subtotal/taxAmount/total/createdAt) so the Dashboard tab
-    // reflects this sale immediately, without a page reload or a second
-    // fetch. This is a local append only; the server-side order totals
-    // query is never re-run, so the sale can't be double-counted there.
+    // Feature 10.1/10.2 — reuse the same confirmed values used for the
+    // receipt above (order.orderNumber/subtotal/taxAmount/tip/total/
+    // paymentMethod/createdAt/items) so both the Dashboard and the Sales
+    // Report reflect this sale immediately, without a page reload or a
+    // second fetch. itemCount mirrors cartSummary.itemCount's own math (sum
+    // of line quantities), computed from order.items rather than the cart
+    // state directly since clearCart() runs right after this. This is a
+    // local append only; the server-side order totals query is never
+    // re-run, so the sale can't be double-counted there.
     setOrderTotals((prev) => [
       {
         id: order.id,
+        orderNumber: order.orderNumber,
         subtotal: order.subtotal,
         taxAmount: order.taxAmount,
+        tip: order.tip,
         total: order.total,
+        paymentMethod: order.paymentMethod,
+        itemCount: order.items.reduce(
+          (sum, item) => sum + item.quantity,
+          0
+        ),
         createdAt: order.createdAt,
       },
       ...prev,
@@ -908,6 +921,12 @@ export default function EditorShell({
             orderTotals={orderTotals}
             orderTotalsError={orderTotalsError}
             menuItems={projectConfig.menuItems}
+            currency={projectConfig.receipt.currency}
+          />
+        ) : editorMode === "edit" && editorSection === "Sales Report" ? (
+          <SalesReport
+            orderTotals={orderTotals}
+            orderTotalsError={orderTotalsError}
             currency={projectConfig.receipt.currency}
           />
         ) : (
