@@ -13,21 +13,12 @@ import type {
   SaleSaveStatus,
 } from "./EditorShell";
 import Receipt from "./Receipt";
+import ProductBrowser from "./pos-layouts";
+import type { PosLayout } from "@/lib/posLayout";
 
 // Static preview-only figures used only for the unchanged edit-mode mock below.
 const STATIC_TIP = 3;
 const STATIC_SUBTOTAL = 20;
-
-// Feature 12.2 — category tabs/sections are derived from the project's own
-// menuItems rather than a fixed global list, so each template's real
-// categories (Coffee/Pastries, Beer/Wine/Spirits, Hair/Nails/Spa, etc.) show
-// up correctly. Trimmed here (not just at load time) so a stray whitespace
-// difference in a locally-edited category can never look like a duplicate
-// tab; blank/whitespace-only categories fall back to "General".
-function displayCategory(category: string): string {
-  const trimmed = category.trim();
-  return trimmed === "" ? "General" : trimmed;
-}
 
 type EditorPreviewProps = {
   menuItems: MenuItem[];
@@ -58,6 +49,7 @@ type EditorPreviewProps = {
   onOpenReceipt: (orderId: string) => void;
   onCloseReceipt: () => void;
   lastCompletedOrderId: string | null;
+  layout: PosLayout;
 };
 
 function calculateOrderSummary(tax: {
@@ -86,18 +78,6 @@ function formatOrderTime(createdAt: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function getStockLabel(item: MenuItem): string {
-  if (!item.trackInventory) {
-    return "Inventory off";
-  }
-
-  if (item.stockQuantity <= 0) {
-    return "Out of stock";
-  }
-
-  return `Stock: ${item.stockQuantity}`;
 }
 
 export default function EditorPreview({
@@ -129,16 +109,10 @@ export default function EditorPreview({
   onOpenReceipt,
   onCloseReceipt,
   lastCompletedOrderId,
+  layout,
 }: EditorPreviewProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
-
-  // Feature 12.2 — derived from this project's own items (in first-seen
-  // order), not a fixed global list. An empty menu simply yields an empty
-  // array, so no tabs/sections render — no crash, no placeholder category.
-  const categories = Array.from(
-    new Set(menuItems.map((item) => displayCategory(item.category)))
-  );
 
   // Edit-mode summary math — unchanged from before Feature 7.2.
   const editModeSummary = calculateOrderSummary(tax);
@@ -169,106 +143,21 @@ export default function EditorPreview({
           </span>
         </div>
 
-        {/* Section Tabs */}
-        <div className="flex flex-none gap-2 border-b border-neutral-200 bg-white px-3 py-2">
-          {categories.map((section, index) => (
-            <span
-              key={section}
-              className={
-                index === 0
-                  ? "rounded-full px-3 py-1.5 text-xs font-medium text-white"
-                  : "rounded-full bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-600"
-              }
-              style={index === 0 ? { backgroundColor: branding.accentColor } : undefined}
-            >
-              {section}
-            </span>
-          ))}
-        </div>
-
-        {/* Menu Content */}
-        <div className="flex-1 overflow-y-auto px-3 py-3">
-          <div className="flex flex-col gap-4">
-            {categories.map((section) => {
-              const sectionItems = menuItems.filter(
-                (item) => displayCategory(item.category) === section
-              );
-
-              if (sectionItems.length === 0) {
-                return null;
-              }
-
-              return (
-                <div key={section} className="flex flex-col gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                    {section}
-                  </span>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {sectionItems.map((item) => {
-                      const isSelected =
-                        editorMode === "edit" && selectedItemId === item.id;
-                      const isOutOfStock =
-                        editorMode === "preview" &&
-                        item.trackInventory &&
-                        item.stockQuantity <= 0;
-
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          disabled={isOutOfStock}
-                          onClick={() => {
-                            if (editorMode === "edit") {
-                              onSelect(item.id);
-                            } else if (!isOutOfStock) {
-                              onAddToCart(item);
-                            }
-                          }}
-                          className={`flex flex-col justify-between gap-2 rounded-lg border p-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
-                            isSelected
-                              ? "text-white"
-                              : "border-neutral-200 bg-neutral-50 hover:border-neutral-300"
-                          } ${isOutOfStock ? "cursor-not-allowed opacity-40" : ""}`}
-                          style={
-                            isSelected
-                              ? {
-                                  backgroundColor: branding.accentColor,
-                                  borderColor: branding.accentColor,
-                                }
-                              : undefined
-                          }
-                        >
-                          <span
-                            className={`text-xs font-medium leading-tight ${
-                              isSelected ? "text-white" : "text-neutral-900"
-                            }`}
-                          >
-                            {item.name}
-                          </span>
-                          <span
-                            className="text-xs font-semibold"
-                            style={{
-                              color: isSelected ? "#FFFFFF" : branding.accentColor,
-                            }}
-                          >
-                            {currencySymbol}
-                            {item.price.toFixed(2)}
-                          </span>
-                          {editorMode === "edit" && (
-                            <span className="text-[10px] font-normal text-neutral-400">
-                              {getStockLabel(item)}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        {/* Feature 12.3 — product browser, selected via layout inside the
+            stable ProductBrowser component. Owns category tabs + item grid
+            for this template's layout family; everything else in this file
+            (header, cart, checkout, receipt, print) is shared across all
+            layouts. */}
+        <ProductBrowser
+          layout={layout}
+          menuItems={menuItems}
+          selectedItemId={selectedItemId}
+          editorMode={editorMode}
+          branding={branding}
+          currencySymbol={currencySymbol}
+          onSelect={onSelect}
+          onAddToCart={onAddToCart}
+        />
 
         {/* Order Summary / Cart */}
         {editorMode === "preview" ? (

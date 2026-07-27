@@ -24,6 +24,8 @@ import type {
   BrandingSettings,
   ProjectConfig,
 } from "@/lib/projectConfig";
+import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
+import type { PosLayout } from "@/lib/posLayout";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -214,6 +216,11 @@ type EditorShellProps = {
   initialInventoryTransactionsError?: string | null;
   initialOrderTotals?: OrderTotal[];
   initialOrderTotalsError?: string | null;
+  // Feature 12.3 — the POS preview layout, resolved by app/editor/[id]/
+  // page.tsx from the template registry (derived from templateId, never
+  // stored in ProjectConfig). Optional/defaulted here as a defensive
+  // fallback only — the page component always resolves and passes a value.
+  layout?: PosLayout;
 };
 
 export default function EditorShell({
@@ -226,6 +233,7 @@ export default function EditorShell({
   initialInventoryTransactionsError,
   initialOrderTotals,
   initialOrderTotalsError,
+  layout = DEFAULT_POS_LAYOUT,
 }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
     normalizeProjectConfig(initialConfig ?? defaultProjectConfig)
@@ -1019,6 +1027,7 @@ export default function EditorShell({
             onOpenReceipt={openReceipt}
             onCloseReceipt={closeReceipt}
             lastCompletedOrderId={lastCompletedOrderId}
+            layout={layout}
           />
         )}
         <EditorPropertiesPanel

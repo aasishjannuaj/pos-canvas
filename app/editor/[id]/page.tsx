@@ -5,6 +5,7 @@ import { getProjectOrders } from "@/lib/orders.server";
 import { getProjectInventoryTransactions } from "@/lib/inventory.server";
 import { getProjectOrderTotals } from "@/lib/dashboard.server";
 import type { ProjectConfig } from "@/lib/projectConfig";
+import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
 import { getTemplateById, getStarterConfig } from "@/data/templates";
 
 const PROJECT_ROUTE_PREFIX = "project-";
@@ -59,6 +60,13 @@ export default async function EditorPage({
       project.id
     );
 
+    // Feature 12.3 — layout is derived from the saved template_id, never
+    // persisted separately. A legacy or unknown template_id (one that
+    // doesn't match any registered template) safely falls back to
+    // DEFAULT_POS_LAYOUT — this only affects which product-browser
+    // component renders below; it never touches project.config.
+    const layout = getTemplateById(project.template_id)?.layout ?? DEFAULT_POS_LAYOUT;
+
     return (
       <EditorShell
         projectName={project.name}
@@ -70,6 +78,7 @@ export default async function EditorPage({
         initialInventoryTransactionsError={inventoryTransactionsError}
         initialOrderTotals={orderTotals}
         initialOrderTotalsError={orderTotalsError}
+        layout={layout}
       />
     );
   }
@@ -102,6 +111,7 @@ export default async function EditorPage({
       projectName={template.name}
       templateId={id}
       initialConfig={starterConfig}
+      layout={template.layout}
     />
   );
 }

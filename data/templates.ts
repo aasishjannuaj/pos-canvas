@@ -4,11 +4,15 @@
 // own copy — this file replaces six previously-independent, inconsistent
 // hardcoded lists (see the Feature 12.1 plan for the full inventory).
 //
-// Deliberately depends only on lib/projectConfig.ts (a neutral module with
-// no "use client" component in its import chain), never on
-// components/editor/EditorShell.tsx — that keeps the dependency graph a
-// straight line (lib/projectConfig.ts <- data/templates.ts, and separately
-// lib/projectConfig.ts <- EditorShell.tsx) instead of a cycle.
+// Deliberately depends only on lib/projectConfig.ts and lib/posLayout.ts
+// (both neutral modules with no "use client" component in their import
+// chain), never on components/editor/EditorShell.tsx or any React
+// component — that keeps the dependency graph a straight line
+// (lib/projectConfig.ts/lib/posLayout.ts <- data/templates.ts, and
+// separately <- EditorShell.tsx / the pos-layouts component registry)
+// instead of a cycle. The UI-layer layout component registry
+// (components/editor/pos-layouts/index.ts) imports PosLayout from
+// lib/posLayout.ts too, never from this file.
 import type {
   MenuItem,
   ProjectConfig,
@@ -16,6 +20,7 @@ import type {
   TaxSettings,
 } from "@/lib/projectConfig";
 import { defaultProjectConfig, cloneProjectConfig } from "@/lib/projectConfig";
+import type { PosLayout } from "@/lib/posLayout";
 
 export type Template = {
   id: string;
@@ -29,6 +34,10 @@ export type Template = {
   // restaurant-style default. getStarterConfig() below always returns a
   // fresh clone of whatever this points to, never this reference itself.
   starterConfig: ProjectConfig;
+  // Feature 12.3 — layout identity lives here, in the canonical registry,
+  // not in ProjectConfig — it's derived from template_id at render time
+  // (see app/editor/[id]/page.tsx), never persisted separately.
+  layout: PosLayout;
 };
 
 // Feature 12.1 correction — all six templates run on the exact same shared
@@ -204,6 +213,7 @@ export const templates: Template[] = [
     // configuration restaurant has always used (also EditorShell's own
     // fallback-of-last-resort default).
     starterConfig: defaultProjectConfig,
+    layout: "menu-grid",
   },
   {
     id: "cafe",
@@ -214,6 +224,7 @@ export const templates: Template[] = [
     icon: "☕",
     features: SHARED_FEATURES,
     starterConfig: cafeStarterConfig,
+    layout: "menu-grid",
   },
   {
     id: "retail",
@@ -224,6 +235,7 @@ export const templates: Template[] = [
     icon: "🛍",
     features: SHARED_FEATURES,
     starterConfig: retailStarterConfig,
+    layout: "product-grid",
   },
   {
     id: "liquor-store",
@@ -234,6 +246,7 @@ export const templates: Template[] = [
     icon: "🍺",
     features: SHARED_FEATURES,
     starterConfig: liquorStoreStarterConfig,
+    layout: "product-grid",
   },
   {
     id: "food-truck",
@@ -244,6 +257,7 @@ export const templates: Template[] = [
     icon: "🚚",
     features: SHARED_FEATURES,
     starterConfig: foodTruckStarterConfig,
+    layout: "menu-grid",
   },
   {
     id: "salon",
@@ -254,6 +268,7 @@ export const templates: Template[] = [
     icon: "💇",
     features: SHARED_FEATURES,
     starterConfig: salonStarterConfig,
+    layout: "service-grid",
   },
 ];
 
