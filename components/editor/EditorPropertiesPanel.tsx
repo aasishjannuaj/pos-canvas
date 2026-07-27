@@ -28,6 +28,10 @@ type EditorPropertiesPanelProps = {
   onDelete: () => void;
   branding: ProjectConfig["branding"];
   onBrandingChange: (changes: Partial<ProjectConfig["branding"]>) => void;
+  businessProfile: ProjectConfig["businessProfile"];
+  onBusinessProfileChange: (
+    changes: Partial<ProjectConfig["businessProfile"]>
+  ) => void;
   tax: ProjectConfig["tax"];
   onTaxChange: (changes: Partial<ProjectConfig["tax"]>) => void;
   receipt: ProjectConfig["receipt"];
@@ -68,6 +72,8 @@ export default function EditorPropertiesPanel({
   onDelete,
   branding,
   onBrandingChange,
+  businessProfile,
+  onBusinessProfileChange,
   tax,
   onTaxChange,
   receipt,
@@ -594,20 +600,6 @@ export default function EditorPropertiesPanel({
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">
                 <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                  Business Name
-                </label>
-                <input
-                  type="text"
-                  value={branding.businessName}
-                  onChange={(event) =>
-                    onBrandingChange({ businessName: event.target.value })
-                  }
-                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
-                />
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
                   Accent Color
                 </label>
                 <div className="flex items-center gap-3">
@@ -633,6 +625,151 @@ export default function EditorPropertiesPanel({
                     Logo upload coming soon
                   </p>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Feature 13.1 — core business identity/contact, separate from
+              Branding (visual appearance only) and Settings (receipt
+              formatting/visibility only). Every field is optional and never
+              blocks Save. Edits here update the POS header (business name)
+              and receipt preview (all fields) immediately — same
+              projectConfig state, same live-preview mechanism as every other
+              section. */}
+          {editorSection === "Business" && (
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Business Name
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.businessName}
+                  onChange={(event) =>
+                    onBusinessProfileChange({ businessName: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Address Line 1
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.addressLine1}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ addressLine1: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Address Line 2
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.addressLine2}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ addressLine2: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  City
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.city}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ city: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  State / Region
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.state}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ state: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Postal Code
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.postalCode}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ postalCode: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Phone
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.phone}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ phone: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Email
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.email}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ email: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                  Website
+                </label>
+                <input
+                  type="text"
+                  value={businessProfile.website}
+                  placeholder="Optional"
+                  onChange={(event) =>
+                    onBusinessProfileChange({ website: event.target.value })
+                  }
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                />
               </div>
             </div>
           )}
@@ -812,35 +949,11 @@ export default function EditorPropertiesPanel({
                   />
                 </label>
 
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                    Business Address
-                  </label>
-                  <input
-                    type="text"
-                    value={receipt.businessAddress}
-                    placeholder="Optional"
-                    onChange={(event) =>
-                      onReceiptChange({ businessAddress: event.target.value })
-                    }
-                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                    Business Phone
-                  </label>
-                  <input
-                    type="text"
-                    value={receipt.businessPhone}
-                    placeholder="Optional"
-                    onChange={(event) =>
-                      onReceiptChange({ businessPhone: event.target.value })
-                    }
-                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
-                  />
-                </div>
+                <p className="text-xs text-neutral-400">
+                  Business address, phone, email, and website are managed in
+                  the Business section and shown on the receipt automatically
+                  when filled in.
+                </p>
 
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">

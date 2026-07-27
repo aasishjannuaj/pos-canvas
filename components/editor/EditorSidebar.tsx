@@ -5,6 +5,7 @@ import type { EditorSection } from "./EditorShell";
 const sections: { label: EditorSection; icon: string }[] = [
   { label: "Menu", icon: "🍽" },
   { label: "Branding", icon: "🎨" },
+  { label: "Business", icon: "🏢" },
   { label: "Taxes", icon: "🧾" },
   { label: "Settings", icon: "⚙️" },
   { label: "Dashboard", icon: "📊" },

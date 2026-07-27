@@ -22,6 +22,7 @@ import type {
   TaxSettings,
   ReceiptSettings,
   BrandingSettings,
+  BusinessProfile,
   ProjectConfig,
 } from "@/lib/projectConfig";
 import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
@@ -43,6 +44,7 @@ export type { MenuItem, Currency, ProjectConfig };
 export type EditorSection =
   | "Menu"
   | "Branding"
+  | "Business"
   | "Taxes"
   | "Settings"
   | "Dashboard"
@@ -161,17 +163,24 @@ function normalizeMenuItem(item: MenuItem): MenuItem {
 // that predate these fields, so the app never crashes on missing values and
 // existing valid values are always preserved as-is. Mirrors
 // normalizeMenuItem's convention above.
+//
+// Feature 13.1 — rebuilt field-by-field (no `...receipt` spread) rather than
+// spreading the incoming object, so a legacy `businessAddress`/
+// `businessPhone` key still sitting on an old saved project's raw JSON is
+// never carried forward into the normalized result — those values are read
+// once, by normalizeBusinessProfile below, and nowhere else. This also
+// guarantees the first Save after opening an old project persists only the
+// current canonical ReceiptSettings shape.
 function normalizeReceiptSettings(receipt: ReceiptSettings): ReceiptSettings {
   return {
-    ...receipt,
+    currency: receipt.currency,
+    footer: receipt.footer,
+    orderPrefix: receipt.orderPrefix,
+    tipsEnabled: receipt.tipsEnabled,
     showBusinessName:
       typeof receipt.showBusinessName === "boolean"
         ? receipt.showBusinessName
         : true,
-    businessAddress:
-      typeof receipt.businessAddress === "string" ? receipt.businessAddress : "",
-    businessPhone:
-      typeof receipt.businessPhone === "string" ? receipt.businessPhone : "",
     headerMessage:
       typeof receipt.headerMessage === "string" ? receipt.headerMessage : "",
     showTaxLine:
@@ -189,10 +198,81 @@ function normalizeReceiptSettings(receipt: ReceiptSettings): ReceiptSettings {
   };
 }
 
+// Feature 13.1 — rebuilt field-by-field for the same reason as
+// normalizeReceiptSettings above: a legacy `businessName` key on an old
+// saved project's raw branding JSON must never be carried forward once
+// BrandingSettings no longer declares it.
+function normalizeBranding(branding: BrandingSettings): BrandingSettings {
+  return {
+    accentColor: branding.accentColor,
+  };
+}
+
+// Feature 13.1 — the one place in the app allowed to read a project's
+// *raw* legacy JSON shape (branding.businessName, receipt.businessAddress,
+// receipt.businessPhone) — all three were removed from their respective
+// typed fields this feature, so `config` is widened back to that legacy
+// shape here only for reading, never for writing, and never anywhere else
+// after this function returns.
+//
+// Handles every case safely:
+//   - No businessProfile at all (pre-13.1 project): synthesize it from the
+//     three legacy fields, defaulting every other new field to "".
+//   - A partially migrated businessProfile (e.g. saved once already under a
+//     future version, or hand-edited): every valid existing string value on
+//     it is preserved as-is; only a missing/invalid value falls back to the
+//     matching legacy field (businessName/addressLine1/phone) or "".
+//   - A brand-new template starter config: businessProfile is already
+//     complete and valid, so every field resolves straight from `existing`
+//     with no legacy fallback ever used.
+type LegacyProjectConfigShape = {
+  branding?: { businessName?: unknown };
+  receipt?: { businessAddress?: unknown; businessPhone?: unknown };
+  businessProfile?: Partial<Record<keyof BusinessProfile, unknown>>;
+};
+
+function normalizeBusinessProfile(config: ProjectConfig): BusinessProfile {
+  const legacy = config as unknown as LegacyProjectConfigShape;
+
+  const legacyBusinessName =
+    typeof legacy.branding?.businessName === "string"
+      ? legacy.branding.businessName
+      : "";
+  const legacyAddressLine1 =
+    typeof legacy.receipt?.businessAddress === "string"
+      ? legacy.receipt.businessAddress
+      : "";
+  const legacyPhone =
+    typeof legacy.receipt?.businessPhone === "string"
+      ? legacy.receipt.businessPhone
+      : "";
+
+  const existing = legacy.businessProfile ?? {};
+
+  function resolve(key: keyof BusinessProfile, legacyFallback: string): string {
+    const value = existing[key];
+    return typeof value === "string" ? value : legacyFallback;
+  }
+
+  return {
+    businessName: resolve("businessName", legacyBusinessName),
+    addressLine1: resolve("addressLine1", legacyAddressLine1),
+    addressLine2: resolve("addressLine2", ""),
+    city: resolve("city", ""),
+    state: resolve("state", ""),
+    postalCode: resolve("postalCode", ""),
+    phone: resolve("phone", legacyPhone),
+    email: resolve("email", ""),
+    website: resolve("website", ""),
+  };
+}
+
 function normalizeProjectConfig(config: ProjectConfig): ProjectConfig {
   return {
     ...config,
     menuItems: config.menuItems.map(normalizeMenuItem),
+    branding: normalizeBranding(config.branding),
+    businessProfile: normalizeBusinessProfile(config),
     receipt: normalizeReceiptSettings(config.receipt),
   };
 }
@@ -456,6 +536,14 @@ export default function EditorShell({
     setProjectConfig((prev) => ({
       ...prev,
       branding: { ...prev.branding, ...changes },
+    }));
+  }
+
+  function handleBusinessProfileChange(changes: Partial<BusinessProfile>) {
+    markUnsaved();
+    setProjectConfig((prev) => ({
+      ...prev,
+      businessProfile: { ...prev.businessProfile, ...changes },
     }));
   }
 
@@ -994,7 +1082,7 @@ export default function EditorShell({
           />
         ) : editorMode === "edit" && editorSection === "Settings" ? (
           <ReceiptPreview
-            branding={projectConfig.branding}
+            businessProfile={projectConfig.businessProfile}
             receipt={projectConfig.receipt}
           />
         ) : (
@@ -1003,6 +1091,7 @@ export default function EditorShell({
             selectedItemId={selectedItemId}
             onSelect={setSelectedItemId}
             branding={projectConfig.branding}
+            businessProfile={projectConfig.businessProfile}
             tax={projectConfig.tax}
             receipt={projectConfig.receipt}
             editorMode={editorMode}
@@ -1039,6 +1128,8 @@ export default function EditorShell({
           onDelete={handleDeleteItem}
           branding={projectConfig.branding}
           onBrandingChange={handleBrandingChange}
+          businessProfile={projectConfig.businessProfile}
+          onBusinessProfileChange={handleBusinessProfileChange}
           tax={projectConfig.tax}
           onTaxChange={handleTaxChange}
           receipt={projectConfig.receipt}

@@ -43,10 +43,12 @@ export type ReceiptSettings = {
   footer: string;
   orderPrefix: string;
   tipsEnabled: boolean;
-  // Feature 11.1 — printable receipt configuration.
+  // Feature 11.1 — printable receipt configuration. businessAddress/
+  // businessPhone lived here until Feature 13.1, when they moved into
+  // BusinessProfile (core business identity, not receipt formatting) — see
+  // BusinessProfile below. ReceiptSettings now holds only formatting/
+  // visibility concerns.
   showBusinessName: boolean;
-  businessAddress: string;
-  businessPhone: string;
   headerMessage: string;
   showTaxLine: boolean;
   showTipLine: boolean;
@@ -54,14 +56,34 @@ export type ReceiptSettings = {
   showOrderNumber: boolean;
 };
 
+// Feature 13.1 — visual appearance only. businessName moved out to
+// BusinessProfile (identity, not appearance) below.
 export type BrandingSettings = {
-  businessName: string;
   accentColor: string;
+};
+
+// Feature 13.1 — the customer-facing business identity/contact record,
+// separate from the project's own internal dashboard name (`projects.name`,
+// never stored here) and from BrandingSettings/ReceiptSettings (appearance
+// and receipt-formatting concerns respectively). This is the single source
+// of truth for business name, address, phone, email, and website across the
+// POS header, the receipt, and any future generated-app metadata.
+export type BusinessProfile = {
+  businessName: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  phone: string;
+  email: string;
+  website: string;
 };
 
 export type ProjectConfig = {
   menuItems: MenuItem[];
   branding: BrandingSettings;
+  businessProfile: BusinessProfile;
   tax: TaxSettings;
   receipt: ReceiptSettings;
 };
@@ -156,8 +178,18 @@ const defaultMenuItems: MenuItem[] = [
 export const defaultProjectConfig: ProjectConfig = {
   menuItems: defaultMenuItems,
   branding: {
-    businessName: "Restaurant POS",
     accentColor: "#2563EB",
+  },
+  businessProfile: {
+    businessName: "Restaurant POS",
+    addressLine1: "",
+    addressLine2: "",
+    city: "",
+    state: "",
+    postalCode: "",
+    phone: "",
+    email: "",
+    website: "",
   },
   tax: {
     enabled: true,
@@ -171,8 +203,6 @@ export const defaultProjectConfig: ProjectConfig = {
     orderPrefix: "ORD-",
     tipsEnabled: false,
     showBusinessName: true,
-    businessAddress: "",
-    businessPhone: "",
     headerMessage: "",
     showTaxLine: true,
     showTipLine: true,
@@ -190,6 +220,7 @@ export function cloneProjectConfig(config: ProjectConfig): ProjectConfig {
   return {
     menuItems: config.menuItems.map((item) => ({ ...item })),
     branding: { ...config.branding },
+    businessProfile: { ...config.businessProfile },
     tax: { ...config.tax },
     receipt: { ...config.receipt },
   };

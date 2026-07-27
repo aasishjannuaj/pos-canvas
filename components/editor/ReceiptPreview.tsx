@@ -24,11 +24,14 @@ const SAMPLE_ORDER_BASE: Omit<CompletedOrder, "orderNumber"> = {
 };
 
 type ReceiptPreviewProps = {
-  branding: ProjectConfig["branding"];
+  businessProfile: ProjectConfig["businessProfile"];
   receipt: ProjectConfig["receipt"];
 };
 
-export default function ReceiptPreview({ branding, receipt }: ReceiptPreviewProps) {
+export default function ReceiptPreview({
+  businessProfile,
+  receipt,
+}: ReceiptPreviewProps) {
   // Bug fix — this used to be a hardcoded "ORD-1001" baked into a
   // module-level constant, so changing Order Prefix in Settings never
   // updated the preview. Building it here from the live receipt.orderPrefix
@@ -50,7 +53,7 @@ export default function ReceiptPreview({ branding, receipt }: ReceiptPreviewProp
       </p>
 
       <div className="w-full max-w-sm rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
-        <Receipt order={sampleOrder} branding={branding} receipt={receipt} />
+        <Receipt order={sampleOrder} businessProfile={businessProfile} receipt={receipt} />
       </div>
     </div>
   );

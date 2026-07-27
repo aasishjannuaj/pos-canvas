@@ -14,6 +14,7 @@
 // (components/editor/pos-layouts/index.ts) imports PosLayout from
 // lib/posLayout.ts too, never from this file.
 import type {
+  BusinessProfile,
   MenuItem,
   ProjectConfig,
   ReceiptSettings,
@@ -68,6 +69,9 @@ const SHARED_TAX: TaxSettings = {
 
 // Feature 12.2 — every receipt setting except footer/tipsEnabled is
 // identical across templates (no confirmed reason to differ yet).
+// Feature 13.1 — businessAddress/businessPhone removed: receipt formatting
+// no longer carries business identity/contact data (see buildBusinessProfile
+// below).
 function buildReceiptSettings(
   footer: string,
   tipsEnabled: boolean
@@ -78,13 +82,30 @@ function buildReceiptSettings(
     orderPrefix: "ORD-",
     tipsEnabled,
     showBusinessName: true,
-    businessAddress: "",
-    businessPhone: "",
     headerMessage: "",
     showTaxLine: true,
     showTipLine: true,
     showPaymentMethod: true,
     showOrderNumber: true,
+  };
+}
+
+// Feature 13.1 — every template's starter business profile carries only its
+// real business name forward from the old branding.businessName field;
+// address/phone/email/website all start empty (no confirmed real-world
+// value to invent, matching the "no fabricated completeness" convention
+// from Feature 12.1).
+function buildBusinessProfile(businessName: string): BusinessProfile {
+  return {
+    businessName,
+    addressLine1: "",
+    addressLine2: "",
+    city: "",
+    state: "",
+    postalCode: "",
+    phone: "",
+    email: "",
+    website: "",
   };
 }
 
@@ -102,7 +123,8 @@ const cafeMenuItems: MenuItem[] = [
 
 const cafeStarterConfig: ProjectConfig = {
   menuItems: cafeMenuItems,
-  branding: { businessName: "Daily Grind Cafe", accentColor: "#B45309" },
+  branding: { accentColor: "#B45309" },
+  businessProfile: buildBusinessProfile("Daily Grind Cafe"),
   tax: SHARED_TAX,
   receipt: buildReceiptSettings(
     "Thanks for stopping in — see you tomorrow!",
@@ -122,7 +144,8 @@ const retailMenuItems: MenuItem[] = [
 
 const retailStarterConfig: ProjectConfig = {
   menuItems: retailMenuItems,
-  branding: { businessName: "Main Street Mercantile", accentColor: "#059669" },
+  branding: { accentColor: "#059669" },
+  businessProfile: buildBusinessProfile("Main Street Mercantile"),
   tax: SHARED_TAX,
   receipt: buildReceiptSettings("Thank you for shopping with us!", false),
 };
@@ -142,7 +165,8 @@ const liquorStoreMenuItems: MenuItem[] = [
 
 const liquorStoreStarterConfig: ProjectConfig = {
   menuItems: liquorStoreMenuItems,
-  branding: { businessName: "Harborview Liquor", accentColor: "#7C2D12" },
+  branding: { accentColor: "#7C2D12" },
+  businessProfile: buildBusinessProfile("Harborview Liquor"),
   tax: SHARED_TAX,
   receipt: buildReceiptSettings(
     "Please drink responsibly. Thank you for your business!",
@@ -163,7 +187,8 @@ const foodTruckMenuItems: MenuItem[] = [
 
 const foodTruckStarterConfig: ProjectConfig = {
   menuItems: foodTruckMenuItems,
-  branding: { businessName: "Rolling Fork Food Truck", accentColor: "#EA580C" },
+  branding: { accentColor: "#EA580C" },
+  businessProfile: buildBusinessProfile("Rolling Fork Food Truck"),
   tax: SHARED_TAX,
   receipt: buildReceiptSettings("Thanks for grabbing a bite with us!", false),
 };
@@ -182,7 +207,8 @@ const salonMenuItems: MenuItem[] = [
 
 const salonStarterConfig: ProjectConfig = {
   menuItems: salonMenuItems,
-  branding: { businessName: "Bloom Hair & Spa", accentColor: "#DB2777" },
+  branding: { accentColor: "#DB2777" },
+  businessProfile: buildBusinessProfile("Bloom Hair & Spa"),
   tax: SHARED_TAX,
   // Feature 12.2 — the one approved starter-value difference beyond
   // business name/menu/footer: tipping is on by default for salon services,

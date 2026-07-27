@@ -25,6 +25,7 @@ type EditorPreviewProps = {
   selectedItemId: string | null;
   onSelect: (id: string) => void;
   branding: ProjectConfig["branding"];
+  businessProfile: ProjectConfig["businessProfile"];
   tax: ProjectConfig["tax"];
   receipt: ProjectConfig["receipt"];
   editorMode: EditorMode;
@@ -85,6 +86,7 @@ export default function EditorPreview({
   selectedItemId,
   onSelect,
   branding,
+  businessProfile,
   tax,
   receipt,
   editorMode,
@@ -139,7 +141,7 @@ export default function EditorPreview({
           style={{ backgroundColor: branding.accentColor }}
         >
           <span className="text-sm font-semibold tracking-tight text-white">
-            {branding.businessName}
+            {businessProfile.businessName.trim()}
           </span>
         </div>
 
@@ -527,7 +529,7 @@ export default function EditorPreview({
         {editorMode === "preview" && selectedOrder && (
           <div className="absolute inset-0 z-10 flex flex-col bg-white p-4">
             <div className="flex-1 overflow-y-auto">
-              <Receipt order={selectedOrder} branding={branding} receipt={receipt} />
+              <Receipt order={selectedOrder} businessProfile={businessProfile} receipt={receipt} />
             </div>
 
             <div className="flex flex-col gap-2 pt-3">
@@ -558,7 +560,7 @@ export default function EditorPreview({
           receipt is actually open, so at most one print area ever exists. */}
       {selectedOrder && (
         <div className="receipt-print-area">
-          <Receipt order={selectedOrder} branding={branding} receipt={receipt} />
+          <Receipt order={selectedOrder} businessProfile={businessProfile} receipt={receipt} />
         </div>
       )}
     </div>
