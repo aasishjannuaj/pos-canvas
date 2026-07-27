@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
@@ -287,7 +288,11 @@ function createId(): string {
 }
 
 type EditorShellProps = {
-  projectName: string;
+  // Feature 13.2 — this is only the *initial* project name (the DB's
+  // `projects.name` for a saved project, or the template's display name for
+  // a brand-new one). It seeds local state below; the Builder's own rename
+  // input is the source of truth from then on, never this prop again.
+  initialProjectName: string;
   templateId: string;
   initialConfig?: ProjectConfig;
   initialProjectId?: string | null;
@@ -304,7 +309,7 @@ type EditorShellProps = {
 };
 
 export default function EditorShell({
-  projectName,
+  initialProjectName,
   templateId,
   initialConfig,
   initialProjectId,
@@ -315,9 +320,18 @@ export default function EditorShell({
   initialOrderTotalsError,
   layout = DEFAULT_POS_LAYOUT,
 }: EditorShellProps) {
+  const router = useRouter();
+
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
     normalizeProjectConfig(initialConfig ?? defaultProjectConfig)
   );
+
+  // Feature 13.2 — the project's own internal/dashboard label, kept
+  // deliberately separate from ProjectConfig.businessProfile.businessName
+  // (the customer-facing name). Lives in its own local state, seeded once
+  // from initialProjectName, so the Builder's rename input is the single
+  // source of truth for the rest of the session.
+  const [projectName, setProjectName] = useState(initialProjectName);
 
   // UI-only state — not part of the saved project, so it stays outside projectConfig.
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -405,8 +419,17 @@ export default function EditorShell({
   // for the session, same as the other server-seeded history above.
   const orderTotalsError = initialOrderTotalsError ?? null;
 
-  // Feature 6.4/6.5.2/6.5.3 — save state
+  // Feature 6.4/6.5.2/6.5.3/13.2 — save state. isDirty and saveStatus are
+  // deliberately two independent fields rather than one overloaded value:
+  // isDirty answers "is there anything to save right now" (starts false on
+  // mount, for both a saved project and a brand-new template session — see
+  // markDirty below), while saveStatus tracks only the lifecycle of the most
+  // recent save *request* itself ("saving" while in flight, "saved"/"error"
+  // once it resolves). The Builder's displayed status label and Save button
+  // state are both derived from the combination of the two in
+  // EditorTopBar, not stored redundantly here.
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
+  const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -419,10 +442,20 @@ export default function EditorShell({
     projectConfig.receipt.tipsEnabled
   );
 
-  // Once a save has succeeded, any further edit to persisted project data
-  // reverts the button back to "Save" — no autosave, just a status reset.
-  function markUnsaved() {
-    setSaveStatus((prev) => (prev === "saved" ? "idle" : prev));
+  // Feature 13.2 — the single call every persisted-data mutation makes.
+  // Marks the project dirty and clears any stale error from a previous save
+  // attempt, so a fresh edit after a failed (or successful) save always
+  // reads as "Unsaved changes" rather than lingering on "Save failed" or
+  // "Saved" for content that no longer matches what was last persisted.
+  function markDirty() {
+    setIsDirty(true);
+    setSaveStatus("idle");
+    setSaveError(null);
+  }
+
+  function handleProjectNameChange(name: string) {
+    setProjectName(name);
+    markDirty();
   }
 
   function handleToggleEditorMode() {
@@ -430,7 +463,7 @@ export default function EditorShell({
   }
 
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
-    markUnsaved();
+    markDirty();
 
     setProjectConfig((prev) => ({
       ...prev,
@@ -469,7 +502,7 @@ export default function EditorShell({
   }
 
   function handleAddItem() {
-    markUnsaved();
+    markDirty();
 
     // Feature 12.2 — a new item joins whatever category the project already
     // uses (already-normalized by normalizeProjectConfig at load time), so
@@ -496,7 +529,7 @@ export default function EditorShell({
       return;
     }
 
-    markUnsaved();
+    markDirty();
 
     const duplicatedItem: MenuItem = {
       ...selectedItem,
@@ -515,7 +548,7 @@ export default function EditorShell({
       return;
     }
 
-    markUnsaved();
+    markDirty();
 
     setProjectConfig((prev) => ({
       ...prev,
@@ -532,7 +565,7 @@ export default function EditorShell({
   }
 
   function handleBrandingChange(changes: Partial<BrandingSettings>) {
-    markUnsaved();
+    markDirty();
     setProjectConfig((prev) => ({
       ...prev,
       branding: { ...prev.branding, ...changes },
@@ -540,7 +573,7 @@ export default function EditorShell({
   }
 
   function handleBusinessProfileChange(changes: Partial<BusinessProfile>) {
-    markUnsaved();
+    markDirty();
     setProjectConfig((prev) => ({
       ...prev,
       businessProfile: { ...prev.businessProfile, ...changes },
@@ -548,7 +581,7 @@ export default function EditorShell({
   }
 
   function handleTaxChange(changes: Partial<TaxSettings>) {
-    markUnsaved();
+    markDirty();
     setProjectConfig((prev) => ({
       ...prev,
       tax: { ...prev.tax, ...changes },
@@ -556,7 +589,7 @@ export default function EditorShell({
   }
 
   function handleReceiptChange(changes: Partial<ReceiptSettings>) {
-    markUnsaved();
+    markDirty();
     setProjectConfig((prev) => ({
       ...prev,
       receipt: { ...prev.receipt, ...changes },
@@ -814,7 +847,7 @@ export default function EditorShell({
     // Merge only stockQuantity/trackInventory per matching item id from the
     // database-confirmed config — never overwrite unrelated unsaved local
     // edits (name/price/category, or branding/tax/receipt) with the whole
-    // database config. No markUnsaved() here: this reconciles already-
+    // database config. No markDirty() here: this reconciles already-
     // persisted inventory, it is not a new local edit that needs saving.
     setProjectConfig((prev) => ({
       ...prev,
@@ -889,7 +922,7 @@ export default function EditorShell({
     }
 
     // Use the RPC's authoritative quantityAfter directly — no client math,
-    // and no markUnsaved(): the database already persisted this change, so
+    // and no markDirty(): the database already persisted this change, so
     // there is nothing new for Save to do. Any other unsaved edits (or lack
     // thereof) are left exactly as they were.
     setProjectConfig((prev) => ({
@@ -966,7 +999,7 @@ export default function EditorShell({
     }
 
     // Use the RPC's authoritative quantityAfter directly — no client math,
-    // and no markUnsaved(): the database already persisted this change, so
+    // and no markDirty(): the database already persisted this change, so
     // there is nothing new for Save to do. Any other unsaved edits (or lack
     // thereof) are left exactly as they were.
     setProjectConfig((prev) => ({
@@ -1003,12 +1036,39 @@ export default function EditorShell({
   }
 
   async function handleSave() {
+    // Feature 13.2 — re-entry guard: a save already in flight blocks any
+    // further invocation, including a rapid repeat click during the
+    // first-save request — this is what prevents a duplicate project row
+    // from ever being created, mirroring the same guard already used by
+    // handleRestock/handleInventoryAdjustment above.
+    if (saveStatus === "saving") {
+      return;
+    }
+
+    // Validate before touching network/save state at all, so a blank name
+    // never reaches saveNewProject/updateProject. The typed value in
+    // projectName is left exactly as the user entered it — only the value
+    // sent to the database is trimmed, and only once validation passes.
+    const trimmedName = projectName.trim();
+
+    if (trimmedName === "") {
+      setSaveStatus("error");
+      setSaveError("Project name cannot be empty.");
+      return;
+    }
+
+    // Nothing to persist and no failed attempt to retry — skip the network
+    // request entirely rather than silently re-saving identical data.
+    if (!isDirty && saveStatus !== "error") {
+      return;
+    }
+
     setSaveStatus("saving");
     setSaveError(null);
 
     if (projectId === null) {
       const { project, error } = await saveNewProject({
-        name: projectName,
+        name: trimmedName,
         templateId,
         config: projectConfig,
       });
@@ -1020,13 +1080,25 @@ export default function EditorShell({
       }
 
       setProjectId(project.id);
+      setIsDirty(false);
       setSaveStatus("saved");
+      setSaveError(null);
+
+      // Feature 13.2 — identify the now-saved project in the URL so a
+      // refresh reloads it as project-{id} (the branch in
+      // app/editor/[id]/page.tsx that always loads the DB's own persisted
+      // config) instead of re-entering the brand-new-template branch, which
+      // would reset projectId to null and let a later Save create a second
+      // row. A client-side transition, not a full navigation, so it never
+      // triggers beforeunload and never discards the in-memory state above
+      // (which already exactly matches what was just persisted).
+      router.replace(`/editor/project-${project.id}`, { scroll: false });
       return;
     }
 
     const { project, error } = await updateProject({
       projectId,
-      name: projectName,
+      name: trimmedName,
       config: projectConfig,
     });
 
@@ -1036,14 +1108,34 @@ export default function EditorShell({
       return;
     }
 
+    setIsDirty(false);
     setSaveStatus("saved");
+    setSaveError(null);
   }
+
+  // Feature 13.2 — warn only while there's something unsaved to lose; the
+  // listener is added/removed as isDirty flips, so it's never registered
+  // for a clean project and never lingers after a successful save.
+  useEffect(() => {
+    if (!isDirty) {
+      return;
+    }
+
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [isDirty]);
 
   return (
     <div className="flex h-screen flex-col bg-neutral-50">
       <EditorTopBar
         projectName={projectName}
+        onProjectNameChange={handleProjectNameChange}
         onSave={handleSave}
+        isDirty={isDirty}
         saveStatus={saveStatus}
         saveError={saveError}
         editorMode={editorMode}

@@ -69,7 +69,7 @@ export default async function EditorPage({
 
     return (
       <EditorShell
-        projectName={project.name}
+        initialProjectName={project.name}
         templateId={project.template_id}
         initialConfig={initialConfig}
         initialProjectId={project.id}
@@ -108,7 +108,7 @@ export default async function EditorPage({
 
   return (
     <EditorShell
-      projectName={template.name}
+      initialProjectName={template.name}
       templateId={id}
       initialConfig={starterConfig}
       layout={template.layout}
