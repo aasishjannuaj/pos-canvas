@@ -12,6 +12,7 @@ import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
+import ProductPerformance from "@/components/dashboard/ProductPerformance";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -32,7 +33,8 @@ export type EditorSection =
   | "Taxes"
   | "Settings"
   | "Dashboard"
-  | "Sales Report";
+  | "Sales Report"
+  | "Product Performance";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
@@ -662,15 +664,18 @@ export default function EditorShell({
 
     setCompletedOrders((prev) => [order, ...prev]);
 
-    // Feature 10.1/10.2 — reuse the same confirmed values used for the
+    // Feature 10.1/10.2/10.3 — reuse the same confirmed values used for the
     // receipt above (order.orderNumber/subtotal/taxAmount/tip/total/
-    // paymentMethod/createdAt/items) so both the Dashboard and the Sales
-    // Report reflect this sale immediately, without a page reload or a
-    // second fetch. itemCount mirrors cartSummary.itemCount's own math (sum
-    // of line quantities), computed from order.items rather than the cart
-    // state directly since clearCart() runs right after this. This is a
-    // local append only; the server-side order totals query is never
-    // re-run, so the sale can't be double-counted there.
+    // paymentMethod/createdAt/items) so the Dashboard, Sales Report, and
+    // Product Performance all reflect this sale immediately, without a page
+    // reload or a second fetch. itemCount/items are computed from
+    // order.items rather than the cart state directly since clearCart()
+    // runs right after this. lineTotal is derived as price * quantity —
+    // the real order_items.line_total isn't known client-side until the
+    // next server reload, but this matches how the DB itself would compute
+    // it for a plain per-unit price with no discounts. This is a local
+    // append only; the server-side order totals query is never re-run, so
+    // the sale can't be double-counted there.
     setOrderTotals((prev) => [
       {
         id: order.id,
@@ -684,6 +689,12 @@ export default function EditorShell({
           (sum, item) => sum + item.quantity,
           0
         ),
+        items: order.items.map((item) => ({
+          itemId: item.itemId,
+          itemName: item.name,
+          quantity: item.quantity,
+          lineTotal: item.price * item.quantity,
+        })),
         createdAt: order.createdAt,
       },
       ...prev,
@@ -925,6 +936,12 @@ export default function EditorShell({
           />
         ) : editorMode === "edit" && editorSection === "Sales Report" ? (
           <SalesReport
+            orderTotals={orderTotals}
+            orderTotalsError={orderTotalsError}
+            currency={projectConfig.receipt.currency}
+          />
+        ) : editorMode === "edit" && editorSection === "Product Performance" ? (
+          <ProductPerformance
             orderTotals={orderTotals}
             orderTotalsError={orderTotalsError}
             currency={projectConfig.receipt.currency}

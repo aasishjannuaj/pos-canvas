@@ -4,62 +4,14 @@ import { useState } from "react";
 import { CURRENCY_SYMBOLS } from "@/components/editor/EditorShell";
 import type { Currency } from "@/components/editor/EditorShell";
 import type { OrderTotal } from "@/lib/dashboard.types";
-
-type DateRange = "today" | "yesterday" | "last7" | "thisMonth" | "allTime";
-
-const RANGE_OPTIONS: { value: DateRange; label: string }[] = [
-  { value: "today", label: "Today" },
-  { value: "yesterday", label: "Yesterday" },
-  { value: "last7", label: "Last 7 Days" },
-  { value: "thisMonth", label: "This Month" },
-  { value: "allTime", label: "All Time" },
-];
+import { RANGE_OPTIONS, matchesRange } from "@/lib/dateRange";
+import type { DateRange } from "@/lib/dateRange";
 
 type SalesReportProps = {
   orderTotals: OrderTotal[];
   orderTotalsError: string | null;
   currency: Currency;
 };
-
-function isSameLocalDay(a: Date, b: Date): boolean {
-  return a.toDateString() === b.toDateString();
-}
-
-// Every boundary here is computed from the browser's local clock (`now`),
-// matching the app's existing implicit timezone convention — see
-// ProjectDashboard's isToday for the same pattern.
-function matchesRange(createdAt: string, range: DateRange, now: Date): boolean {
-  if (range === "allTime") {
-    return true;
-  }
-
-  const orderDate = new Date(createdAt);
-
-  if (range === "today") {
-    return isSameLocalDay(orderDate, now);
-  }
-
-  if (range === "yesterday") {
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    return isSameLocalDay(orderDate, yesterday);
-  }
-
-  if (range === "last7") {
-    // Today plus the previous 6 calendar days = 7 days total, from local
-    // midnight of the earliest day through now.
-    const start = new Date(now);
-    start.setDate(now.getDate() - 6);
-    start.setHours(0, 0, 0, 0);
-    return orderDate.getTime() >= start.getTime();
-  }
-
-  // thisMonth — from the 1st of the current local month through today.
-  return (
-    orderDate.getFullYear() === now.getFullYear() &&
-    orderDate.getMonth() === now.getMonth()
-  );
-}
 
 // Matches formatReceiptDateTime's shape in EditorPreview.tsx.
 function formatDateTime(createdAt: string): string {

@@ -723,6 +723,12 @@ export default function EditorPropertiesPanel({
             </p>
           )}
 
+          {editorSection === "Product Performance" && (
+            <p className="text-sm text-neutral-500">
+              Product performance is shown in the main content area.
+            </p>
+          )}
+
           {editorSection === "Settings" && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">
