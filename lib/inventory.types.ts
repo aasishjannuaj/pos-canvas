@@ -20,3 +20,12 @@ export type RestockInventoryResult = {
   quantityChange: number;
   quantityAfter: number;
 };
+
+export type AdjustmentInventoryResult = {
+  transactionId: string;
+  itemId: string;
+  itemName: string;
+  quantityBefore: number;
+  quantityChange: number;
+  quantityAfter: number;
+};

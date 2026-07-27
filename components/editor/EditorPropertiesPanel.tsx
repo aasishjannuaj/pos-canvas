@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
 import type {
+  AdjustStatus,
   CartSummary,
   CheckoutStatus,
   CompletedOrder,
@@ -44,6 +45,10 @@ type EditorPropertiesPanelProps = {
   restockError: string | null;
   restockSuccessMessage: string | null;
   onRestock: (itemId: string, quantity: number) => void;
+  adjustStatus: AdjustStatus;
+  adjustError: string | null;
+  adjustSuccessMessage: string | null;
+  onAdjust: (itemId: string, newQuantity: number) => void;
 };
 
 function formatTransactionTime(createdAt: string): string {
@@ -80,6 +85,10 @@ export default function EditorPropertiesPanel({
   restockError,
   restockSuccessMessage,
   onRestock,
+  adjustStatus,
+  adjustError,
+  adjustSuccessMessage,
+  onAdjust,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
@@ -96,6 +105,13 @@ export default function EditorPropertiesPanel({
     string | null
   >(null);
   const [restockQuantityInput, setRestockQuantityInput] = useState("");
+
+  // Feature 9.7B — manual adjustment form. Same rationale as the restock
+  // form above: purely local UI state, not shared with EditorPreview.
+  const [selectedAdjustItemId, setSelectedAdjustItemId] = useState<
+    string | null
+  >(null);
+  const [adjustQuantityInput, setAdjustQuantityInput] = useState("");
 
   const trackedItems = menuItems.filter((item) => item.trackInventory);
   const effectiveRestockItemId =
@@ -121,8 +137,31 @@ export default function EditorPropertiesPanel({
     }
   }
 
+  const effectiveAdjustItemId =
+    selectedAdjustItemId ?? trackedItems[0]?.id ?? null;
+  const adjustItem =
+    trackedItems.find((item) => item.id === effectiveAdjustItemId) ?? null;
+
+  const parsedAdjustQuantity = Number(adjustQuantityInput);
+  const isAdjustQuantityValid =
+    adjustQuantityInput.trim() !== "" &&
+    Number.isInteger(parsedAdjustQuantity) &&
+    parsedAdjustQuantity >= 0;
+
+  const adjustDisabled =
+    !adjustItem ||
+    !isAdjustQuantityValid ||
+    adjustStatus === "saving" ||
+    projectId === null;
+
+  function handleAdjustClick() {
+    if (adjustItem && isAdjustQuantityValid) {
+      onAdjust(adjustItem.id, parsedAdjustQuantity);
+    }
+  }
+
   return (
-    <aside className="flex w-80 flex-none flex-col gap-4 border-l border-neutral-200 bg-white p-6">
+    <aside className="flex w-80 min-h-0 flex-none flex-col gap-4 overflow-y-auto border-l border-neutral-200 bg-white p-6">
       {editorMode === "preview" ? (
         <>
           <h2 className="text-sm font-semibold tracking-tight text-neutral-900">
@@ -288,6 +327,85 @@ export default function EditorPropertiesPanel({
                   className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {restockStatus === "saving" ? "Restocking..." : "Restock"}
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
+            <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
+              Manual Inventory Adjustment
+            </h3>
+
+            {trackedItems.length === 0 ? (
+              <p className="text-sm text-neutral-500">
+                No inventory-tracked items available.
+              </p>
+            ) : (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                    Item
+                  </label>
+                  <select
+                    value={effectiveAdjustItemId ?? ""}
+                    onChange={(event) =>
+                      setSelectedAdjustItemId(event.target.value)
+                    }
+                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                  >
+                    {trackedItems.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                  {adjustItem && (
+                    <span className="text-xs text-neutral-500">
+                      Current stock: {adjustItem.stockQuantity}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                    New Stock
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    value={adjustQuantityInput}
+                    onChange={(event) =>
+                      setAdjustQuantityInput(event.target.value)
+                    }
+                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                  />
+                </div>
+
+                {projectId === null && (
+                  <p className="text-xs text-red-600">
+                    Save this project before adjusting inventory.
+                  </p>
+                )}
+
+                {adjustStatus === "error" && adjustError && (
+                  <p className="text-xs text-red-600">{adjustError}</p>
+                )}
+
+                {adjustStatus === "success" && adjustSuccessMessage && (
+                  <p className="text-xs text-emerald-600">
+                    {adjustSuccessMessage}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleAdjustClick}
+                  disabled={adjustDisabled}
+                  className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {adjustStatus === "saving" ? "Adjusting..." : "Adjust Inventory"}
                 </button>
               </>
             )}

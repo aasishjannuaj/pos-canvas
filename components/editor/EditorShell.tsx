@@ -7,7 +7,7 @@ import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
 import { completeSaleOrder } from "@/lib/orders";
-import { restockInventory } from "@/lib/inventory";
+import { restockInventory, adjustInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
@@ -60,6 +60,8 @@ export type CheckoutStatus = "idle" | "success";
 export type SaleSaveStatus = "idle" | "saving" | "success" | "error";
 
 export type RestockStatus = "idle" | "saving" | "success" | "error";
+
+export type AdjustStatus = "idle" | "saving" | "success" | "error";
 
 export type CompletedOrder = {
   id: string;
@@ -320,6 +322,13 @@ export default function EditorShell({
     string | null
   >(null);
 
+  // Feature 9.7B — manual inventory adjustment status for the current attempt.
+  const [adjustStatus, setAdjustStatus] = useState<AdjustStatus>("idle");
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustSuccessMessage, setAdjustSuccessMessage] = useState<
+    string | null
+  >(null);
+
   // Feature 7.4/8.4 — completed orders & receipts. Seeded from server-loaded
   // history when available (newest first); new sales are prepended so the
   // ordering convention stays consistent throughout.
@@ -330,9 +339,9 @@ export default function EditorShell({
 
   // Feature 9.4 — inventory activity log (newest first), seeded from
   // server-loaded history only. The client never fabricates local entries
-  // for a just-completed sale or a just-completed restock (see completeSale
-  // and handleRestock for why) — this never changes locally, only a fresh
-  // server load (mount or reload) can update it.
+  // for a just-completed sale, restock, or adjustment (see completeSale,
+  // handleRestock, and handleInventoryAdjustment for why) — this never
+  // changes locally, only a fresh server load (mount or reload) can update it.
   const inventoryTransactions = initialInventoryTransactions ?? [];
 
   // Feature 6.4/6.5.2/6.5.3 — save state
@@ -738,6 +747,65 @@ export default function EditorShell({
     );
   }
 
+  // Feature 9.7B — manually adjust an inventory-tracked item's stock to an
+  // exact final value via the atomic adjust_inventory RPC. The RPC's
+  // returned quantityAfter is authoritative; this handler never computes a
+  // new stock number itself. Mirrors handleRestock's conventions.
+  async function handleInventoryAdjustment(itemId: string, newQuantity: number) {
+    if (adjustStatus === "saving") {
+      return;
+    }
+
+    if (projectId === null) {
+      setAdjustStatus("error");
+      setAdjustError("Save this project before adjusting inventory.");
+      setAdjustSuccessMessage(null);
+      return;
+    }
+
+    if (!Number.isInteger(newQuantity) || newQuantity < 0) {
+      setAdjustStatus("error");
+      setAdjustError("New stock must be a whole number of 0 or more.");
+      setAdjustSuccessMessage(null);
+      return;
+    }
+
+    setAdjustStatus("saving");
+    setAdjustError(null);
+    setAdjustSuccessMessage(null);
+
+    const { result, error } = await adjustInventory({
+      projectId,
+      itemId,
+      newQuantity,
+    });
+
+    if (error || !result) {
+      // RPC failed — nothing local changes, so this can be retried freely.
+      setAdjustStatus("error");
+      setAdjustError(error ?? "Something went wrong while adjusting inventory.");
+      return;
+    }
+
+    // Use the RPC's authoritative quantityAfter directly — no client math,
+    // and no markUnsaved(): the database already persisted this change, so
+    // there is nothing new for Save to do. Any other unsaved edits (or lack
+    // thereof) are left exactly as they were.
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) =>
+        item.id === result.itemId
+          ? { ...item, stockQuantity: result.quantityAfter }
+          : item
+      ),
+    }));
+
+    setAdjustStatus("success");
+    setAdjustSuccessMessage(
+      `${result.itemName} adjusted from ${result.quantityBefore} to ${result.quantityAfter}.`
+    );
+  }
+
   async function handleSave() {
     setSaveStatus("saving");
     setSaveError(null);
@@ -845,6 +913,10 @@ export default function EditorShell({
           restockError={restockError}
           restockSuccessMessage={restockSuccessMessage}
           onRestock={handleRestock}
+          adjustStatus={adjustStatus}
+          adjustError={adjustError}
+          adjustSuccessMessage={adjustSuccessMessage}
+          onAdjust={handleInventoryAdjustment}
         />
       </div>
     </div>
