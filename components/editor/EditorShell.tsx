@@ -14,6 +14,7 @@ import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
+import ReceiptPreview from "./ReceiptPreview";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -100,6 +101,15 @@ type ReceiptSettings = {
   footer: string;
   orderPrefix: string;
   tipsEnabled: boolean;
+  // Feature 11.1 — printable receipt configuration.
+  showBusinessName: boolean;
+  businessAddress: string;
+  businessPhone: string;
+  headerMessage: string;
+  showTaxLine: boolean;
+  showTipLine: boolean;
+  showPaymentMethod: boolean;
+  showOrderNumber: boolean;
 };
 
 type BrandingSettings = {
@@ -214,6 +224,14 @@ const initialProjectConfig: ProjectConfig = {
     footer: "Thank you for visiting!",
     orderPrefix: "ORD-",
     tipsEnabled: false,
+    showBusinessName: true,
+    businessAddress: "",
+    businessPhone: "",
+    headerMessage: "",
+    showTaxLine: true,
+    showTipLine: true,
+    showPaymentMethod: true,
+    showOrderNumber: true,
   },
 };
 
@@ -268,10 +286,43 @@ function normalizeMenuItem(item: MenuItem): MenuItem {
   };
 }
 
+// Feature 11.1 — normalize receipt settings loaded from older saved projects
+// that predate these fields, so the app never crashes on missing values and
+// existing valid values are always preserved as-is. Mirrors
+// normalizeMenuItem's convention above.
+function normalizeReceiptSettings(receipt: ReceiptSettings): ReceiptSettings {
+  return {
+    ...receipt,
+    showBusinessName:
+      typeof receipt.showBusinessName === "boolean"
+        ? receipt.showBusinessName
+        : true,
+    businessAddress:
+      typeof receipt.businessAddress === "string" ? receipt.businessAddress : "",
+    businessPhone:
+      typeof receipt.businessPhone === "string" ? receipt.businessPhone : "",
+    headerMessage:
+      typeof receipt.headerMessage === "string" ? receipt.headerMessage : "",
+    showTaxLine:
+      typeof receipt.showTaxLine === "boolean" ? receipt.showTaxLine : true,
+    showTipLine:
+      typeof receipt.showTipLine === "boolean" ? receipt.showTipLine : true,
+    showPaymentMethod:
+      typeof receipt.showPaymentMethod === "boolean"
+        ? receipt.showPaymentMethod
+        : true,
+    showOrderNumber:
+      typeof receipt.showOrderNumber === "boolean"
+        ? receipt.showOrderNumber
+        : true,
+  };
+}
+
 function normalizeProjectConfig(config: ProjectConfig): ProjectConfig {
   return {
     ...config,
     menuItems: config.menuItems.map(normalizeMenuItem),
+    receipt: normalizeReceiptSettings(config.receipt),
   };
 }
 
@@ -326,6 +377,15 @@ export default function EditorShell({
   const [selectedPaymentMethod, setSelectedPaymentMethod] =
     useState<PaymentMethod | null>(null);
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
+
+  // Feature 11.1 — the exact order id the success screen's "View Receipt"
+  // button should open. Set alongside setCompletedOrders in completeSale(),
+  // so it always names the order that RPC call actually confirmed — never
+  // inferred from completedOrders[0], which would be fragile if that array's
+  // update ordering ever changed.
+  const [lastCompletedOrderId, setLastCompletedOrderId] = useState<
+    string | null
+  >(null);
 
   // Feature 8.3/9.3 — persistence status for the current checkout attempt.
   // After a successful sale, saleSaveError may hold a non-blocking inventory
@@ -676,6 +736,10 @@ export default function EditorShell({
     };
 
     setCompletedOrders((prev) => [order, ...prev]);
+
+    // Feature 11.1 — the exact confirmed order id for this sale, so the
+    // success screen's "View Receipt" button can open it directly.
+    setLastCompletedOrderId(order.id);
 
     // Feature 10.1/10.2/10.3 — reuse the same confirmed values used for the
     // receipt above (order.orderNumber/subtotal/taxAmount/tip/total/
@@ -1047,6 +1111,11 @@ export default function EditorShell({
             inventoryTransactions={inventoryTransactions}
             inventoryTransactionsError={inventoryTransactionsError}
           />
+        ) : editorMode === "edit" && editorSection === "Settings" ? (
+          <ReceiptPreview
+            branding={projectConfig.branding}
+            receipt={projectConfig.receipt}
+          />
         ) : (
           <EditorPreview
             menuItems={projectConfig.menuItems}
@@ -1076,6 +1145,7 @@ export default function EditorShell({
             selectedReceiptId={selectedReceiptId}
             onOpenReceipt={openReceipt}
             onCloseReceipt={closeReceipt}
+            lastCompletedOrderId={lastCompletedOrderId}
           />
         )}
         <EditorPropertiesPanel

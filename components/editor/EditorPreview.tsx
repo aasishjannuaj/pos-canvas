@@ -12,6 +12,7 @@ import type {
   ProjectConfig,
   SaleSaveStatus,
 } from "./EditorShell";
+import Receipt from "./Receipt";
 
 // Static preview-only figures used only for the unchanged edit-mode mock below.
 const STATIC_TIP = 3;
@@ -45,6 +46,7 @@ type EditorPreviewProps = {
   selectedReceiptId: string | null;
   onOpenReceipt: (orderId: string) => void;
   onCloseReceipt: () => void;
+  lastCompletedOrderId: string | null;
 };
 
 function calculateOrderSummary(tax: {
@@ -70,16 +72,6 @@ function calculateOrderSummary(tax: {
 
 function formatOrderTime(createdAt: string): string {
   return new Date(createdAt).toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatReceiptDateTime(createdAt: string): string {
-  return new Date(createdAt).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
@@ -125,6 +117,7 @@ export default function EditorPreview({
   selectedReceiptId,
   onOpenReceipt,
   onCloseReceipt,
+  lastCompletedOrderId,
 }: EditorPreviewProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
@@ -499,13 +492,30 @@ export default function EditorPreview({
                   </p>
                 )}
 
-                <button
-                  type="button"
-                  onClick={onCloseCheckout}
-                  className="mt-4 rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                >
-                  Done
-                </button>
+                <div className="mt-4 flex w-full flex-col gap-2">
+                  {/* Feature 11.1 — opens the same receipt overlay used for
+                      reprinting from Recent Orders, targeting the exact
+                      order this checkout just confirmed. The user still has
+                      to explicitly tap Print Receipt from there — this does
+                      not trigger window.print() itself. */}
+                  {lastCompletedOrderId && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenReceipt(lastCompletedOrderId)}
+                      className="w-full rounded-full border border-neutral-200 px-5 py-2 text-sm font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      View Receipt
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onCloseCheckout}
+                    className="w-full rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                  >
+                    Done
+                  </button>
+                </div>
               </div>
             ) : (
               <>
@@ -604,94 +614,22 @@ export default function EditorPreview({
           </div>
         )}
 
-        {/* Receipt preview overlay */}
+        {/* Receipt preview overlay — the same Receipt component also backs
+            the print-only copy below, so on-screen and printed output can
+            never drift apart. */}
         {editorMode === "preview" && selectedOrder && (
           <div className="absolute inset-0 z-10 flex flex-col bg-white p-4">
             <div className="flex-1 overflow-y-auto">
-              <div className="flex flex-col items-center gap-1 border-b border-neutral-200 pb-3 text-center">
-                <p className="text-sm font-semibold text-neutral-900">
-                  {branding.businessName}
-                </p>
-                <p className="text-xs text-neutral-500">{selectedOrder.orderNumber}</p>
-                <p className="text-xs text-neutral-400">
-                  {formatReceiptDateTime(selectedOrder.createdAt)}
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-1.5 py-3">
-                {selectedOrder.items.map((item) => (
-                  <div
-                    key={item.itemId}
-                    className="flex items-center justify-between text-xs text-neutral-600"
-                  >
-                    <span className="flex-1 truncate text-neutral-900">
-                      {item.quantity} × {item.name}
-                    </span>
-                    <span className="font-medium text-neutral-900">
-                      {currencySymbol}
-                      {(item.price * item.quantity).toFixed(2)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex flex-col gap-1 border-t border-neutral-200 pt-2 text-xs text-neutral-600">
-                <div className="flex items-center justify-between">
-                  <span>Subtotal</span>
-                  <span>
-                    {currencySymbol}
-                    {selectedOrder.subtotal.toFixed(2)}
-                  </span>
-                </div>
-
-                {selectedOrder.taxAmount > 0 && (
-                  <div className="flex items-center justify-between">
-                    <span>Tax</span>
-                    <span>
-                      {currencySymbol}
-                      {selectedOrder.taxAmount.toFixed(2)}
-                    </span>
-                  </div>
-                )}
-
-                {selectedOrder.tip > 0 && (
-                  <div className="flex items-center justify-between">
-                    <span>Tip</span>
-                    <span>
-                      {currencySymbol}
-                      {selectedOrder.tip.toFixed(2)}
-                    </span>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between border-t border-neutral-200 pt-1 text-sm font-semibold text-neutral-900">
-                  <span>Total</span>
-                  <span>
-                    {currencySymbol}
-                    {selectedOrder.total.toFixed(2)}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  <span>Payment</span>
-                  <span className="font-medium text-neutral-900">
-                    {selectedOrder.paymentMethod === "cash" ? "Cash" : "Card"}
-                  </span>
-                </div>
-              </div>
-
-              <p className="mt-3 text-center text-[11px] text-neutral-400">
-                {receipt.footer}
-              </p>
+              <Receipt order={selectedOrder} branding={branding} receipt={receipt} />
             </div>
 
             <div className="flex flex-col gap-2 pt-3">
               <button
                 type="button"
-                disabled
-                className="w-full cursor-not-allowed rounded-full border border-neutral-200 px-5 py-2.5 text-sm font-medium text-neutral-400"
+                onClick={() => window.print()}
+                className="w-full rounded-full border border-neutral-200 px-5 py-2.5 text-sm font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
               >
-                Print Receipt (coming soon)
+                Print Receipt
               </button>
 
               <button
@@ -705,6 +643,17 @@ export default function EditorPreview({
           </div>
         )}
       </div>
+
+      {/* Feature 11.1 — print-only copy. Invisible on screen (see
+          .receipt-print-area in globals.css); revealed by the print
+          stylesheet, which also hides everything else in the app so only
+          this prints. Kept as a single instance, mounted only while a
+          receipt is actually open, so at most one print area ever exists. */}
+      {selectedOrder && (
+        <div className="receipt-print-area">
+          <Receipt order={selectedOrder} branding={branding} receipt={receipt} />
+        </div>
+      )}
     </div>
   );
 }
