@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { SavedProject } from "@/lib/projects";
+import { getTemplateById } from "@/data/templates";
 
 type RecentProjectsProps = {
   projects: SavedProject[];
@@ -7,11 +8,18 @@ type RecentProjectsProps = {
 
 const THUMBNAIL_COLORS = ["bg-blue-100", "bg-amber-100", "bg-emerald-100", "bg-rose-100"];
 
-function formatTemplateName(templateId: string): string {
+// Feature 12.1 — last-resort fallback for a legacy/unrecognized template_id
+// that doesn't match any registered template. Display-only: never blocks a
+// project from loading, and never touches the project's own saved config.
+function formatFallbackTemplateName(templateId: string): string {
   return templateId
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
+}
+
+function formatTemplateName(templateId: string): string {
+  return getTemplateById(templateId)?.name ?? formatFallbackTemplateName(templateId);
 }
 
 function formatUpdatedAt(updatedAt: string): string {

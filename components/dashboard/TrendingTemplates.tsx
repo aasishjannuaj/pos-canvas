@@ -1,14 +1,9 @@
 import Link from "next/link";
+import { templates } from "@/data/templates";
 
-const trendingTemplates = [
-  { icon: "🍔", title: "Restaurant", id: "restaurant" },
-  { icon: "☕", title: "Cafe", id: "cafe" },
-  { icon: "🛍", title: "Retail", id: "retail" },
-  { icon: "🍺", title: "Liquor Store", id: "liquor-store" },
-  { icon: "💇", title: "Salon", id: "salon" },
-  { icon: "🏪", title: "Convenience Store", id: "convenience-store" },
-];
-
+// Feature 12.1 — consumes the single canonical template registry instead of
+// its own hardcoded list (which previously included "convenience-store", an
+// id with no matching entry anywhere else in the app).
 export default function TrendingTemplates() {
   return (
     <section>
@@ -26,7 +21,7 @@ export default function TrendingTemplates() {
       </div>
 
       <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-6">
-        {trendingTemplates.map((template) => (
+        {templates.map((template) => (
           <Link
             key={template.id}
             href={`/templates/${template.id}`}
@@ -39,7 +34,7 @@ export default function TrendingTemplates() {
             </div>
 
             <span className="text-sm font-medium text-neutral-900">
-              {template.title}
+              {template.category}
             </span>
           </Link>
         ))}

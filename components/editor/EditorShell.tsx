@@ -15,18 +15,36 @@ import SalesReport from "@/components/dashboard/SalesReport";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
 import ReceiptPreview from "./ReceiptPreview";
+import {
+  MENU_CATEGORIES,
+  CURRENCY_SYMBOLS,
+  defaultProjectConfig,
+} from "@/lib/projectConfig";
+import type {
+  MenuCategory,
+  MenuItem,
+  Currency,
+  TaxSettings,
+  ReceiptSettings,
+  BrandingSettings,
+  ProjectConfig,
+} from "@/lib/projectConfig";
 
-export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
-
-export type MenuCategory = (typeof MENU_CATEGORIES)[number];
-
-export type MenuItem = {
-  id: string;
-  name: string;
-  price: number;
-  category: MenuCategory;
-  trackInventory: boolean;
-  stockQuantity: number;
+// Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
+// neutral lib/projectConfig.ts (so the template registry in data/templates.ts
+// can reference them without depending on this "use client" component, and
+// without a circular import back to it). Re-exported here unchanged so every
+// existing `import ... from "@/components/editor/EditorShell"` call site
+// elsewhere in the app keeps working exactly as before.
+export {
+  MENU_CATEGORIES,
+  CURRENCY_SYMBOLS,
+};
+export type {
+  MenuCategory,
+  MenuItem,
+  Currency,
+  ProjectConfig,
 };
 
 export type EditorSection =
@@ -38,15 +56,6 @@ export type EditorSection =
   | "Sales Report"
   | "Product Performance"
   | "Inventory Summary";
-
-export type Currency = "USD" | "CAD" | "EUR" | "GBP";
-
-export const CURRENCY_SYMBOLS: Record<Currency, string> = {
-  USD: "$",
-  CAD: "CA$",
-  EUR: "€",
-  GBP: "£",
-};
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -87,152 +96,6 @@ export type CompletedOrder = {
   total: number;
   paymentMethod: PaymentMethod;
   createdAt: string;
-};
-
-type TaxSettings = {
-  enabled: boolean;
-  rate: number;
-  pricesIncludeTax: boolean;
-  showTaxSeparately: boolean;
-};
-
-type ReceiptSettings = {
-  currency: Currency;
-  footer: string;
-  orderPrefix: string;
-  tipsEnabled: boolean;
-  // Feature 11.1 — printable receipt configuration.
-  showBusinessName: boolean;
-  businessAddress: string;
-  businessPhone: string;
-  headerMessage: string;
-  showTaxLine: boolean;
-  showTipLine: boolean;
-  showPaymentMethod: boolean;
-  showOrderNumber: boolean;
-};
-
-type BrandingSettings = {
-  businessName: string;
-  accentColor: string;
-};
-
-export type ProjectConfig = {
-  menuItems: MenuItem[];
-  branding: BrandingSettings;
-  tax: TaxSettings;
-  receipt: ReceiptSettings;
-};
-
-const initialMenuItems: MenuItem[] = [
-  {
-    id: "1",
-    name: "Bacon Egg & Cheese",
-    price: 6.49,
-    category: "Breakfast",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "2",
-    name: "Egg & Cheese",
-    price: 4.99,
-    category: "Breakfast",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "3",
-    name: "Hash Browns",
-    price: 2.49,
-    category: "Breakfast",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "4",
-    name: "Coffee",
-    price: 2.25,
-    category: "Breakfast",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "5",
-    name: "Turkey Grinder",
-    price: 8.95,
-    category: "Lunch",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "6",
-    name: "Roast Beef",
-    price: 9.25,
-    category: "Lunch",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "7",
-    name: "Chicken Grinder",
-    price: 8.75,
-    category: "Lunch",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "8",
-    name: "Coke",
-    price: 1.99,
-    category: "Drinks",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "9",
-    name: "Sprite",
-    price: 1.99,
-    category: "Drinks",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-  {
-    id: "10",
-    name: "Water",
-    price: 1.49,
-    category: "Drinks",
-    trackInventory: true,
-    stockQuantity: 20,
-  },
-];
-
-const initialProjectConfig: ProjectConfig = {
-  menuItems: initialMenuItems,
-  branding: {
-    businessName: "Restaurant POS",
-    accentColor: "#2563EB",
-  },
-  tax: {
-    enabled: true,
-    rate: 6.35,
-    pricesIncludeTax: false,
-    showTaxSeparately: true,
-  },
-  receipt: {
-    currency: "USD",
-    footer: "Thank you for visiting!",
-    orderPrefix: "ORD-",
-    tipsEnabled: false,
-    showBusinessName: true,
-    businessAddress: "",
-    businessPhone: "",
-    headerMessage: "",
-    showTaxLine: true,
-    showTipLine: true,
-    showPaymentMethod: true,
-    showOrderNumber: true,
-  },
 };
 
 // Static preview-only figure — the builder has no real payment/tip math yet.
@@ -359,7 +222,7 @@ export default function EditorShell({
   initialOrderTotalsError,
 }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
-    normalizeProjectConfig(initialConfig ?? initialProjectConfig)
+    normalizeProjectConfig(initialConfig ?? defaultProjectConfig)
   );
 
   // UI-only state — not part of the saved project, so it stays outside projectConfig.

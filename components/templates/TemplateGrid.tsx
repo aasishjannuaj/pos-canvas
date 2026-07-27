@@ -1,62 +1,18 @@
 import TemplateGalleryCard from "./TemplateGalleryCard";
+import { templates } from "@/data/templates";
 
-const templates = [
-  {
-    icon: "🍔",
-    name: "Classic Restaurant",
-    category: "Restaurant",
-    description: "Table orders, menus, and kitchen tickets built in.",
-  },
-  {
-    icon: "☕",
-    name: "Cozy Cafe",
-    category: "Cafe",
-    description: "Quick checkout for drinks, pastries, and loyalty perks.",
-  },
-  {
-    icon: "🛍",
-    name: "Modern Retail",
-    category: "Retail",
-    description: "Inventory-friendly layout for shelves full of products.",
-  },
-  {
-    icon: "🍺",
-    name: "Liquor Store Essentials",
-    category: "Liquor Store",
-    description: "Age-check reminders and fast bottle lookups.",
-  },
-  {
-    icon: "🚚",
-    name: "Street Food Truck",
-    category: "Food Truck",
-    description: "Simple menu, fast taps, built for a small window.",
-  },
-  {
-    icon: "💇",
-    name: "Salon & Spa",
-    category: "Salon",
-    description: "Service menus, add-ons, and easy tipping.",
-  },
-  {
-    icon: "💈",
-    name: "Barber Shop",
-    category: "Barber",
-    description: "Walk-in friendly checkout for quick services.",
-  },
-  {
-    icon: "🏪",
-    name: "Corner Convenience",
-    category: "Convenience Store",
-    description: "Fast scan-and-go for high-volume small purchases.",
-  },
-];
-
+// Feature 12.1 — consumes the single canonical template registry instead of
+// its own hardcoded list. The registry only has the 6 templates with
+// consistent representation elsewhere in the app (see data/templates.ts);
+// two extra cards that used to appear only here ("Barber Shop", "Corner
+// Convenience") were dropped rather than fabricated to match.
 export default function TemplateGrid() {
   return (
     <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
       {templates.map((template) => (
         <TemplateGalleryCard
-          key={template.name}
+          key={template.id}
+          templateId={template.id}
           icon={template.icon}
           name={template.name}
           category={template.category}

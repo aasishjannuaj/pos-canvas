@@ -1,26 +1,11 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import EditorShell from "@/components/editor/EditorShell";
 import { getProjectById } from "@/lib/projects.server";
 import { getProjectOrders } from "@/lib/orders.server";
 import { getProjectInventoryTransactions } from "@/lib/inventory.server";
 import { getProjectOrderTotals } from "@/lib/dashboard.server";
-import type { ProjectConfig } from "@/components/editor/EditorShell";
-
-const projectNames: Record<string, string> = {
-  restaurant: "Classic Restaurant",
-  cafe: "Cozy Cafe",
-  retail: "Modern Retail",
-  "liquor-store": "Liquor Store Essentials",
-  "food-truck": "Street Food Truck",
-  salon: "Salon & Spa",
-};
-
-function formatFallbackName(id: string): string {
-  return id
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
+import type { ProjectConfig } from "@/lib/projectConfig";
+import { getTemplateById, getStarterConfig } from "@/data/templates";
 
 const PROJECT_ROUTE_PREFIX = "project-";
 
@@ -89,7 +74,34 @@ export default async function EditorPage({
     );
   }
 
-  const projectName = projectNames[id] ?? formatFallbackName(id);
+  // Feature 12.1 correction — a brand-new, not-yet-saved project must use a
+  // real, known template. Previously an unknown id here silently fell back
+  // to the shared default starter configuration while keeping the
+  // unrecognized id as templateId — that let an unsupported project get
+  // created under an id that isn't actually a template. This restriction is
+  // scoped to brand-new URLs only: an existing saved project with a legacy
+  // or unknown template_id (branch above) is untouched and always loads
+  // with its own persisted config, regardless of whether that id still
+  // matches a registered template.
+  const template = getTemplateById(id);
 
-  return <EditorShell projectName={projectName} templateId={id} />;
+  if (!template) {
+    redirect("/templates");
+  }
+
+  // The registry's starter configuration (already a fresh, safely-cloned
+  // copy — see getStarterConfig) seeds this session. Once the project is
+  // saved, opening it again always goes through the branch above, which
+  // loads the project's own persisted `config` column — the registry is
+  // never consulted again, and a saved project's customized data can never
+  // be replaced or merged with starter data.
+  const starterConfig = getStarterConfig(id);
+
+  return (
+    <EditorShell
+      projectName={template.name}
+      templateId={id}
+      initialConfig={starterConfig}
+    />
+  );
 }

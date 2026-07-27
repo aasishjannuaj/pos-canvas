@@ -1,24 +1,23 @@
 import Link from "next/link";
 
 type TemplateGalleryCardProps = {
+  templateId: string;
   icon: string;
   name: string;
   category: string;
   description: string;
 };
 
-function slugify(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, "-");
-}
-
+// Feature 12.1 — templateId now comes directly from the template registry
+// (data/templates.ts) instead of being derived by slugifying the category
+// label, which could silently produce an id that didn't match anything.
 export default function TemplateGalleryCard({
+  templateId,
   icon,
   name,
   category,
   description,
 }: TemplateGalleryCardProps) {
-  const templateId = slugify(category);
-
   return (
     <Link
       href={`/editor/${templateId}`}
