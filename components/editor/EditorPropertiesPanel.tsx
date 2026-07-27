@@ -729,6 +729,12 @@ export default function EditorPropertiesPanel({
             </p>
           )}
 
+          {editorSection === "Inventory Summary" && (
+            <p className="text-sm text-neutral-500">
+              Inventory summary is shown in the main content area.
+            </p>
+          )}
+
           {editorSection === "Settings" && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">

@@ -34,6 +34,13 @@ function mapInventoryTransactionRow(
   };
 }
 
+// Feature 9.4/10.4 — shared inventory-history loader. Used by the Inventory
+// Activity panel (which only ever displays the first 10 entries itself) and
+// by the Inventory Summary report (which needs full history for "All Time"
+// movement, and correct totals for narrower ranges too). Previously capped
+// at 50 rows — that cap was a DB-safety default, not a business rule tied to
+// the number 50 anywhere in the UI, so it's removed here rather than adding
+// a second, duplicate unbounded query against the same table.
 export async function getProjectInventoryTransactions(
   projectId: string
 ): Promise<{
@@ -58,8 +65,7 @@ export async function getProjectInventoryTransactions(
       "id, order_id, item_id, item_name, transaction_type, quantity_change, quantity_before, quantity_after, created_at"
     )
     .eq("project_id", projectId)
-    .order("created_at", { ascending: false })
-    .limit(50);
+    .order("created_at", { ascending: false });
 
   if (error) {
     return { transactions: [], error: error.message };

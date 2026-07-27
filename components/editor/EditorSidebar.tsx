@@ -10,6 +10,7 @@ const sections: { label: EditorSection; icon: string }[] = [
   { label: "Dashboard", icon: "📊" },
   { label: "Sales Report", icon: "📈" },
   { label: "Product Performance", icon: "🏆" },
+  { label: "Inventory Summary", icon: "📦" },
 ];
 
 type EditorSidebarProps = {

@@ -6,6 +6,7 @@ import type { Currency } from "@/components/editor/EditorShell";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import { RANGE_OPTIONS, matchesRange } from "@/lib/dateRange";
 import type { DateRange } from "@/lib/dateRange";
+import { productKey } from "@/lib/productKey";
 
 type SortKey = "units" | "revenue" | "orders";
 
@@ -30,13 +31,6 @@ type ProductPerformanceProps = {
   orderTotalsError: string | null;
   currency: Currency;
 };
-
-// Group by item_id primarily, falling back to item_name only if item_id is
-// ever missing/blank — cheap insurance against malformed rows, matching the
-// same non-null assumption the rest of the app already makes about item_id.
-function productKey(itemId: string, itemName: string): string {
-  return itemId.trim() !== "" ? itemId : itemName;
-}
 
 function aggregateProducts(orders: OrderTotal[]): ProductAggregate[] {
   const byKey = new Map<

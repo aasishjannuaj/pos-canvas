@@ -13,6 +13,7 @@ import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
+import InventorySummary from "@/components/dashboard/InventorySummary";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -34,7 +35,8 @@ export type EditorSection =
   | "Settings"
   | "Dashboard"
   | "Sales Report"
-  | "Product Performance";
+  | "Product Performance"
+  | "Inventory Summary";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
@@ -289,6 +291,7 @@ type EditorShellProps = {
   initialProjectId?: string | null;
   initialCompletedOrders?: CompletedOrder[];
   initialInventoryTransactions?: InventoryTransaction[];
+  initialInventoryTransactionsError?: string | null;
   initialOrderTotals?: OrderTotal[];
   initialOrderTotalsError?: string | null;
 };
@@ -300,6 +303,7 @@ export default function EditorShell({
   initialProjectId,
   initialCompletedOrders,
   initialInventoryTransactions,
+  initialInventoryTransactionsError,
   initialOrderTotals,
   initialOrderTotalsError,
 }: EditorShellProps) {
@@ -352,12 +356,21 @@ export default function EditorShell({
   );
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
-  // Feature 9.4 — inventory activity log (newest first), seeded from
-  // server-loaded history only. The client never fabricates local entries
-  // for a just-completed sale, restock, or adjustment (see completeSale,
-  // handleRestock, and handleInventoryAdjustment for why) — this never
-  // changes locally, only a fresh server load (mount or reload) can update it.
-  const inventoryTransactions = initialInventoryTransactions ?? [];
+  // Feature 9.4/10.4 — inventory activity log (newest first), seeded from
+  // server-loaded history. Unlike its original design, this now *does* need
+  // local updates: a sale, restock, or adjustment made this session must
+  // show up in both the Inventory Activity panel and Inventory Summary
+  // immediately, without a page reload. completeSale/handleRestock/
+  // handleInventoryAdjustment each append a locally-confirmed entry below —
+  // never a re-fetch, so nothing here risks double-counting.
+  const [inventoryTransactions, setInventoryTransactions] = useState<
+    InventoryTransaction[]
+  >(initialInventoryTransactions ?? []);
+
+  // Same rationale as orderTotalsError: no client-side retry for this
+  // read-only reporting query, so a load failure (if any) is fixed for the
+  // session.
+  const inventoryTransactionsError = initialInventoryTransactionsError ?? null;
 
   // Feature 10.1 — dashboard order totals, seeded from server-loaded history.
   // Unlike inventoryTransactions, this *does* need a local update: a sale
@@ -700,6 +713,51 @@ export default function EditorShell({
       ...prev,
     ]);
 
+    // Feature 10.4 — append one synthetic "sale" inventory transaction per
+    // tracked cart line, so Inventory Summary (and the Inventory Activity
+    // panel, which reads this same state) reflect this sale's stock
+    // deduction immediately. quantityBefore is read from
+    // projectConfig.menuItems as it stands right here — nothing has
+    // decremented it locally yet, the only update happens later via the
+    // getProjectConfig() reload below — so this is the exact pre-sale
+    // snapshot, not an inferred value. Untracked items are skipped (no
+    // stock concept to record, matching what complete_sale's own inventory
+    // bookkeeping already does). This only runs after completeSaleOrder has
+    // already succeeded above, so a failed sale never produces phantom
+    // transactions. Each id is deterministic (orderId + itemId + line
+    // index) so React keys and activity rows can't collide even if this
+    // were ever called twice for the same order.
+    const saleInventoryTransactions: InventoryTransaction[] = order.items
+      .map((item, index): InventoryTransaction | null => {
+        const menuItem = projectConfig.menuItems.find(
+          (candidate) => candidate.id === item.itemId
+        );
+
+        if (!menuItem || !menuItem.trackInventory) {
+          return null;
+        }
+
+        const quantityBefore = menuItem.stockQuantity;
+        const quantityChange = -item.quantity;
+
+        return {
+          id: `sale-${order.id}-${item.itemId}-${index}`,
+          orderId: order.id,
+          itemId: item.itemId,
+          itemName: item.name,
+          transactionType: "sale",
+          quantityChange,
+          quantityBefore,
+          quantityAfter: quantityBefore + quantityChange,
+          createdAt: order.createdAt,
+        };
+      })
+      .filter((transaction): transaction is InventoryTransaction => transaction !== null);
+
+    if (saleInventoryTransactions.length > 0) {
+      setInventoryTransactions((prev) => [...saleInventoryTransactions, ...prev]);
+    }
+
     clearCart();
 
     // Lock the UI into the success view *before* attempting the reload, so
@@ -744,8 +802,9 @@ export default function EditorShell({
       }),
     }));
 
-    // inventoryTransactions is deliberately left unchanged here — see the
-    // comment where it is declared above.
+    // inventoryTransactions was already updated above (Feature 10.4), before
+    // this reload — this reconciliation only concerns stockQuantity/
+    // trackInventory on projectConfig.menuItems, not the transaction log.
     setSaleSaveStatus("success");
   }
 
@@ -809,6 +868,24 @@ export default function EditorShell({
       ),
     }));
 
+    // Feature 10.4 — use the RPC's own transaction id and before/change/
+    // after values directly (no client math), so Inventory Summary and the
+    // Inventory Activity panel reflect this restock immediately.
+    setInventoryTransactions((prev) => [
+      {
+        id: result.transactionId,
+        orderId: null,
+        itemId: result.itemId,
+        itemName: result.itemName,
+        transactionType: "restock",
+        quantityChange: result.quantityChange,
+        quantityBefore: result.quantityBefore,
+        quantityAfter: result.quantityAfter,
+        createdAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+
     setRestockStatus("success");
     setRestockSuccessMessage(
       `${result.itemName} restocked by ${result.quantityChange}. New stock: ${result.quantityAfter}.`
@@ -867,6 +944,24 @@ export default function EditorShell({
           : item
       ),
     }));
+
+    // Feature 10.4 — use the RPC's own transaction id and before/change/
+    // after values directly (no client math), so Inventory Summary and the
+    // Inventory Activity panel reflect this adjustment immediately.
+    setInventoryTransactions((prev) => [
+      {
+        id: result.transactionId,
+        orderId: null,
+        itemId: result.itemId,
+        itemName: result.itemName,
+        transactionType: "adjustment",
+        quantityChange: result.quantityChange,
+        quantityBefore: result.quantityBefore,
+        quantityAfter: result.quantityAfter,
+        createdAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
 
     setAdjustStatus("success");
     setAdjustSuccessMessage(
@@ -945,6 +1040,12 @@ export default function EditorShell({
             orderTotals={orderTotals}
             orderTotalsError={orderTotalsError}
             currency={projectConfig.receipt.currency}
+          />
+        ) : editorMode === "edit" && editorSection === "Inventory Summary" ? (
+          <InventorySummary
+            menuItems={projectConfig.menuItems}
+            inventoryTransactions={inventoryTransactions}
+            inventoryTransactionsError={inventoryTransactionsError}
           />
         ) : (
           <EditorPreview
