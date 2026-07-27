@@ -7,6 +7,7 @@ const sections: { label: EditorSection; icon: string }[] = [
   { label: "Branding", icon: "🎨" },
   { label: "Taxes", icon: "🧾" },
   { label: "Settings", icon: "⚙️" },
+  { label: "Dashboard", icon: "📊" },
 ];
 
 type EditorSidebarProps = {

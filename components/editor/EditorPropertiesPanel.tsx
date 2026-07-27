@@ -711,6 +711,12 @@ export default function EditorPropertiesPanel({
             </div>
           )}
 
+          {editorSection === "Dashboard" && (
+            <p className="text-sm text-neutral-500">
+              Dashboard details are shown in the main content area.
+            </p>
+          )}
+
           {editorSection === "Settings" && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">

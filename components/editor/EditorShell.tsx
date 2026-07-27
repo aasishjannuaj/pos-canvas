@@ -9,6 +9,8 @@ import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects"
 import { completeSaleOrder } from "@/lib/orders";
 import { restockInventory, adjustInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
+import type { OrderTotal } from "@/lib/dashboard.types";
+import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 
 export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
 
@@ -23,7 +25,12 @@ export type MenuItem = {
   stockQuantity: number;
 };
 
-export type EditorSection = "Menu" | "Branding" | "Taxes" | "Settings";
+export type EditorSection =
+  | "Menu"
+  | "Branding"
+  | "Taxes"
+  | "Settings"
+  | "Dashboard";
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
 
@@ -278,6 +285,8 @@ type EditorShellProps = {
   initialProjectId?: string | null;
   initialCompletedOrders?: CompletedOrder[];
   initialInventoryTransactions?: InventoryTransaction[];
+  initialOrderTotals?: OrderTotal[];
+  initialOrderTotalsError?: string | null;
 };
 
 export default function EditorShell({
@@ -287,6 +296,8 @@ export default function EditorShell({
   initialProjectId,
   initialCompletedOrders,
   initialInventoryTransactions,
+  initialOrderTotals,
+  initialOrderTotalsError,
 }: EditorShellProps) {
   const [projectConfig, setProjectConfig] = useState<ProjectConfig>(() =>
     normalizeProjectConfig(initialConfig ?? initialProjectConfig)
@@ -343,6 +354,22 @@ export default function EditorShell({
   // handleRestock, and handleInventoryAdjustment for why) — this never
   // changes locally, only a fresh server load (mount or reload) can update it.
   const inventoryTransactions = initialInventoryTransactions ?? [];
+
+  // Feature 10.1 — dashboard order totals, seeded from server-loaded history.
+  // Unlike inventoryTransactions, this *does* need a local update: a sale
+  // completed in the current session must show up on the Dashboard tab
+  // immediately, without a page reload. completeSale() appends the newly
+  // confirmed order's totals below — it never refetches from the server, so
+  // there is no risk of double-counting the same sale.
+  const [orderTotals, setOrderTotals] = useState<OrderTotal[]>(
+    initialOrderTotals ?? []
+  );
+
+  // The initial load either succeeded (possibly with zero orders, a real
+  // "no sales yet" state) or failed outright. There is no client-side retry
+  // for this read-only reporting query, so the error — if any — is fixed
+  // for the session, same as the other server-seeded history above.
+  const orderTotalsError = initialOrderTotalsError ?? null;
 
   // Feature 6.4/6.5.2/6.5.3 — save state
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
@@ -632,6 +659,23 @@ export default function EditorShell({
     };
 
     setCompletedOrders((prev) => [order, ...prev]);
+
+    // Feature 10.1 — reuse the same confirmed values used for the receipt
+    // above (order.subtotal/taxAmount/total/createdAt) so the Dashboard tab
+    // reflects this sale immediately, without a page reload or a second
+    // fetch. This is a local append only; the server-side order totals
+    // query is never re-run, so the sale can't be double-counted there.
+    setOrderTotals((prev) => [
+      {
+        id: order.id,
+        subtotal: order.subtotal,
+        taxAmount: order.taxAmount,
+        total: order.total,
+        createdAt: order.createdAt,
+      },
+      ...prev,
+    ]);
+
     clearCart();
 
     // Lock the UI into the success view *before* attempting the reload, so
@@ -859,35 +903,44 @@ export default function EditorShell({
           editorSection={editorSection}
           setEditorSection={setEditorSection}
         />
-        <EditorPreview
-          menuItems={projectConfig.menuItems}
-          selectedItemId={selectedItemId}
-          onSelect={setSelectedItemId}
-          branding={projectConfig.branding}
-          tax={projectConfig.tax}
-          receipt={projectConfig.receipt}
-          editorMode={editorMode}
-          cart={cart}
-          cartSummary={cartSummary}
-          onAddToCart={addToCart}
-          onIncreaseQuantity={increaseQuantity}
-          onDecreaseQuantity={decreaseQuantity}
-          onRemoveFromCart={removeFromCart}
-          onClearCart={clearCart}
-          checkoutOpen={checkoutOpen}
-          selectedPaymentMethod={selectedPaymentMethod}
-          checkoutStatus={checkoutStatus}
-          onOpenCheckout={openCheckout}
-          onCloseCheckout={closeCheckout}
-          onSelectPaymentMethod={selectPaymentMethod}
-          onCompleteSale={completeSale}
-          saleSaveStatus={saleSaveStatus}
-          saleSaveError={saleSaveError}
-          completedOrders={completedOrders}
-          selectedReceiptId={selectedReceiptId}
-          onOpenReceipt={openReceipt}
-          onCloseReceipt={closeReceipt}
-        />
+        {editorMode === "edit" && editorSection === "Dashboard" ? (
+          <ProjectDashboard
+            orderTotals={orderTotals}
+            orderTotalsError={orderTotalsError}
+            menuItems={projectConfig.menuItems}
+            currency={projectConfig.receipt.currency}
+          />
+        ) : (
+          <EditorPreview
+            menuItems={projectConfig.menuItems}
+            selectedItemId={selectedItemId}
+            onSelect={setSelectedItemId}
+            branding={projectConfig.branding}
+            tax={projectConfig.tax}
+            receipt={projectConfig.receipt}
+            editorMode={editorMode}
+            cart={cart}
+            cartSummary={cartSummary}
+            onAddToCart={addToCart}
+            onIncreaseQuantity={increaseQuantity}
+            onDecreaseQuantity={decreaseQuantity}
+            onRemoveFromCart={removeFromCart}
+            onClearCart={clearCart}
+            checkoutOpen={checkoutOpen}
+            selectedPaymentMethod={selectedPaymentMethod}
+            checkoutStatus={checkoutStatus}
+            onOpenCheckout={openCheckout}
+            onCloseCheckout={closeCheckout}
+            onSelectPaymentMethod={selectPaymentMethod}
+            onCompleteSale={completeSale}
+            saleSaveStatus={saleSaveStatus}
+            saleSaveError={saleSaveError}
+            completedOrders={completedOrders}
+            selectedReceiptId={selectedReceiptId}
+            onOpenReceipt={openReceipt}
+            onCloseReceipt={closeReceipt}
+          />
+        )}
         <EditorPropertiesPanel
           editorSection={editorSection}
           selectedItem={selectedItem}
