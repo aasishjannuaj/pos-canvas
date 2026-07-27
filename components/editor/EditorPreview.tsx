@@ -1,6 +1,6 @@
 "use client";
 
-import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
+import { CURRENCY_SYMBOLS } from "./EditorShell";
 import type {
   CartItem,
   CartSummary,
@@ -17,6 +17,17 @@ import Receipt from "./Receipt";
 // Static preview-only figures used only for the unchanged edit-mode mock below.
 const STATIC_TIP = 3;
 const STATIC_SUBTOTAL = 20;
+
+// Feature 12.2 — category tabs/sections are derived from the project's own
+// menuItems rather than a fixed global list, so each template's real
+// categories (Coffee/Pastries, Beer/Wine/Spirits, Hair/Nails/Spa, etc.) show
+// up correctly. Trimmed here (not just at load time) so a stray whitespace
+// difference in a locally-edited category can never look like a duplicate
+// tab; blank/whitespace-only categories fall back to "General".
+function displayCategory(category: string): string {
+  const trimmed = category.trim();
+  return trimmed === "" ? "General" : trimmed;
+}
 
 type EditorPreviewProps = {
   menuItems: MenuItem[];
@@ -122,6 +133,13 @@ export default function EditorPreview({
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
 
+  // Feature 12.2 — derived from this project's own items (in first-seen
+  // order), not a fixed global list. An empty menu simply yields an empty
+  // array, so no tabs/sections render — no crash, no placeholder category.
+  const categories = Array.from(
+    new Set(menuItems.map((item) => displayCategory(item.category)))
+  );
+
   // Edit-mode summary math — unchanged from before Feature 7.2.
   const editModeSummary = calculateOrderSummary(tax);
   const editModeFinalTotal = receipt.tipsEnabled
@@ -153,7 +171,7 @@ export default function EditorPreview({
 
         {/* Section Tabs */}
         <div className="flex flex-none gap-2 border-b border-neutral-200 bg-white px-3 py-2">
-          {MENU_CATEGORIES.map((section, index) => (
+          {categories.map((section, index) => (
             <span
               key={section}
               className={
@@ -171,9 +189,9 @@ export default function EditorPreview({
         {/* Menu Content */}
         <div className="flex-1 overflow-y-auto px-3 py-3">
           <div className="flex flex-col gap-4">
-            {MENU_CATEGORIES.map((section) => {
+            {categories.map((section) => {
               const sectionItems = menuItems.filter(
-                (item) => item.category === section
+                (item) => displayCategory(item.category) === section
               );
 
               if (sectionItems.length === 0) {

@@ -15,13 +15,8 @@ import SalesReport from "@/components/dashboard/SalesReport";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
 import ReceiptPreview from "./ReceiptPreview";
-import {
-  MENU_CATEGORIES,
-  CURRENCY_SYMBOLS,
-  defaultProjectConfig,
-} from "@/lib/projectConfig";
+import { CURRENCY_SYMBOLS, defaultProjectConfig } from "@/lib/projectConfig";
 import type {
-  MenuCategory,
   MenuItem,
   Currency,
   TaxSettings,
@@ -36,16 +31,12 @@ import type {
 // without a circular import back to it). Re-exported here unchanged so every
 // existing `import ... from "@/components/editor/EditorShell"` call site
 // elsewhere in the app keeps working exactly as before.
-export {
-  MENU_CATEGORIES,
-  CURRENCY_SYMBOLS,
-};
-export type {
-  MenuCategory,
-  MenuItem,
-  Currency,
-  ProjectConfig,
-};
+//
+// Feature 12.2 — MENU_CATEGORIES/MenuCategory are gone: category is now a
+// plain string (see lib/projectConfig.ts), and category tabs/sections are
+// derived per-project in EditorPreview.tsx instead of from a fixed list.
+export { CURRENCY_SYMBOLS };
+export type { MenuItem, Currency, ProjectConfig };
 
 export type EditorSection =
   | "Menu"
@@ -135,11 +126,26 @@ function calculateCartSummary(
   };
 }
 
+// Feature 12.2 — normalize a loaded category: trim it, and fall back to
+// "General" only when the trimmed result is empty or the value is missing/
+// invalid. A valid existing category (e.g. "Breakfast") is never rewritten —
+// trimming a value that already has no leading/trailing whitespace returns
+// that exact same string.
+function normalizeCategory(category: unknown): string {
+  if (typeof category !== "string") {
+    return "General";
+  }
+
+  const trimmed = category.trim();
+  return trimmed === "" ? "General" : trimmed;
+}
+
 // Feature 7.5 — normalize menu items loaded from older saved projects that
 // predate stockQuantity/trackInventory, so the app never crashes on missing fields.
 function normalizeMenuItem(item: MenuItem): MenuItem {
   return {
     ...item,
+    category: normalizeCategory(item.category),
     trackInventory:
       typeof item.trackInventory === "boolean" ? item.trackInventory : false,
     stockQuantity:
@@ -377,11 +383,15 @@ export default function EditorShell({
   function handleAddItem() {
     markUnsaved();
 
+    // Feature 12.2 — a new item joins whatever category the project already
+    // uses (already-normalized by normalizeProjectConfig at load time), so
+    // it lands in an existing, visible tab instead of spawning an orphan
+    // one. Falls back to "General" only when the menu is empty.
     const newItem: MenuItem = {
       id: createId(),
       name: "New Item",
       price: 0,
-      category: "Breakfast",
+      category: projectConfig.menuItems[0]?.category ?? "General",
       trackInventory: true,
       stockQuantity: 0,
     };

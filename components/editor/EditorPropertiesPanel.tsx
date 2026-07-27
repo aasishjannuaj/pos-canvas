@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CURRENCY_SYMBOLS, MENU_CATEGORIES } from "./EditorShell";
+import { CURRENCY_SYMBOLS } from "./EditorShell";
 import type {
   AdjustStatus,
   CartSummary,
@@ -10,7 +10,6 @@ import type {
   Currency,
   EditorMode,
   EditorSection,
-  MenuCategory,
   MenuItem,
   PaymentMethod,
   ProjectConfig,
@@ -530,21 +529,16 @@ export default function EditorPropertiesPanel({
                     <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
                       Category
                     </label>
-                    <select
+                    <input
+                      type="text"
                       value={selectedItem.category}
                       onChange={(event) =>
                         onUpdate(selectedItem.id, {
-                          category: event.target.value as MenuCategory,
+                          category: event.target.value,
                         })
                       }
                       className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
-                    >
-                      {MENU_CATEGORIES.map((category) => (
-                        <option key={category} value={category}>
-                          {category}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
 
                   <label className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 px-4 py-3">

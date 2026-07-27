@@ -8,15 +8,16 @@
 // `import type { ProjectConfig } from "@/components/editor/EditorShell"`
 // call site elsewhere in the app keeps working unchanged.
 
-export const MENU_CATEGORIES = ["Breakfast", "Lunch", "Drinks"] as const;
-
-export type MenuCategory = (typeof MENU_CATEGORIES)[number];
-
+// Feature 12.2 — category is a plain, project-configurable string rather
+// than a fixed union (previously "Breakfast" | "Lunch" | "Drinks", which
+// blocked every non-restaurant template from having honest category names).
+// Nothing outside the Builder's own Menu editing UI depends on the specific
+// value, so widening this is compatible with every existing saved project.
 export type MenuItem = {
   id: string;
   name: string;
   price: number;
-  category: MenuCategory;
+  category: string;
   trackInventory: boolean;
   stockQuantity: number;
 };
