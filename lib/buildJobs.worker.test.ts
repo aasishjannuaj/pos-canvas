@@ -4,7 +4,7 @@ import {
   MAX_LEASE_SECONDS,
   MIN_LEASE_SECONDS,
   canReclaimStaleJob,
-  decidePlaceholderBuildOutcome,
+  decideFinalizeFailureDisposition,
   decideRpcTransitionOutcome,
   decideSecondReadOutcome,
   generateWorkerId,
@@ -185,33 +185,6 @@ describe("validateBuildJobSnapshot", () => {
   });
 });
 
-describe("decidePlaceholderBuildOutcome", () => {
-  it("maps a failed validation to invalid_config with a sanitized public message", () => {
-    const outcome = decidePlaceholderBuildOutcome({ valid: false, reason: "hash_mismatch" });
-
-    expect(outcome).toEqual({
-      failureCode: "invalid_config",
-      failureMessage: "The saved build configuration is invalid.",
-    });
-  });
-
-  it("maps a passing validation to the deliberate generation_failed placeholder", () => {
-    const config = makeConfig();
-    const outcome = decidePlaceholderBuildOutcome({ valid: true, config });
-
-    expect(outcome).toEqual({
-      failureCode: "generation_failed",
-      failureMessage: "Build generation is not implemented yet.",
-    });
-  });
-
-  it("never returns a failure code implying success", () => {
-    const outcome = decidePlaceholderBuildOutcome({ valid: true, config: makeConfig() });
-
-    expect(outcome.failureCode).not.toBe("succeeded");
-  });
-});
-
 describe("hasConsistentClaimFields", () => {
   const completeClaim = {
     status: "building" as const,
@@ -275,6 +248,39 @@ describe("decideSecondReadOutcome", () => {
   it("returns 'claim_lost' when the scoped read returns no row", () => {
     expect(decideSecondReadOutcome(null)).toBe("claim_lost");
     expect(decideSecondReadOutcome(undefined)).toBe("claim_lost");
+  });
+});
+
+// Feature 15.6 correction — regression coverage for the required
+// ownership recheck after finalize_build_job_with_artifact fails:
+// worker/once.ts must call fail_build_job only when a fresh scoped read
+// confirms the claim is still held, and must classify the other case as
+// claim_lost_after_finalize (no terminal RPC call at all) rather than
+// attempting fail_build_job regardless. This function's signature takes
+// only a SecondReadOutcome — never a claim token or any other value a log
+// line could leak — so it is structurally impossible for a claim token to
+// reach this decision or anything logged from it.
+describe("decideFinalizeFailureDisposition", () => {
+  it("permits the fail transition when the ownership recheck confirms the claim is still held", () => {
+    expect(decideFinalizeFailureDisposition("owned")).toBe("report_failure");
+  });
+
+  it("does not permit any terminal transition when the ownership recheck finds the claim lost", () => {
+    expect(decideFinalizeFailureDisposition("claim_lost")).toBe(
+      "claim_lost_after_finalize"
+    );
+  });
+
+  it("has no parameter through which a claim token could ever flow", () => {
+    // Structural guarantee, not a runtime one: decideFinalizeFailureDisposition's
+    // only parameter is a SecondReadOutcome ("owned" | "claim_lost"), so a
+    // claim token can never reach this function, and therefore can never
+    // reach a log line built from its result.
+    const outcomeForOwned = decideFinalizeFailureDisposition("owned");
+    const outcomeForLost = decideFinalizeFailureDisposition("claim_lost");
+
+    expect(typeof outcomeForOwned).toBe("string");
+    expect(typeof outcomeForLost).toBe("string");
   });
 });
 

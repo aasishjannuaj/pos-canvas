@@ -1386,9 +1386,18 @@ export default function EditorPropertiesPanel({
                           </p>
                         )}
 
+                      {/* Feature 15.6 — copy-only truthfulness update: a
+                          real, verified artifact now exists in private
+                          storage once status reaches "succeeded" (see
+                          worker/once.ts), so the previous "No downloadable
+                          artifact is available yet." copy would be false.
+                          This still does not expose storage_path, add a
+                          download action, or create a signed URL — those
+                          are deliberately deferred to Feature 15.7. */}
                       {latestBuildJob.status === "succeeded" && (
                         <p className="mt-1 text-neutral-400">
-                          No downloadable artifact is available yet.
+                          Build completed successfully. Artifact download
+                          will be added in the next feature.
                         </p>
                       )}
 

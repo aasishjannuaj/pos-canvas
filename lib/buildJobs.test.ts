@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUILD_FAILURE_CODES,
   BUILD_STATUSES,
   BUILD_TARGETS,
   TERMINAL_BUILD_STATUSES,
@@ -304,10 +305,23 @@ describe("isBuildFailureCode", () => {
     expect(isBuildFailureCode("artifact_upload_failed")).toBe(true);
   });
 
+  // Feature 15.6 — the one new approved code this feature adds.
+  it("accepts artifact_verification_failed", () => {
+    expect(isBuildFailureCode("artifact_verification_failed")).toBe(true);
+  });
+
   it("rejects cancelled_by_user and other arbitrary values", () => {
     expect(isBuildFailureCode("cancelled_by_user")).toBe(false);
     expect(isBuildFailureCode("something_else")).toBe(false);
     expect(isBuildFailureCode(null)).toBe(false);
+  });
+
+  // Feature 15.6 — explicitly rejected during planning as too
+  // implementation-specific for this MVP; this test guards against it
+  // ever being silently reintroduced.
+  it("rejects artifact_record_failed — deliberately not an approved code", () => {
+    expect(isBuildFailureCode("artifact_record_failed")).toBe(false);
+    expect(BUILD_FAILURE_CODES).not.toContain("artifact_record_failed");
   });
 });
 

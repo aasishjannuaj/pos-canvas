@@ -36,13 +36,26 @@ export const TERMINAL_BUILD_STATUSES: readonly BuildStatus[] = [
 // Feature 15.2 — approved failure codes. No "cancelled_by_user": there is
 // no cancellation concept in the current status model, so a failure code
 // implying one would be misleading.
+//
+// Feature 15.6 — added "artifact_verification_failed": upload reported
+// success but the stored object couldn't be confirmed (readback failed,
+// byte length or checksum mismatch, or existence couldn't be confirmed).
+// Deliberately distinct from "artifact_upload_failed", which now covers
+// two related-but-different cases: the upload call itself failing, and a
+// verified upload whose finalize_build_job_with_artifact call didn't
+// apply — see lib/buildJobs.artifact.ts's mapArtifactFailureReason for the
+// exact mapping. No "artifact_record_failed" — considered and explicitly
+// rejected as too implementation-specific for this MVP (see the approved
+// Feature 15.6 plan); keep the failure-code set only as large as current
+// operational needs justify.
 export type BuildFailureCode =
   | "generation_failed"
   | "invalid_config"
   | "worker_timeout"
   | "worker_crashed"
   | "signing_failed"
-  | "artifact_upload_failed";
+  | "artifact_upload_failed"
+  | "artifact_verification_failed";
 
 export function isSupportedBuildTarget(value: unknown): value is BuildTarget {
   return (
@@ -69,6 +82,7 @@ export const BUILD_FAILURE_CODES: readonly BuildFailureCode[] = [
   "worker_crashed",
   "signing_failed",
   "artifact_upload_failed",
+  "artifact_verification_failed",
 ];
 
 export function isBuildFailureCode(value: unknown): value is BuildFailureCode {

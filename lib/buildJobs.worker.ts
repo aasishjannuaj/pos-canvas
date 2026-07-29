@@ -157,6 +157,28 @@ export function decideSecondReadOutcome(jobRow: unknown): SecondReadOutcome {
   return jobRow ? "owned" : "claim_lost";
 }
 
+// Feature 15.6 correction — the specific decision worker/once.ts makes
+// after finalize_build_job_with_artifact fails (RPC error, zero rows, or
+// malformed data): before ever calling fail_build_job, the worker
+// performs its own fresh scoped ownership read (identical shape to the
+// second read above — id + status='building' + claim_token match + lease
+// still valid) rather than relying solely on fail_build_job's own
+// ownership predicate to no-op safely. This function takes only that
+// read's outcome (SecondReadOutcome — never a claim token, never any
+// other identifying value) and decides which of exactly two paths to
+// take. Its signature makes it structurally impossible for a claim token
+// to reach this decision, let alone any logging derived from it — the
+// function has no parameter through which one could flow.
+export type FinalizeFailureDisposition =
+  | "report_failure"
+  | "claim_lost_after_finalize";
+
+export function decideFinalizeFailureDisposition(
+  ownershipCheck: SecondReadOutcome
+): FinalizeFailureDisposition {
+  return ownershipCheck === "owned" ? "report_failure" : "claim_lost_after_finalize";
+}
+
 // Feature 15.5 correction — the fix for a real incident: worker/once.ts's
 // original `if (failError || !failResult)` check reported a genuine
 // Postgrest/RPC error (e.g. the fail_build_job GET-DIAGNOSTICS-into-a-
@@ -228,28 +250,13 @@ export function validateBuildJobSnapshot(input: {
   return { valid: true, config: input.snapshot };
 }
 
-// ============================================================================
-// Placeholder outcome — Feature 15.5's approved "never fake success" flow.
-// ============================================================================
-
-export type PlaceholderBuildOutcome = {
-  failureCode: "invalid_config" | "generation_failed";
-  failureMessage: string;
-};
-
-const INVALID_CONFIG_MESSAGE = "The saved build configuration is invalid.";
-const NOT_IMPLEMENTED_MESSAGE = "Build generation is not implemented yet.";
-
-// Feature 15.5 — the approved placeholder decision: a snapshot that fails
-// integrity validation fails with invalid_config; a snapshot that passes
-// still deliberately fails with generation_failed, since no real artifact
-// generation exists yet. This worker must never call complete_build_job.
-export function decidePlaceholderBuildOutcome(
-  validation: SnapshotValidationResult
-): PlaceholderBuildOutcome {
-  if (!validation.valid) {
-    return { failureCode: "invalid_config", failureMessage: INVALID_CONFIG_MESSAGE };
-  }
-
-  return { failureCode: "generation_failed", failureMessage: NOT_IMPLEMENTED_MESSAGE };
-}
+// Feature 15.6 — Feature 15.5's decidePlaceholderBuildOutcome (a snapshot
+// that failed validation failed with invalid_config; one that passed
+// still deliberately failed with generation_failed, since no real
+// artifact pipeline existed yet) has been removed: the worker no longer
+// deliberately fails after a valid snapshot — it proceeds to generate a
+// real artifact instead. The invalid-snapshot case, and every real
+// pipeline failure case (generation/upload/verification/finalize), are
+// now mapped by lib/buildJobs.artifact.ts's mapArtifactFailureReason,
+// which covers the full artifact pipeline rather than just this one
+// placeholder branch.
