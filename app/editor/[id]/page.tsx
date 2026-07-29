@@ -4,29 +4,11 @@ import { getProjectById } from "@/lib/projects.server";
 import { getProjectOrders } from "@/lib/orders.server";
 import { getProjectInventoryTransactions } from "@/lib/inventory.server";
 import { getProjectOrderTotals } from "@/lib/dashboard.server";
-import type { ProjectConfig } from "@/lib/projectConfig";
+import { isProjectConfig } from "@/lib/projectConfig";
 import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
 import { getTemplateById, getStarterConfig } from "@/data/templates";
 
 const PROJECT_ROUTE_PREFIX = "project-";
-
-function isProjectConfig(value: unknown): value is ProjectConfig {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-
-  return (
-    Array.isArray(candidate.menuItems) &&
-    typeof candidate.branding === "object" &&
-    candidate.branding !== null &&
-    typeof candidate.tax === "object" &&
-    candidate.tax !== null &&
-    typeof candidate.receipt === "object" &&
-    candidate.receipt !== null
-  );
-}
 
 export default async function EditorPage({
   params,
