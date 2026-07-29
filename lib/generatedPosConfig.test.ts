@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   GENERATED_POS_CONFIG_SCHEMA_VERSION,
   createGeneratedPosConfig,
+  createGeneratedPosConfigFilename,
+  getGeneratedPosExportEligibility,
 } from "@/lib/generatedPosConfig";
 import { defaultProjectConfig, cloneProjectConfig } from "@/lib/projectConfig";
 import type { ProjectConfig } from "@/lib/projectConfig";
@@ -428,5 +430,157 @@ describe("createGeneratedPosConfig", () => {
     ]) {
       expect(serialized[forbiddenKey]).toBeUndefined();
     }
+  });
+});
+
+describe("createGeneratedPosConfigFilename", () => {
+  it("sanitizes normal spaces into hyphens", () => {
+    expect(createGeneratedPosConfigFilename("My Cafe")).toBe(
+      "pos-canvas-my-cafe-v1.json"
+    );
+  });
+
+  it("sanitizes slashes into hyphens", () => {
+    expect(createGeneratedPosConfigFilename("A/B Test Store")).toBe(
+      "pos-canvas-a-b-test-store-v1.json"
+    );
+  });
+
+  it("sanitizes punctuation", () => {
+    expect(createGeneratedPosConfigFilename("  Shop!!!  ")).toBe(
+      "pos-canvas-shop-v1.json"
+    );
+  });
+
+  it("collapses repeated separators into a single hyphen", () => {
+    expect(createGeneratedPosConfigFilename("Coffee   &&&   Co")).toBe(
+      "pos-canvas-coffee-co-v1.json"
+    );
+  });
+
+  it("strips leading and trailing separators", () => {
+    expect(createGeneratedPosConfigFilename("---Shop---")).toBe(
+      "pos-canvas-shop-v1.json"
+    );
+  });
+
+  it("falls back to 'project' when nothing survives sanitization", () => {
+    expect(createGeneratedPosConfigFilename("!!!")).toBe(
+      "pos-canvas-project-v1.json"
+    );
+    expect(createGeneratedPosConfigFilename("   ")).toBe(
+      "pos-canvas-project-v1.json"
+    );
+  });
+
+  it("never includes reserved filesystem characters", () => {
+    const filename = createGeneratedPosConfigFilename(
+      'Weird / \\ : * ? " < > | Name'
+    );
+
+    for (const char of ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]) {
+      expect(filename.includes(char)).toBe(false);
+    }
+  });
+
+  it("uses the real schema-version constant by default", () => {
+    const filename = createGeneratedPosConfigFilename("My Cafe");
+    expect(filename).toBe(
+      `pos-canvas-my-cafe-v${GENERATED_POS_CONFIG_SCHEMA_VERSION}.json`
+    );
+  });
+
+  it("does not mutate the projectName input", () => {
+    const name = "  My Cafe  ";
+    const before = name;
+    createGeneratedPosConfigFilename(name);
+    expect(name).toBe(before);
+  });
+});
+
+describe("getGeneratedPosExportEligibility", () => {
+  it("returns save-first when projectId is null", () => {
+    const result = getGeneratedPosExportEligibility({
+      projectId: null,
+      isDirty: false,
+      saveStatus: "idle",
+    });
+
+    expect(result).toEqual({ canExport: false, reason: "save-first" });
+  });
+
+  it("returns saving when a save is in progress", () => {
+    const result = getGeneratedPosExportEligibility({
+      projectId: "project-1",
+      isDirty: true,
+      saveStatus: "saving",
+    });
+
+    expect(result).toEqual({ canExport: false, reason: "saving" });
+  });
+
+  it("returns save-changes-first for a dirty saved project", () => {
+    const result = getGeneratedPosExportEligibility({
+      projectId: "project-1",
+      isDirty: true,
+      saveStatus: "saved",
+    });
+
+    expect(result).toEqual({ canExport: false, reason: "save-changes-first" });
+  });
+
+  it("returns ready for a clean saved project", () => {
+    const result = getGeneratedPosExportEligibility({
+      projectId: "project-1",
+      isDirty: false,
+      saveStatus: "saved",
+    });
+
+    expect(result).toEqual({ canExport: true, reason: "ready" });
+  });
+
+  it("does not mutate its input", () => {
+    const input = {
+      projectId: "project-1",
+      isDirty: false,
+      saveStatus: "saved" as const,
+    };
+    const before = { ...input };
+
+    getGeneratedPosExportEligibility(input);
+
+    expect(input).toEqual(before);
+  });
+});
+
+describe("pretty-printed JSON export", () => {
+  it("serializes with two-space indentation and parses back to the exact generated object", () => {
+    const result = createGeneratedPosConfig({
+      projectId: "project-123",
+      projectName: "Test Project",
+      templateId: "restaurant",
+      config: defaultProjectConfig,
+    });
+
+    const jsonText = JSON.stringify(result, null, 2);
+
+    // Confirms two-space indentation is actually present in the serialized
+    // text, not just that JSON.parse can recover the value.
+    expect(jsonText).toContain('\n  "schemaVersion"');
+
+    expect(JSON.parse(jsonText)).toEqual(result);
+  });
+
+  it("a trailing newline does not affect parsing", () => {
+    const result = createGeneratedPosConfig({
+      projectId: "project-123",
+      projectName: "Test Project",
+      templateId: "restaurant",
+      config: defaultProjectConfig,
+    });
+
+    const jsonTextWithNewline = `${JSON.stringify(result, null, 2)}\n`;
+
+    expect(JSON.parse(jsonTextWithNewline)).toEqual(result);
   });
 });

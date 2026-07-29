@@ -38,6 +38,12 @@ import {
   sectionToOnboardingStepId,
 } from "./onboarding/useOnboardingProgress";
 import type { OnboardingStepId } from "./onboarding/useOnboardingProgress";
+import {
+  createGeneratedPosConfig,
+  createGeneratedPosConfigFilename,
+  getGeneratedPosExportEligibility,
+} from "@/lib/generatedPosConfig";
+import { downloadJsonFile } from "@/lib/downloadJson";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -64,6 +70,12 @@ export type EditorSection =
   | "Inventory Summary";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+// Feature 14.2 — fully separate from SaveStatus/isDirty above. Export never
+// reuses or mutates the save-state model: it only ever reads projectId/
+// isDirty/saveStatus (via getGeneratedPosExportEligibility) to decide
+// whether it's allowed to run.
+export type ExportStatus = "idle" | "exporting" | "success" | "error";
 
 export type EditorMode = "edit" | "preview";
 
@@ -295,6 +307,15 @@ export default function EditorShell({
   const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Feature 14.2 — export state, independent of saveStatus/saveError above.
+  // "success" is left in place indefinitely (no timer) until either another
+  // export attempt runs or a new persisted edit makes isDirty true again —
+  // at which point the Settings UI's own display priority naturally shows
+  // "Save your latest changes before exporting" instead, with no separate
+  // reset needed here.
+  const [exportStatus, setExportStatus] = useState<ExportStatus>("idle");
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Feature 13.3 — entirely separate from the isDirty/saveStatus save-state
   // model above: onboarding never marks the project dirty, never touches
@@ -1069,6 +1090,68 @@ export default function EditorShell({
     setSaveError(null);
   }
 
+  // Feature 14.2 — the export handler. Fully synchronous/local: unlike
+  // handleSave above, nothing here ever calls Supabase — it reads the
+  // current in-memory projectConfig/projectName (already guaranteed to
+  // match the persisted row whenever export is actually eligible, since
+  // eligibility requires isDirty === false), builds the generated contract
+  // with the exact same pure function tested in Feature 14.1, and triggers
+  // a local file download. Never calls markDirty/setIsDirty/setSaveStatus/
+  // setSaveError/handleSave — exportStatus/exportError are the only state
+  // this function ever touches, so an export attempt (successful or not)
+  // can never change what the Save button shows or silently re-save
+  // anything.
+  const exportEligibility = getGeneratedPosExportEligibility({
+    projectId,
+    isDirty,
+    saveStatus,
+  });
+
+  function handleExport() {
+    // Feature 14.2 — re-checked here (not just relied on via the disabled
+    // button), so this function is safe to call from anywhere: it never
+    // attempts generation or download while ineligible, and it never
+    // creates/saves a project or retries a failed save to "fix" eligibility
+    // itself — the user must use the existing Save button for that. The
+    // `projectId === null` check is redundant with exportEligibility.canExport
+    // at runtime (that can only be true when projectId is already known
+    // non-null) but is what lets TypeScript narrow projectId to `string`
+    // below, since it can't narrow it from a separate eligibility object.
+    if (!exportEligibility.canExport || projectId === null) {
+      return;
+    }
+
+    setExportStatus("exporting");
+    setExportError(null);
+
+    try {
+      const generatedConfig = createGeneratedPosConfig({
+        projectId,
+        projectName,
+        templateId,
+        config: projectConfig,
+      });
+
+      const jsonText = `${JSON.stringify(generatedConfig, null, 2)}\n`;
+      const filename = createGeneratedPosConfigFilename(
+        projectName,
+        generatedConfig.schemaVersion
+      );
+
+      downloadJsonFile(filename, jsonText);
+
+      setExportStatus("success");
+      setExportError(null);
+    } catch (error) {
+      setExportStatus("error");
+      setExportError(
+        error instanceof Error
+          ? error.message
+          : "Something went wrong while exporting."
+      );
+    }
+  }
+
   // Feature 13.2 — warn only while there's something unsaved to lose; the
   // listener is added/removed as isDirty flips, so it's never registered
   // for a clean project and never lingers after a successful save.
@@ -1198,6 +1281,10 @@ export default function EditorShell({
           adjustError={adjustError}
           adjustSuccessMessage={adjustSuccessMessage}
           onAdjust={handleInventoryAdjustment}
+          exportEligibility={exportEligibility}
+          exportStatus={exportStatus}
+          exportError={exportError}
+          onExport={handleExport}
         />
       </div>
 

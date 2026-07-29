@@ -10,12 +10,14 @@ import type {
   Currency,
   EditorMode,
   EditorSection,
+  ExportStatus,
   MenuItem,
   PaymentMethod,
   ProjectConfig,
   RestockStatus,
 } from "./EditorShell";
 import type { InventoryTransaction } from "@/lib/inventory.types";
+import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
 
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
@@ -52,7 +54,65 @@ type EditorPropertiesPanelProps = {
   adjustError: string | null;
   adjustSuccessMessage: string | null;
   onAdjust: (itemId: string, newQuantity: number) => void;
+  exportEligibility: GeneratedPosExportEligibility;
+  exportStatus: ExportStatus;
+  exportError: string | null;
+  onExport: () => void;
 };
+
+// Feature 14.2 — the single source of the Export sub-section's status
+// text. Eligibility reasons take priority over exportStatus, since they
+// describe *why the button is disabled right now* — once eligible, the
+// export attempt's own lifecycle (idle/exporting/success/error) takes over.
+function getExportStatusMessage(
+  eligibility: GeneratedPosExportEligibility,
+  exportStatus: ExportStatus
+): string {
+  if (eligibility.reason === "save-first") {
+    return "Save this project before exporting.";
+  }
+
+  if (eligibility.reason === "saving") {
+    return "Wait for the current save to finish.";
+  }
+
+  if (eligibility.reason === "save-changes-first") {
+    return "Save your latest changes before exporting.";
+  }
+
+  if (exportStatus === "exporting") {
+    return "Exporting…";
+  }
+
+  if (exportStatus === "success") {
+    return "Export complete.";
+  }
+
+  if (exportStatus === "error") {
+    return "Export failed.";
+  }
+
+  return "Ready to export.";
+}
+
+function getExportStatusClassName(
+  eligibility: GeneratedPosExportEligibility,
+  exportStatus: ExportStatus
+): string {
+  if (!eligibility.canExport) {
+    return "text-neutral-500";
+  }
+
+  if (exportStatus === "success") {
+    return "text-emerald-600";
+  }
+
+  if (exportStatus === "error") {
+    return "text-red-600";
+  }
+
+  return "text-neutral-500";
+}
 
 function formatTransactionTime(createdAt: string): string {
   return new Date(createdAt).toLocaleString("en-US", {
@@ -94,6 +154,10 @@ export default function EditorPropertiesPanel({
   adjustError,
   adjustSuccessMessage,
   onAdjust,
+  exportEligibility,
+  exportStatus,
+  exportError,
+  onExport,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
@@ -1025,6 +1089,48 @@ export default function EditorPropertiesPanel({
                     className="h-4 w-4 cursor-pointer accent-blue-600"
                   />
                 </label>
+              </div>
+
+              {/* Feature 14.2 — downloads a versioned GeneratedPosConfig
+                  JSON file for this saved project. Purely presentational:
+                  this component never generates JSON itself, only reads
+                  the eligibility/status props and calls onExport. */}
+              <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
+                <div>
+                  <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
+                    Export
+                  </h3>
+                  <p className="mt-1 text-xs text-neutral-500">
+                    Download a versioned runtime configuration for this POS
+                    project.
+                  </p>
+                </div>
+
+                <span
+                  className={`text-xs font-medium ${getExportStatusClassName(
+                    exportEligibility,
+                    exportStatus
+                  )}`}
+                >
+                  {getExportStatusMessage(exportEligibility, exportStatus)}
+                </span>
+
+                {exportStatus === "error" && exportError && (
+                  <span className="text-xs text-red-600">{exportError}</span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={onExport}
+                  disabled={
+                    !exportEligibility.canExport || exportStatus === "exporting"
+                  }
+                  className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {exportStatus === "exporting"
+                    ? "Exporting…"
+                    : "Export POS JSON"}
+                </button>
               </div>
             </div>
           )}

@@ -263,3 +263,79 @@ export function createGeneratedPosConfig(
     receipt: toRuntimeSafeReceipt(normalizedConfig.receipt),
   };
 }
+
+// Feature 14.2 — export eligibility as a small, pure, independently testable
+// function. Deliberately takes plain scalars (not the whole EditorShell
+// state) and returns a value, never a side effect — it never creates or
+// saves a project, never retries a failed save, and never touches
+// project-name validation itself (that's still exclusively
+// createGeneratedPosConfig's job, and Feature 13.2's save flow's job).
+// `saveStatus`'s type is written out as the same literal union
+// EditorShell's own SaveStatus uses, rather than imported from
+// components/editor/EditorShell.tsx — this module stays independent of any
+// "use client" component, matching lib/generatedPosConfig.ts's existing
+// dependency-free design from Feature 14.1.
+export type GeneratedPosExportEligibility =
+  | { canExport: true; reason: "ready" }
+  | {
+      canExport: false;
+      reason: "save-first" | "save-changes-first" | "saving";
+    };
+
+export function getGeneratedPosExportEligibility(input: {
+  projectId: string | null;
+  isDirty: boolean;
+  saveStatus: "idle" | "saving" | "saved" | "error";
+}): GeneratedPosExportEligibility {
+  if (input.projectId === null) {
+    return { canExport: false, reason: "save-first" };
+  }
+
+  // Feature 14.2 — checked explicitly even though isDirty already blocks
+  // export during an in-flight save in practice today (isDirty only
+  // becomes false once a save has fully succeeded) — this keeps the
+  // helper an accurate model of every UI state on its own terms, rather
+  // than relying on that incidental ordering elsewhere.
+  if (input.saveStatus === "saving") {
+    return { canExport: false, reason: "saving" };
+  }
+
+  if (input.isDirty) {
+    return { canExport: false, reason: "save-changes-first" };
+  }
+
+  return { canExport: true, reason: "ready" };
+}
+
+// Feature 14.2 — sanitizes a project name into a filesystem-safe slug for
+// the exported filename. A single regex collapses every run of characters
+// that isn't an ASCII letter or digit (spaces, slashes, punctuation, and by
+// extension every one of / \ : * ? " < > | since none of those are
+// alphanumeric) into one hyphen, so repeated/mixed separators can never
+// produce a double hyphen; leading/trailing hyphens are then stripped.
+// Falls back to "project" only when nothing alphanumeric survives at all
+// (e.g. a name of just "!!!" or whitespace) — never produces an empty
+// filename segment.
+function slugifyProjectName(projectName: string): string {
+  const slug = projectName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return slug === "" ? "project" : slug;
+}
+
+// Feature 14.2 — the exported file's name. Deliberately never includes
+// projectId (an internal identifier with no reason to appear in a
+// user-facing downloaded filename) — only the sanitized project name and
+// the schema version, which defaults to the real
+// GENERATED_POS_CONFIG_SCHEMA_VERSION constant so the filename can never
+// silently drift out of sync with the contract it actually names.
+export function createGeneratedPosConfigFilename(
+  projectName: string,
+  schemaVersion: number = GENERATED_POS_CONFIG_SCHEMA_VERSION
+): string {
+  const slug = slugifyProjectName(projectName);
+  return `pos-canvas-${slug}-v${schemaVersion}.json`;
+}
