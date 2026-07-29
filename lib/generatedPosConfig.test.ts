@@ -3,6 +3,7 @@ import {
   GENERATED_POS_CONFIG_SCHEMA_VERSION,
   createGeneratedPosConfig,
   createGeneratedPosConfigFilename,
+  createRuntimeUrl,
   getGeneratedPosExportEligibility,
   isGeneratedPosConfig,
 } from "@/lib/generatedPosConfig";
@@ -666,5 +667,48 @@ describe("isGeneratedPosConfig", () => {
     expect(isGeneratedPosConfig("a string")).toBe(false);
     expect(isGeneratedPosConfig(42)).toBe(false);
     expect(isGeneratedPosConfig([])).toBe(false);
+  });
+});
+
+describe("createRuntimeUrl", () => {
+  it("builds the runtime URL for a UUID-like id", () => {
+    expect(createRuntimeUrl("550e8400-e29b-41d4-a716-446655440000")).toBe(
+      "/runtime/project-550e8400-e29b-41d4-a716-446655440000"
+    );
+  });
+
+  it("builds the runtime URL for a short test id", () => {
+    expect(createRuntimeUrl("abc123")).toBe("/runtime/project-abc123");
+  });
+
+  it("trims leading and trailing whitespace", () => {
+    expect(createRuntimeUrl("  abc123  ")).toBe("/runtime/project-abc123");
+  });
+
+  it("throws for an empty id", () => {
+    expect(() => createRuntimeUrl("")).toThrow();
+  });
+
+  it("throws for a whitespace-only id", () => {
+    expect(() => createRuntimeUrl("   ")).toThrow();
+  });
+
+  it("always starts with /runtime/project-", () => {
+    expect(createRuntimeUrl("abc123").startsWith("/runtime/project-")).toBe(true);
+  });
+
+  it("never contains a query string", () => {
+    expect(createRuntimeUrl("abc123").includes("?")).toBe(false);
+  });
+
+  it("never contains a hash", () => {
+    expect(createRuntimeUrl("abc123").includes("#")).toBe(false);
+  });
+
+  it("never contains serialized object/config data", () => {
+    const url = createRuntimeUrl("abc123");
+    expect(url.includes("{")).toBe(false);
+    expect(url.includes("}")).toBe(false);
+    expect(url.includes("=")).toBe(false);
   });
 });

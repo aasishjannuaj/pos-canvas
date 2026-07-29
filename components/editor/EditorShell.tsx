@@ -41,6 +41,7 @@ import type { OnboardingStepId } from "./onboarding/useOnboardingProgress";
 import {
   createGeneratedPosConfig,
   createGeneratedPosConfigFilename,
+  createRuntimeUrl,
   getGeneratedPosExportEligibility,
 } from "@/lib/generatedPosConfig";
 import { downloadJsonFile } from "@/lib/downloadJson";
@@ -1091,6 +1092,13 @@ export default function EditorShell({
     saveStatus,
   });
 
+  // Feature 14.4 — a plain derived value, not state: Launch POS is a pure
+  // navigation action (a real link), so there is nothing to store beyond
+  // what's already computed here on every render. Reuses exportEligibility
+  // as-is (unrenamed) for Launch readiness too, since both actions require
+  // exactly the same thing — a saved, clean, not-currently-saving project.
+  const runtimeUrl = projectId === null ? null : createRuntimeUrl(projectId);
+
   function handleExport() {
     // Feature 14.2 — re-checked here (not just relied on via the disabled
     // button), so this function is safe to call from anywhere: it never
@@ -1265,6 +1273,7 @@ export default function EditorShell({
           adjustError={adjustError}
           adjustSuccessMessage={adjustSuccessMessage}
           onAdjust={handleInventoryAdjustment}
+          runtimeUrl={runtimeUrl}
           exportEligibility={exportEligibility}
           exportStatus={exportStatus}
           exportError={exportError}

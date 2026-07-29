@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { CURRENCY_SYMBOLS } from "./EditorShell";
 import type {
   AdjustStatus,
@@ -54,6 +55,10 @@ type EditorPropertiesPanelProps = {
   adjustError: string | null;
   adjustSuccessMessage: string | null;
   onAdjust: (itemId: string, newQuantity: number) => void;
+  // Feature 14.4 — null whenever there's no saved project id yet
+  // (mirrors exportEligibility.canExport being false for the same reason).
+  // A plain value passed down from EditorShell, never state.
+  runtimeUrl: string | null;
   exportEligibility: GeneratedPosExportEligibility;
   exportStatus: ExportStatus;
   exportError: string | null;
@@ -114,6 +119,26 @@ function getExportStatusClassName(
   return "text-neutral-500";
 }
 
+// Feature 14.4 — reuses the exact same GeneratedPosExportEligibility
+// reason codes as the Export status message above (unrenamed, per the
+// approved plan) — Launch has no lifecycle of its own beyond eligibility,
+// since it's a pure navigation action, not an async operation like Export.
+function getLaunchStatusMessage(eligibility: GeneratedPosExportEligibility): string {
+  if (eligibility.reason === "save-first") {
+    return "Save this project before launching the POS.";
+  }
+
+  if (eligibility.reason === "saving") {
+    return "Wait for the current save to finish.";
+  }
+
+  if (eligibility.reason === "save-changes-first") {
+    return "Save your latest changes before launching the POS.";
+  }
+
+  return "Open the standalone POS runtime for this saved project.";
+}
+
 function formatTransactionTime(createdAt: string): string {
   return new Date(createdAt).toLocaleString("en-US", {
     month: "short",
@@ -154,6 +179,7 @@ export default function EditorPropertiesPanel({
   adjustError,
   adjustSuccessMessage,
   onAdjust,
+  runtimeUrl,
   exportEligibility,
   exportStatus,
   exportError,
@@ -1091,46 +1117,97 @@ export default function EditorPropertiesPanel({
                 </label>
               </div>
 
-              {/* Feature 14.2 — downloads a versioned GeneratedPosConfig
-                  JSON file for this saved project. Purely presentational:
-                  this component never generates JSON itself, only reads
-                  the eligibility/status props and calls onExport. */}
-              <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
-                <div>
-                  <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
-                    Export
-                  </h3>
-                  <p className="mt-1 text-xs text-neutral-500">
-                    Download a versioned runtime configuration for this POS
-                    project.
-                  </p>
+              {/* Feature 14.4 — Launch POS and Feature 14.2 — Export POS
+                  JSON, grouped together as "Run & Export": the two ways to
+                  deliver this saved project's runtime. Purely
+                  presentational — this component never generates the
+                  runtime URL or the JSON itself, only reads the
+                  eligibility/status props and renders accordingly. */}
+              <div className="flex flex-col gap-4 border-t border-neutral-200 pt-4">
+                <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
+                  Run &amp; Export
+                </h3>
+
+                {/* Launch POS */}
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Launch POS
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Open the standalone POS runtime for this saved
+                      project.
+                    </p>
+                  </div>
+
+                  <span className="text-xs font-medium text-neutral-500">
+                    {getLaunchStatusMessage(exportEligibility)}
+                  </span>
+
+                  {exportEligibility.canExport && runtimeUrl !== null ? (
+                    <Link
+                      href={runtimeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label="Launch POS, opens in a new tab"
+                      className="w-full rounded-full bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      Launch POS ↗
+                    </Link>
+                  ) : (
+                    // Feature 14.4 — a genuinely non-interactive element,
+                    // never a real link styled to look disabled: no href,
+                    // no onClick, not part of the tab order. The status
+                    // text above already explains why, so this is
+                    // aria-hidden rather than announced as an inert
+                    // "button" a screen reader user might try to activate.
+                    <span
+                      aria-hidden="true"
+                      className="w-full cursor-not-allowed rounded-full bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white opacity-50"
+                    >
+                      Launch POS ↗
+                    </span>
+                  )}
                 </div>
 
-                <span
-                  className={`text-xs font-medium ${getExportStatusClassName(
-                    exportEligibility,
-                    exportStatus
-                  )}`}
-                >
-                  {getExportStatusMessage(exportEligibility, exportStatus)}
-                </span>
+                {/* Export POS JSON */}
+                <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Export POS JSON
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Download a versioned runtime configuration for this
+                      POS project.
+                    </p>
+                  </div>
 
-                {exportStatus === "error" && exportError && (
-                  <span className="text-xs text-red-600">{exportError}</span>
-                )}
+                  <span
+                    className={`text-xs font-medium ${getExportStatusClassName(
+                      exportEligibility,
+                      exportStatus
+                    )}`}
+                  >
+                    {getExportStatusMessage(exportEligibility, exportStatus)}
+                  </span>
 
-                <button
-                  type="button"
-                  onClick={onExport}
-                  disabled={
-                    !exportEligibility.canExport || exportStatus === "exporting"
-                  }
-                  className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {exportStatus === "exporting"
-                    ? "Exporting…"
-                    : "Export POS JSON"}
-                </button>
+                  {exportStatus === "error" && exportError && (
+                    <span className="text-xs text-red-600">{exportError}</span>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onExport}
+                    disabled={
+                      !exportEligibility.canExport || exportStatus === "exporting"
+                    }
+                    className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {exportStatus === "exporting"
+                      ? "Exporting…"
+                      : "Export POS JSON"}
+                  </button>
+                </div>
               </div>
             </div>
           )}

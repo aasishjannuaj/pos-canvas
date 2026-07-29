@@ -428,3 +428,21 @@ export function isGeneratedPosConfig(value: unknown): value is GeneratedPosConfi
 
   return true;
 }
+
+// Feature 14.4 — the runtime URL helper. Pure string formatting only: the
+// only thing that ever varies is the trimmed projectId, reusing the exact
+// same project-{id} slug convention /editor/project-{id} already
+// established, applied to the /runtime route from Feature 14.3. There is no
+// query string, hash, token, or serialized config data anywhere in this
+// format — the URL carries nothing but the identifier a request would need
+// anyway to look the project up server-side (see app/runtime/[id]/page.tsx,
+// unchanged by this feature).
+export function createRuntimeUrl(projectId: string): string {
+  const trimmed = projectId.trim();
+
+  if (trimmed === "") {
+    throw new Error("createRuntimeUrl: projectId must not be empty.");
+  }
+
+  return `/runtime/project-${trimmed}`;
+}
