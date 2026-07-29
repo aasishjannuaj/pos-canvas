@@ -19,6 +19,17 @@ import type {
 } from "./EditorShell";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
+import {
+  getBuildRequestButtonLabel,
+  getBuildRequestSuccessMessage,
+  getBuildStatusLabel,
+  getBuildTargetLabel,
+} from "@/lib/buildJobs";
+import type {
+  BuildJobSummary,
+  BuildRequestStatus,
+  BuildTarget,
+} from "@/lib/buildJobs";
 
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
 
@@ -63,6 +74,19 @@ type EditorPropertiesPanelProps = {
   exportStatus: ExportStatus;
   exportError: string | null;
   onExport: () => void;
+  // Feature 15.4 — Build Application. exportEligibility is reused as-is
+  // (unrenamed) for this block too, exactly as it already is for Launch
+  // POS and Export POS JSON — build-request readiness is the same
+  // question asked a third time.
+  selectedBuildTarget: BuildTarget;
+  onBuildTargetChange: (target: BuildTarget) => void;
+  buildRequestStatus: BuildRequestStatus;
+  buildRequestError: string | null;
+  latestBuildJob: BuildJobSummary | null;
+  latestBuildWasReused: boolean;
+  onRequestBuild: () => void;
+  onRefreshBuildStatus: () => void;
+  isRefreshingBuildStatus: boolean;
 };
 
 // Feature 14.2 — the single source of the Export sub-section's status
@@ -139,6 +163,27 @@ function getLaunchStatusMessage(eligibility: GeneratedPosExportEligibility): str
   return "Open the standalone POS runtime for this saved project.";
 }
 
+// Feature 15.4 — reuses the exact same GeneratedPosExportEligibility reason
+// codes as Export/Launch above (unrenamed, per the approved plan), with
+// build-request-specific copy for each.
+function getBuildEligibilityMessage(
+  eligibility: GeneratedPosExportEligibility
+): string {
+  if (eligibility.reason === "save-first") {
+    return "Save this project before requesting a build.";
+  }
+
+  if (eligibility.reason === "saving") {
+    return "Wait for the current save to finish.";
+  }
+
+  if (eligibility.reason === "save-changes-first") {
+    return "Save your latest changes before requesting a build.";
+  }
+
+  return "Choose a target and request a build.";
+}
+
 function formatTransactionTime(createdAt: string): string {
   return new Date(createdAt).toLocaleString("en-US", {
     month: "short",
@@ -184,6 +229,15 @@ export default function EditorPropertiesPanel({
   exportStatus,
   exportError,
   onExport,
+  selectedBuildTarget,
+  onBuildTargetChange,
+  buildRequestStatus,
+  buildRequestError,
+  latestBuildJob,
+  latestBuildWasReused,
+  onRequestBuild,
+  onRefreshBuildStatus,
+  isRefreshingBuildStatus,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
@@ -1207,6 +1261,157 @@ export default function EditorPropertiesPanel({
                       ? "Exporting…"
                       : "Export POS JSON"}
                   </button>
+                </div>
+
+                {/* Feature 15.4 — Build Application. Purely presentational:
+                    this component never calls a Server Action, generates a
+                    request key, or touches build_jobs itself — it only
+                    reads the props EditorShell already computed and calls
+                    onBuildTargetChange/onRequestBuild/onRefreshBuildStatus.
+                    Reuses exportEligibility exactly as Launch POS/Export
+                    POS JSON already do. */}
+                <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Build Application
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Create a queued build request from this saved POS
+                      configuration.
+                    </p>
+                  </div>
+
+                  {/* aria-live region — announces eligibility text, a
+                      request failure, and the success/reused message as
+                      they change, without requiring focus to move here. */}
+                  <div aria-live="polite" className="flex flex-col gap-2">
+                    <span className="text-xs font-medium text-neutral-500">
+                      {getBuildEligibilityMessage(exportEligibility)}
+                    </span>
+
+                    <div
+                      role="group"
+                      aria-label="Build target"
+                      className="grid grid-cols-2 gap-2"
+                    >
+                      {(["android", "desktop"] as const).map((target) => {
+                        const isSelected = selectedBuildTarget === target;
+
+                        return (
+                          <button
+                            key={target}
+                            type="button"
+                            aria-pressed={isSelected}
+                            disabled={buildRequestStatus === "submitting"}
+                            onClick={() => onBuildTargetChange(target)}
+                            className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50 ${
+                              isSelected
+                                ? "border-blue-600 bg-blue-600 text-white"
+                                : "border-neutral-200 text-neutral-700 hover:border-blue-600 hover:text-blue-600"
+                            }`}
+                          >
+                            {getBuildTargetLabel(target)}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {buildRequestStatus === "error" && buildRequestError && (
+                      <span className="text-xs text-red-600">
+                        {buildRequestError}
+                      </span>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={onRequestBuild}
+                      disabled={
+                        !exportEligibility.canExport ||
+                        buildRequestStatus === "submitting"
+                      }
+                      className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {getBuildRequestButtonLabel(buildRequestStatus)}
+                    </button>
+
+                    {buildRequestStatus === "success" && (
+                      <span className="text-xs font-medium text-emerald-600">
+                        {getBuildRequestSuccessMessage(latestBuildWasReused)}
+                      </span>
+                    )}
+                  </div>
+
+                  {latestBuildJob && (
+                    // aria-live region — separate from the one above, since
+                    // this reflects the displayed job's own status (which
+                    // can also change from a manual refresh, independent of
+                    // buildRequestStatus).
+                    <div
+                      aria-live="polite"
+                      className="flex flex-col gap-1.5 rounded-xl border border-neutral-200 px-4 py-3 text-xs text-neutral-600"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-neutral-500">Target</span>
+                        <span className="font-medium text-neutral-900">
+                          {getBuildTargetLabel(latestBuildJob.target)}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-neutral-500">Status</span>
+                        <span className="font-medium text-neutral-900">
+                          {getBuildStatusLabel(latestBuildJob.status)}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-neutral-500">Requested</span>
+                        <span className="font-medium text-neutral-900">
+                          {formatTransactionTime(latestBuildJob.createdAt)}
+                        </span>
+                      </div>
+
+                      {latestBuildJob.status === "queued" && (
+                        <p className="mt-1 text-neutral-400">
+                          Build processing is not enabled yet. This request
+                          will remain queued until the build worker is
+                          added.
+                        </p>
+                      )}
+
+                      {latestBuildJob.status === "failed" &&
+                        latestBuildJob.failureMessage && (
+                          <p className="mt-1 text-red-600">
+                            {latestBuildJob.failureMessage}
+                          </p>
+                        )}
+
+                      {latestBuildJob.status === "succeeded" && (
+                        <p className="mt-1 text-neutral-400">
+                          No downloadable artifact is available yet.
+                        </p>
+                      )}
+
+                      {/* A refresh failure sets buildRequestError without
+                          touching buildRequestStatus, so this is what
+                          surfaces it — the request-failure message above
+                          already covers buildRequestStatus === "error". */}
+                      {buildRequestError && buildRequestStatus !== "error" && (
+                        <p className="mt-1 text-red-600">{buildRequestError}</p>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={onRefreshBuildStatus}
+                        disabled={isRefreshingBuildStatus}
+                        className="mt-2 w-full rounded-full border border-neutral-200 px-4 py-2 text-xs font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {isRefreshingBuildStatus
+                          ? "Refreshing…"
+                          : "Refresh status"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

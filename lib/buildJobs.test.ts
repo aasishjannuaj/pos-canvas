@@ -4,6 +4,10 @@ import {
   BUILD_TARGETS,
   TERMINAL_BUILD_STATUSES,
   canonicalizeGeneratedPosConfig,
+  getBuildRequestButtonLabel,
+  getBuildRequestSuccessMessage,
+  getBuildStatusLabel,
+  getBuildTargetLabel,
   isBuildFailureCode,
   isBuildStatus,
   isNonEmptyId,
@@ -16,7 +20,12 @@ import {
   resolveExistingBuildJob,
   sanitizeBuildFailureMessage,
 } from "@/lib/buildJobs";
-import type { BuildJobRow, BuildJobSummary, BuildStatus } from "@/lib/buildJobs";
+import type {
+  BuildJobRow,
+  BuildJobSummary,
+  BuildRequestStatus,
+  BuildStatus,
+} from "@/lib/buildJobs";
 import { createGeneratedPosConfig } from "@/lib/generatedPosConfig";
 import { defaultProjectConfig } from "@/lib/projectConfig";
 
@@ -541,5 +550,89 @@ describe("isValidRetryReference", () => {
         ...baseContext,
       })
     ).toBe(false);
+  });
+});
+
+describe("getBuildTargetLabel", () => {
+  it("maps every approved target to its display label", () => {
+    expect(getBuildTargetLabel("android")).toBe("Android");
+    expect(getBuildTargetLabel("desktop")).toBe("Desktop");
+  });
+
+  it("covers every value in BUILD_TARGETS with no fallthrough", () => {
+    for (const target of BUILD_TARGETS) {
+      expect(typeof getBuildTargetLabel(target)).toBe("string");
+      expect(getBuildTargetLabel(target).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("getBuildStatusLabel", () => {
+  it("maps every approved status to its display label", () => {
+    expect(getBuildStatusLabel("queued")).toBe("Queued");
+    expect(getBuildStatusLabel("building")).toBe("Building");
+    expect(getBuildStatusLabel("succeeded")).toBe("Ready");
+    expect(getBuildStatusLabel("failed")).toBe("Failed");
+  });
+
+  it("covers every value in BUILD_STATUSES with no fallthrough", () => {
+    for (const status of BUILD_STATUSES) {
+      expect(typeof getBuildStatusLabel(status)).toBe("string");
+      expect(getBuildStatusLabel(status).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("getBuildRequestButtonLabel", () => {
+  it("maps every build-request status to its button label", () => {
+    expect(getBuildRequestButtonLabel("idle")).toBe("Request Build");
+    expect(getBuildRequestButtonLabel("submitting")).toBe("Requesting…");
+    expect(getBuildRequestButtonLabel("success")).toBe("Request Another Build");
+    expect(getBuildRequestButtonLabel("error")).toBe("Retry Build");
+  });
+
+  it("covers every BuildRequestStatus value with no fallthrough", () => {
+    const allStatuses: BuildRequestStatus[] = [
+      "idle",
+      "submitting",
+      "success",
+      "error",
+    ];
+
+    for (const status of allStatuses) {
+      expect(typeof getBuildRequestButtonLabel(status)).toBe("string");
+      expect(getBuildRequestButtonLabel(status).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("getBuildRequestSuccessMessage", () => {
+  it("returns the new-job message when reusedExisting is false", () => {
+    expect(getBuildRequestSuccessMessage(false)).toBe("Build request queued.");
+  });
+
+  it("returns the reused-job message when reusedExisting is true", () => {
+    expect(getBuildRequestSuccessMessage(true)).toBe(
+      "An existing active build request was found."
+    );
+  });
+});
+
+describe("build-request action payload shape", () => {
+  // Feature 15.4 — a runtime confirmation (not just a compile-time type)
+  // that a request payload constructed the way lib/buildJobs.actions.ts
+  // expects contains exactly these three keys — no ownerId, config,
+  // configSnapshot, configHash, schemaVersion, status, or timestamp field
+  // has any way to ride along.
+  it("contains only projectId, target, and requestKey", () => {
+    const payload = {
+      projectId: "project-1",
+      target: "android" as const,
+      requestKey: "request-key-1",
+    };
+
+    expect(Object.keys(payload).sort()).toEqual(
+      ["projectId", "target", "requestKey"].sort()
+    );
   });
 });

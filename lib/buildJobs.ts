@@ -409,3 +409,58 @@ export function sanitizeBuildFailureMessage(value: unknown): string {
 
   return sanitized;
 }
+
+// ============================================================================
+// Feature 15.4 — pure UI/copy helpers for the Builder's build-request UI.
+// Kept here (not inline in the "use client" component) specifically so they
+// stay unit-testable without React Testing Library, and so they're
+// available to any future UI surface that needs the same labels. Still
+// dependency-free: no React, no Supabase, no Node-only import.
+// ============================================================================
+
+// Feature 15.4 — the build-request lifecycle as observed by the Builder UI.
+// Deliberately distinct from BuildStatus (the persisted job's own status):
+// this describes the *current request attempt* in the browser, not the
+// job's state in the database.
+export type BuildRequestStatus = "idle" | "submitting" | "success" | "error";
+
+const BUILD_TARGET_LABELS: Record<BuildTarget, string> = {
+  android: "Android",
+  desktop: "Desktop",
+};
+
+export function getBuildTargetLabel(target: BuildTarget): string {
+  return BUILD_TARGET_LABELS[target];
+}
+
+const BUILD_STATUS_LABELS: Record<BuildStatus, string> = {
+  queued: "Queued",
+  building: "Building",
+  succeeded: "Ready",
+  failed: "Failed",
+};
+
+export function getBuildStatusLabel(status: BuildStatus): string {
+  return BUILD_STATUS_LABELS[status];
+}
+
+const BUILD_REQUEST_BUTTON_LABELS: Record<BuildRequestStatus, string> = {
+  idle: "Request Build",
+  submitting: "Requesting…",
+  success: "Request Another Build",
+  error: "Retry Build",
+};
+
+export function getBuildRequestButtonLabel(status: BuildRequestStatus): string {
+  return BUILD_REQUEST_BUTTON_LABELS[status];
+}
+
+// Feature 15.4 — a repeated request key or an already-active job are both
+// successful outcomes, never an error; this is the one place their two
+// distinct user-facing messages are defined, so the Builder UI never needs
+// its own separate copy table for the same distinction.
+export function getBuildRequestSuccessMessage(reusedExisting: boolean): string {
+  return reusedExisting
+    ? "An existing active build request was found."
+    : "Build request queued.";
+}

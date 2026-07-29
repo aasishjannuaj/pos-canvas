@@ -54,6 +54,8 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
+import { requestBuildJob, refreshBuildJobStatus } from "@/lib/buildJobs.actions";
+import type { BuildJobSummary, BuildRequestStatus, BuildTarget } from "@/lib/buildJobs";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -281,6 +283,33 @@ export default function EditorShell({
   // reset needed here.
   const [exportStatus, setExportStatus] = useState<ExportStatus>("idle");
   const [exportError, setExportError] = useState<string | null>(null);
+
+  // Feature 15.4 — build-request state, independent of isDirty/saveStatus/
+  // saveError and of exportStatus/exportError above. Requesting a build is
+  // a pure server-side job request based on the already-saved project: it
+  // never marks the project dirty, never touches save/export state, and
+  // never modifies projectConfig.
+  const [selectedBuildTarget, setSelectedBuildTarget] =
+    useState<BuildTarget>("android");
+  const [buildRequestStatus, setBuildRequestStatus] =
+    useState<BuildRequestStatus>("idle");
+  const [buildRequestError, setBuildRequestError] = useState<string | null>(null);
+  const [latestBuildJob, setLatestBuildJob] = useState<BuildJobSummary | null>(
+    null
+  );
+  const [latestBuildWasReused, setLatestBuildWasReused] = useState(false);
+  // Feature 15.4 — the pending idempotency key for the *current* build
+  // attempt. Generated only inside handleRequestBuild (never during
+  // render), kept on a failed attempt so a retry reuses it, and cleared on
+  // success so the next intentional request generates a fresh one.
+  const [pendingRequestKey, setPendingRequestKey] = useState<string | null>(
+    null
+  );
+  // Feature 15.4 — a small, separate flag guarding against a duplicate
+  // "Refresh status" click while one is already in flight; kept distinct
+  // from buildRequestStatus since refreshing and requesting are two
+  // different actions that must never be conflated.
+  const [isRefreshingBuildStatus, setIsRefreshingBuildStatus] = useState(false);
 
   // Feature 13.3 — entirely separate from the isDirty/saveStatus save-state
   // model above: onboarding never marks the project dirty, never touches
@@ -1144,6 +1173,90 @@ export default function EditorShell({
     }
   }
 
+  // Feature 15.4 — changing the selected target is a pure, ephemeral UI
+  // choice, exactly like editorMode/selectedItemId elsewhere in this file:
+  // it never marks the project dirty.
+  function handleBuildTargetChange(target: BuildTarget) {
+    setSelectedBuildTarget(target);
+  }
+
+  // Feature 15.4 — requests (or reuses) a queued build job for the
+  // selected target. Reuses exportEligibility exactly as Launch POS does
+  // (unrenamed, per the approved plan) — layering buildRequestStatus ===
+  // "submitting" on top as the one build-specific readiness rule. Never
+  // touches isDirty/saveStatus/saveError/exportStatus/exportError/
+  // onboarding/projectConfig — the only state this function ever writes is
+  // its own build-request state declared above.
+  async function handleRequestBuild() {
+    if (!exportEligibility.canExport || projectId === null) {
+      return;
+    }
+
+    if (buildRequestStatus === "submitting") {
+      return;
+    }
+
+    // Feature 15.4 — reuse the pending key from a previous failed attempt
+    // (a retry of the same intentional request) or generate a fresh one
+    // for a genuinely new attempt. Generated here, inside the handler,
+    // never during render. createId() is the same crypto.randomUUID()
+    // (with its existing defensive fallback) already used elsewhere in
+    // this file for menu item ids.
+    const requestKey = pendingRequestKey ?? createId();
+
+    if (pendingRequestKey === null) {
+      setPendingRequestKey(requestKey);
+    }
+
+    setBuildRequestStatus("submitting");
+    // Only the error is cleared here — latestBuildJob/latestBuildWasReused
+    // deliberately stay in place while submitting, so the previously shown
+    // result doesn't blank out while a new request is in flight.
+    setBuildRequestError(null);
+
+    const result = await requestBuildJob({
+      projectId,
+      target: selectedBuildTarget,
+      requestKey,
+    });
+
+    if (!result.ok) {
+      setBuildRequestStatus("error");
+      setBuildRequestError(result.message);
+      return;
+    }
+
+    setPendingRequestKey(null);
+    setLatestBuildJob(result.job);
+    setLatestBuildWasReused(result.reusedExisting);
+    setBuildRequestStatus("success");
+    setBuildRequestError(null);
+  }
+
+  // Feature 15.4 — a manual, one-shot refresh of the currently displayed
+  // job's status only — no polling, no interval, no router.refresh(). Kept
+  // fully separate from buildRequestStatus: refreshing and requesting are
+  // two different actions and must never be conflated.
+  async function handleRefreshBuildStatus() {
+    if (latestBuildJob === null || isRefreshingBuildStatus) {
+      return;
+    }
+
+    setIsRefreshingBuildStatus(true);
+
+    const result = await refreshBuildJobStatus(latestBuildJob.id);
+
+    if (!result.ok) {
+      setBuildRequestError(result.message);
+      setIsRefreshingBuildStatus(false);
+      return;
+    }
+
+    setLatestBuildJob(result.job);
+    setBuildRequestError(null);
+    setIsRefreshingBuildStatus(false);
+  }
+
   // Feature 13.2 — warn only while there's something unsaved to lose; the
   // listener is added/removed as isDirty flips, so it's never registered
   // for a clean project and never lingers after a successful save.
@@ -1278,6 +1391,15 @@ export default function EditorShell({
           exportStatus={exportStatus}
           exportError={exportError}
           onExport={handleExport}
+          selectedBuildTarget={selectedBuildTarget}
+          onBuildTargetChange={handleBuildTargetChange}
+          buildRequestStatus={buildRequestStatus}
+          buildRequestError={buildRequestError}
+          latestBuildJob={latestBuildJob}
+          latestBuildWasReused={latestBuildWasReused}
+          onRequestBuild={handleRequestBuild}
+          onRefreshBuildStatus={handleRefreshBuildStatus}
+          isRefreshingBuildStatus={isRefreshingBuildStatus}
         />
       </div>
 
