@@ -14,6 +14,7 @@ import {
   isNonEmptyId,
   isSupportedBuildTarget,
   isTerminalBuildStatus,
+  isValidUuid,
   isValidBuildStatusTransition,
   isValidRetryReference,
   mapBuildJobRow,
@@ -272,6 +273,84 @@ describe("isNonEmptyId", () => {
     expect(isNonEmptyId(null)).toBe(false);
     expect(isNonEmptyId(undefined)).toBe(false);
     expect(isNonEmptyId(123)).toBe(false);
+  });
+});
+
+// Feature 15.7 correction — the single canonical UUID guard. Exists
+// because build_jobs.id / build_artifacts.build_job_id are PostgreSQL uuid
+// columns: a malformed value would reach the database as an
+// invalid-input-syntax error rather than matching zero rows, so the shape
+// is validated before any query is issued.
+describe("isValidUuid", () => {
+  const LOWERCASE = "b0bf8e92-0db6-48f4-937b-55c8821a1946";
+  const UPPERCASE = "B0BF8E92-0DB6-48F4-937B-55C8821A1946";
+
+  it("accepts a canonical lowercase UUID", () => {
+    expect(isValidUuid(LOWERCASE)).toBe(true);
+  });
+
+  it("accepts a canonical uppercase UUID (case-insensitive)", () => {
+    expect(isValidUuid(UPPERCASE)).toBe(true);
+  });
+
+  it("accepts a mixed-case UUID", () => {
+    expect(isValidUuid("B0bf8E92-0db6-48F4-937b-55C8821a1946")).toBe(true);
+  });
+
+  it("accepts the all-zero nil UUID, which PostgreSQL also accepts", () => {
+    expect(isValidUuid("00000000-0000-0000-0000-000000000000")).toBe(true);
+  });
+
+  it("rejects an empty string", () => {
+    expect(isValidUuid("")).toBe(false);
+  });
+
+  it("rejects arbitrary text", () => {
+    expect(isValidUuid("not-a-uuid")).toBe(false);
+    expect(isValidUuid("select 1")).toBe(false);
+    expect(isValidUuid("../../etc/passwd")).toBe(false);
+  });
+
+  it("rejects an incomplete or truncated UUID", () => {
+    expect(isValidUuid("b0bf8e92")).toBe(false);
+    expect(isValidUuid("b0bf8e92-0db6-48f4-937b")).toBe(false);
+    expect(isValidUuid("b0bf8e92-0db6-48f4-937b-55c8821a194")).toBe(false);
+  });
+
+  it("rejects an over-long UUID or one with extra trailing content", () => {
+    expect(isValidUuid(`${LOWERCASE}7`)).toBe(false);
+    expect(isValidUuid(`${LOWERCASE}/generated-pos-config.json`)).toBe(false);
+    expect(isValidUuid(`${LOWERCASE},${LOWERCASE}`)).toBe(false);
+  });
+
+  it("rejects a UUID with leading or trailing whitespace (no implicit normalization)", () => {
+    expect(isValidUuid(` ${LOWERCASE}`)).toBe(false);
+    expect(isValidUuid(`${LOWERCASE} `)).toBe(false);
+    expect(isValidUuid(`  ${LOWERCASE}  `)).toBe(false);
+    expect(isValidUuid(`${LOWERCASE}\n`)).toBe(false);
+  });
+
+  it("rejects non-canonical forms (missing or misplaced hyphens, braces)", () => {
+    expect(isValidUuid("b0bf8e920db648f4937b55c8821a1946")).toBe(false);
+    expect(isValidUuid(`{${LOWERCASE}}`)).toBe(false);
+    expect(isValidUuid("b0bf8e9-20db6-48f4-937b-55c8821a1946")).toBe(false);
+  });
+
+  it("rejects non-hex characters in an otherwise well-shaped value", () => {
+    expect(isValidUuid("g0bf8e92-0db6-48f4-937b-55c8821a1946")).toBe(false);
+    expect(isValidUuid("b0bf8e92-0db6-48f4-937b-55c8821a194z")).toBe(false);
+  });
+
+  it("rejects non-string values", () => {
+    expect(isValidUuid(null)).toBe(false);
+    expect(isValidUuid(undefined)).toBe(false);
+    expect(isValidUuid(123)).toBe(false);
+    expect(isValidUuid({})).toBe(false);
+  });
+
+  it("is stricter than isNonEmptyId for the same input", () => {
+    expect(isNonEmptyId("not-a-uuid")).toBe(true);
+    expect(isValidUuid("not-a-uuid")).toBe(false);
   });
 });
 

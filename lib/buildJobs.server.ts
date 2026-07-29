@@ -14,6 +14,7 @@ import {
   isBuildStatus,
   isNonEmptyId,
   isSupportedBuildTarget,
+  isValidUuid,
   mapBuildJobRow,
   normalizeRequestKey,
   resolveExistingBuildJob,
@@ -26,6 +27,15 @@ import type {
   CreateBuildJobInput,
   CreateBuildJobResult,
 } from "@/lib/buildJobs";
+import {
+  BUILD_ARTIFACTS_DOWNLOAD_BUCKET,
+  DOWNLOAD_SIGNED_URL_SECONDS,
+  JSON_CONFIG_DOWNLOAD_ARTIFACT_TYPE,
+  createDownloadArtifactFailure,
+  createUnexpectedDownloadFailure,
+  decideBuildArtifactDownloadEligibility,
+} from "@/lib/buildJobs.download";
+import type { DownloadArtifactResult } from "@/lib/buildJobs.download";
 
 // Feature 15.5 — the implementation now lives in lib/buildJobs.hash.ts
 // (no "server-only" import), specifically so worker/once.ts can compute
@@ -480,4 +490,215 @@ export async function getBuildJobById(buildJobId: string): Promise<{
   const job = mapBuildJobRow(data as BuildJobRow);
 
   return { job, error: job ? null : "Unable to load this build." };
+}
+
+// ============================================================================
+// Feature 15.7 — Secure Artifact Download.
+// ============================================================================
+
+// Feature 15.7 — sanitized, structured, server-console-only logging for
+// the two internal failure classes worth diagnosing. Deliberately logs
+// only the buildJobId (already known to the authenticated owner who just
+// asked for it) plus a fixed category string — never the signed URL, the
+// storage path, the bucket, a Supabase/Storage error object, a cookie, an
+// access token, or the service-role key. The raw error is not passed in
+// at all, so there is nothing here that *could* leak one.
+function logDownloadFailure(
+  event: "artifact_download_sign_failed" | "artifact_download_query_failed",
+  buildJobId: string,
+  category: "storage_signing_failed" | "database_read_failed"
+): void {
+  console.error(JSON.stringify({ event, buildJobId, category }));
+}
+
+// Feature 15.7 — the server-authoritative download path. The browser
+// supplies exactly one value (buildJobId) and every other input is either
+// derived here or a server-side constant: the artifact type
+// (JSON_CONFIG_DOWNLOAD_ARTIFACT_TYPE), the bucket
+// (BUILD_ARTIFACTS_DOWNLOAD_BUCKET), the signed-URL lifetime
+// (DOWNLOAD_SIGNED_URL_SECONDS), the storage path and the download
+// filename (both read from the trusted build_artifacts row, never from
+// the caller).
+//
+// The security boundary is the ordering, and it is load-bearing:
+// authentication and BOTH ownership reads go through the normal
+// cookie-based, RLS-scoped client (createClient) — the admin client is
+// not constructed until every one of those checks has already passed, and
+// its only use is the single privileged operation RLS structurally cannot
+// grant to an authenticated browser role (createSignedUrl on a bucket
+// with no anon/authenticated storage.objects policy at all). The admin
+// client never re-reads build_jobs or build_artifacts, so it can never
+// stand in for the ownership proof.
+export async function createBuildArtifactDownloadUrl(
+  buildJobId: string
+): Promise<DownloadArtifactResult> {
+  // Feature 15.7 correction — the same isValidUuid guard the Server Action
+  // wrapper (downloadBuildArtifact) already applies, repeated here as
+  // defense in depth: this function is exported, so a future internal
+  // caller could reach it without going through that wrapper, and
+  // build_jobs.id / build_artifacts.build_job_id are PostgreSQL uuid
+  // columns where a malformed value becomes an invalid-input-syntax error
+  // rather than an empty result set. Both boundaries deliberately use the
+  // one shared helper (lib/buildJobs.ts's isValidUuid) so they can never
+  // drift apart, and both report the identical generic not_found result.
+  if (!isValidUuid(buildJobId)) {
+    return createDownloadArtifactFailure("not_found");
+  }
+
+  try {
+    const supabase = await createClient();
+
+    const { data: claimsData, error: claimsError } =
+      await supabase.auth.getClaims();
+    const claims = claimsData?.claims ?? null;
+
+    if (claimsError || !claims) {
+      return createDownloadArtifactFailure("unauthenticated");
+    }
+
+    // Feature 15.7 — ownership proof #1, via RLS only. build_jobs_select_own
+    // (owner_id = auth.uid()) means a job belonging to another user comes
+    // back identically to one that does not exist: `data` is null for
+    // both, so "not found" and "not yours" are indistinguishable here by
+    // construction, with no special-casing needed to make them look alike.
+    const { data: jobRow, error: jobError } = await supabase
+      .from("build_jobs")
+      .select("id, status")
+      .eq("id", buildJobId)
+      .maybeSingle();
+
+    if (jobError) {
+      logDownloadFailure(
+        "artifact_download_query_failed",
+        buildJobId,
+        "database_read_failed"
+      );
+      return createUnexpectedDownloadFailure();
+    }
+
+    if (!jobRow) {
+      return createDownloadArtifactFailure("not_found");
+    }
+
+    if (!isBuildStatus(jobRow.status)) {
+      // A status the domain doesn't recognize is a real data anomaly, not
+      // legacy data to coerce — treated as "not ready" rather than
+      // guessed at, matching mapBuildJobRow's own reject-rather-than-
+      // normalize stance on this exact column.
+      return createDownloadArtifactFailure("not_ready");
+    }
+
+    // Feature 15.7 — ownership proof #2, again via RLS only.
+    // build_artifacts_select_own scopes this through the parent job's
+    // owner_id, so this row is only visible to its owner. artifact_type is
+    // pinned to the server-side json_config constant here — it is never a
+    // parameter of this function, so no caller (including the Server
+    // Action wrapper) can widen the download to a future log/apk/
+    // desktop_installer artifact. Feature 15.6's
+    // UNIQUE (build_job_id, artifact_type) guarantees at most one match.
+    const { data: artifactRow, error: artifactError } = await supabase
+      .from("build_artifacts")
+      .select("artifact_type, storage_path, original_filename, expires_at")
+      .eq("build_job_id", buildJobId)
+      .eq("artifact_type", JSON_CONFIG_DOWNLOAD_ARTIFACT_TYPE)
+      .maybeSingle();
+
+    if (artifactError) {
+      logDownloadFailure(
+        "artifact_download_query_failed",
+        buildJobId,
+        "database_read_failed"
+      );
+      return createUnexpectedDownloadFailure();
+    }
+
+    if (!artifactRow) {
+      return createDownloadArtifactFailure("not_found");
+    }
+
+    const storagePath = artifactRow.storage_path;
+    const originalFilename = artifactRow.original_filename;
+
+    // Feature 15.7 — trusted-field validation. These columns are written
+    // only by the worker's finalize RPC (and constrained NOT NULL /
+    // non-empty by the Feature 15.6 migration), so a failure here means
+    // the row is malformed rather than the request being wrong — reported
+    // as not_found rather than inventing a new public error code for an
+    // anomaly a user can neither cause nor fix.
+    if (
+      artifactRow.artifact_type !== JSON_CONFIG_DOWNLOAD_ARTIFACT_TYPE ||
+      typeof storagePath !== "string" ||
+      storagePath.trim() === "" ||
+      typeof originalFilename !== "string" ||
+      originalFilename.trim() === ""
+    ) {
+      return createDownloadArtifactFailure("not_found");
+    }
+
+    const eligibility = decideBuildArtifactDownloadEligibility({
+      buildStatus: jobRow.status,
+      expiresAt: artifactRow.expires_at ?? null,
+      now: new Date(),
+    });
+
+    if (eligibility !== "eligible") {
+      return createDownloadArtifactFailure(eligibility);
+    }
+
+    // Feature 15.7 — every ownership and eligibility check has now
+    // passed. This is the first and only point at which the privileged
+    // client exists in this function's scope.
+    let admin: AdminSupabaseClient;
+
+    try {
+      admin = createAdminClient();
+    } catch {
+      // Missing/misconfigured service-role configuration. No variable
+      // name or value is ever included in the returned message.
+      logDownloadFailure(
+        "artifact_download_sign_failed",
+        buildJobId,
+        "storage_signing_failed"
+      );
+      return createDownloadArtifactFailure("unavailable");
+    }
+
+    // Feature 15.7 — the one privileged call. `download:
+    // originalFilename` makes Supabase Storage itself set
+    // Content-Disposition on the signed response, so the browser saves
+    // the file under the server-trusted filename with no Route Handler
+    // and no manually constructed header anywhere in this codebase. The
+    // filename comes from build_artifacts.original_filename (generated
+    // server-side at build time by createGeneratedPosConfigFilename) —
+    // never from the client.
+    const { data: signed, error: signError } = await admin.storage
+      .from(BUILD_ARTIFACTS_DOWNLOAD_BUCKET)
+      .createSignedUrl(storagePath, DOWNLOAD_SIGNED_URL_SECONDS, {
+        download: originalFilename,
+      });
+
+    if (signError || !signed?.signedUrl) {
+      // Feature 15.7 — the artifact row is valid but the object could not
+      // be signed (missing/inaccessible in Storage). Deliberately does
+      // NOT change the build's status and does NOT delete the artifact
+      // row — this is a transient-or-operational condition to be
+      // investigated, not something to auto-remediate by mutating
+      // already-terminal, already-verified records.
+      logDownloadFailure(
+        "artifact_download_sign_failed",
+        buildJobId,
+        "storage_signing_failed"
+      );
+      return createDownloadArtifactFailure("unavailable");
+    }
+
+    // Feature 15.7 — the signed URL is returned to the caller and never
+    // logged, never written to any table, and never retained here.
+    return { ok: true, url: signed.signedUrl, filename: originalFilename };
+  } catch {
+    // Feature 15.7 — no stack trace, no internal message, no error object
+    // is surfaced or logged from here; the thrown value is deliberately
+    // not even bound to a variable.
+    return createUnexpectedDownloadFailure();
+  }
 }

@@ -3,10 +3,17 @@
 import {
   isNonEmptyId,
   isSupportedBuildTarget,
+  isValidUuid,
   normalizeRequestKey,
 } from "@/lib/buildJobs";
 import type { BuildJobSummary, CreateBuildJobResult } from "@/lib/buildJobs";
-import { createBuildJob, getBuildJobById } from "@/lib/buildJobs.server";
+import { createDownloadArtifactFailure } from "@/lib/buildJobs.download";
+import type { DownloadArtifactResult } from "@/lib/buildJobs.download";
+import {
+  createBuildArtifactDownloadUrl,
+  createBuildJob,
+  getBuildJobById,
+} from "@/lib/buildJobs.server";
 
 // Feature 15.4 — the only server boundary the browser can reach for build
 // requests. Next.js compiles this file's exports into server-action
@@ -86,4 +93,42 @@ export async function refreshBuildJobStatus(
   }
 
   return { ok: true, job };
+}
+
+// Feature 15.7 — the only server boundary the browser can reach to obtain
+// a build artifact download URL. A thin wrapper in the same shape as the
+// two actions above: one defensive shape-check on the single field a
+// caller may ever supply, then a direct delegation to
+// createBuildArtifactDownloadUrl, which performs authentication, both
+// RLS-scoped ownership reads, eligibility checks, and the signed-URL
+// creation itself and already returns a fully sanitized
+// DownloadArtifactResult.
+//
+// buildJobId is the *only* input. There is deliberately no parameter for
+// an artifact id, owner id, project id, artifact type, storage path,
+// filename, build status, expiration, or bucket name — every one of those
+// is either derived server-side or a server-side constant, so a caller
+// cannot influence which object gets signed or what it is served as.
+//
+// Feature 15.7 correction — validated with isValidUuid (not merely
+// isNonEmptyId): build_jobs.id is a PostgreSQL uuid column, so a
+// malformed value would otherwise reach the database as an
+// invalid-input-syntax error rather than simply matching zero rows. A
+// malformed id is rejected here, before any Supabase client is created,
+// and reported with the exact same generic not_found result as an id that
+// is well-formed but unknown or owned by someone else — the failure never
+// says "invalid UUID", so this can't be used to probe id validity either.
+//
+// No admin-client or Storage logic lives in this wrapper; it never
+// touches the service-role credential, and Next.js compiles this file's
+// exports into server-action references so neither this function's
+// implementation nor anything it calls ships in the client bundle.
+export async function downloadBuildArtifact(
+  buildJobId: string
+): Promise<DownloadArtifactResult> {
+  if (!isValidUuid(buildJobId)) {
+    return createDownloadArtifactFailure("not_found");
+  }
+
+  return createBuildArtifactDownloadUrl(buildJobId);
 }

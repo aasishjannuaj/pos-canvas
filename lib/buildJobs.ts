@@ -99,6 +99,40 @@ export function isNonEmptyId(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
+// Feature 15.7 correction — the single canonical UUID guard for this
+// codebase. A fresh search found no pre-existing UUID validator, regex, or
+// uuid package anywhere in the repository, so this is deliberately the
+// only one: future callers must reuse it rather than adding a competing
+// variant. It lives here, next to isNonEmptyId, because this module is the
+// dependency-free home both the Server Action wrapper
+// (lib/buildJobs.actions.ts) and the server function
+// (lib/buildJobs.server.ts) already import from.
+//
+// Why this exists on top of isNonEmptyId: build_jobs.id and
+// build_artifacts.build_job_id are PostgreSQL `uuid` columns, so a
+// malformed value reaches the database as an invalid-input-syntax error
+// (22P02) rather than simply matching zero rows. Validating the shape
+// first means a malformed id never becomes a database round-trip at all.
+//
+// Canonical 8-4-4-4-12 hex form only, case-insensitive. Deliberately
+// anchored with no trimming, so a value with surrounding whitespace is
+// rejected rather than silently normalized — callers that genuinely need
+// normalization must do it explicitly before calling. Partial/truncated
+// UUIDs are rejected by the fixed group lengths.
+//
+// Deliberately does NOT constrain the version or variant nibbles (e.g.
+// requiring `4` and one of `[89ab]`): PostgreSQL's own uuid type accepts
+// any hex in this shape, so a stricter check here could reject an id the
+// database considers perfectly valid — including the all-zero nil UUID.
+// The purpose is to match what the database will parse, not to assert
+// which UUID version generated it.
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
 const MAX_REQUEST_KEY_LENGTH = 200;
 
 // Feature 15.3 — validates and trims a client-supplied idempotency key.

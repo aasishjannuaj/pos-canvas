@@ -87,6 +87,14 @@ type EditorPropertiesPanelProps = {
   onRequestBuild: () => void;
   onRefreshBuildStatus: () => void;
   isRefreshingBuildStatus: boolean;
+  // Feature 15.7 — artifact download. Purely presentational, exactly like
+  // the build-request props above: this component never calls a Server
+  // Action, never touches Supabase Storage, and never receives a signed
+  // URL, a storage path, or any artifact metadata — only a status, a
+  // sanitized error string, and a click handler owned by EditorShell.
+  downloadStatus: "idle" | "downloading";
+  downloadError: string | null;
+  onDownloadArtifact: () => void;
 };
 
 // Feature 14.2 — the single source of the Export sub-section's status
@@ -238,6 +246,9 @@ export default function EditorPropertiesPanel({
   onRequestBuild,
   onRefreshBuildStatus,
   isRefreshingBuildStatus,
+  downloadStatus,
+  downloadError,
+  onDownloadArtifact,
 }: EditorPropertiesPanelProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   // Feature 8.4 — completedOrders is newest-first, so index 0 is the latest
@@ -1386,19 +1397,36 @@ export default function EditorPropertiesPanel({
                           </p>
                         )}
 
-                      {/* Feature 15.6 — copy-only truthfulness update: a
-                          real, verified artifact now exists in private
-                          storage once status reaches "succeeded" (see
-                          worker/once.ts), so the previous "No downloadable
-                          artifact is available yet." copy would be false.
-                          This still does not expose storage_path, add a
-                          download action, or create a signed URL — those
-                          are deliberately deferred to Feature 15.7. */}
+                      {/* Feature 15.7 — the real download action, replacing
+                          Feature 15.6's "download will be added in the next
+                          feature" placeholder copy. Deliberately shows only
+                          a button: no filename, storage path, checksum,
+                          file size, artifact type, artifact id, expiration,
+                          or signed URL is rendered anywhere here, and no
+                          separate artifact-metadata query exists to
+                          populate any of that. The status row above still
+                          reads "Ready" (getBuildStatusLabel is unchanged).
+                          Clicking calls EditorShell's handler, which
+                          requests a fresh short-lived signed URL from the
+                          Server Action — nothing about the artifact is in
+                          this component's props or in the initial HTML. */}
                       {latestBuildJob.status === "succeeded" && (
-                        <p className="mt-1 text-neutral-400">
-                          Build completed successfully. Artifact download
-                          will be added in the next feature.
-                        </p>
+                        <div className="mt-2 flex flex-col gap-1.5">
+                          <button
+                            type="button"
+                            onClick={onDownloadArtifact}
+                            disabled={downloadStatus === "downloading"}
+                            className="w-full rounded-full bg-neutral-900 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {downloadStatus === "downloading"
+                              ? "Downloading…"
+                              : "Download configuration"}
+                          </button>
+
+                          {downloadError && (
+                            <p className="text-red-600">{downloadError}</p>
+                          )}
+                        </div>
                       )}
 
                       {/* A refresh failure sets buildRequestError without

@@ -54,7 +54,11 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
-import { requestBuildJob, refreshBuildJobStatus } from "@/lib/buildJobs.actions";
+import {
+  downloadBuildArtifact,
+  requestBuildJob,
+  refreshBuildJobStatus,
+} from "@/lib/buildJobs.actions";
 import type { BuildJobSummary, BuildRequestStatus, BuildTarget } from "@/lib/buildJobs";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
@@ -310,6 +314,18 @@ export default function EditorShell({
   // from buildRequestStatus since refreshing and requesting are two
   // different actions that must never be conflated.
   const [isRefreshingBuildStatus, setIsRefreshingBuildStatus] = useState(false);
+  // Feature 15.7 — artifact download state, kept distinct from
+  // buildRequestStatus and isRefreshingBuildStatus for the same reason
+  // those two are distinct from each other: requesting a build, refreshing
+  // its status, and downloading its artifact are three separate actions.
+  // Deliberately only "idle" | "downloading" — there is no "success"
+  // state to hold, because a successful download is an immediate browser
+  // action with nothing left to display afterward, and no signed URL is
+  // ever kept in React state (see handleDownloadArtifact).
+  const [downloadStatus, setDownloadStatus] = useState<"idle" | "downloading">(
+    "idle"
+  );
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Feature 13.3 — entirely separate from the isDirty/saveStatus save-state
   // model above: onboarding never marks the project dirty, never touches
@@ -1257,6 +1273,66 @@ export default function EditorShell({
     setIsRefreshingBuildStatus(false);
   }
 
+  // Feature 15.7 — the artifact download handler. Requests a fresh
+  // short-lived signed URL on every click (never reuses one, never keeps
+  // one in state), then triggers the download with a temporary anchor
+  // click — the same mechanism lib/downloadJson.ts already uses for the
+  // manual JSON export, minus the Blob/object-URL bookkeeping that a real
+  // remote URL doesn't need.
+  //
+  // Never calls window.open (popup-blocker risk) and never assigns
+  // window.location (which would navigate the Builder away if attachment
+  // handling ever behaved unexpectedly). Never marks the project dirty and
+  // never touches save/export/build-request state — downloadStatus and
+  // downloadError are the only state this function writes.
+  async function handleDownloadArtifact() {
+    if (latestBuildJob === null || latestBuildJob.status !== "succeeded") {
+      return;
+    }
+
+    if (downloadStatus === "downloading") {
+      return;
+    }
+
+    setDownloadStatus("downloading");
+    setDownloadError(null);
+
+    try {
+      const result = await downloadBuildArtifact(latestBuildJob.id);
+
+      if (!result.ok) {
+        // result.message is already a first-party sanitized string from
+        // lib/buildJobs.download.ts's approved message table — never a raw
+        // Supabase/Storage error — so it is displayed as-is.
+        setDownloadError(result.message);
+        return;
+      }
+
+      // Feature 15.7 — the signed URL is used immediately and never stored
+      // in React state, a ref, localStorage, or a log. `download` is set
+      // from the server-trusted filename as a courtesy, but the signed
+      // URL's own Content-Disposition header (set by Supabase Storage via
+      // the `download` option server-side) is the authoritative source of
+      // the saved filename.
+      const anchor = document.createElement("a");
+      anchor.href = result.url;
+      anchor.download = result.filename;
+      anchor.rel = "noopener noreferrer";
+
+      try {
+        document.body.appendChild(anchor);
+        anchor.click();
+      } finally {
+        // Removed regardless of whether click() threw, so a failed attempt
+        // can never leave a stray anchor (holding a live signed URL) in
+        // the DOM.
+        anchor.remove();
+      }
+    } finally {
+      setDownloadStatus("idle");
+    }
+  }
+
   // Feature 13.2 — warn only while there's something unsaved to lose; the
   // listener is added/removed as isDirty flips, so it's never registered
   // for a clean project and never lingers after a successful save.
@@ -1400,6 +1476,9 @@ export default function EditorShell({
           onRequestBuild={handleRequestBuild}
           onRefreshBuildStatus={handleRefreshBuildStatus}
           isRefreshingBuildStatus={isRefreshingBuildStatus}
+          downloadStatus={downloadStatus}
+          downloadError={downloadError}
+          onDownloadArtifact={handleDownloadArtifact}
         />
       </div>
 
