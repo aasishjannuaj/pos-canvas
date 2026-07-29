@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "worker:once": "node --env-file=.env.local --import tsx worker/once.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",
@@ -25,6 +26,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
+    "tsx": "^4.23.1",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

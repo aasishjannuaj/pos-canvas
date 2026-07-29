@@ -1,5 +1,4 @@
 import "server-only";
-import { createHash } from "node:crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getProjectById } from "@/lib/projects.server";
@@ -9,9 +8,9 @@ import {
   isGeneratedPosConfig,
 } from "@/lib/generatedPosConfig";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
+import { computeGeneratedPosConfigHash } from "@/lib/buildJobs.hash";
 import {
   BUILD_JOB_COLUMNS,
-  canonicalizeGeneratedPosConfig,
   isBuildStatus,
   isNonEmptyId,
   isSupportedBuildTarget,
@@ -28,20 +27,13 @@ import type {
   CreateBuildJobResult,
 } from "@/lib/buildJobs";
 
-// Feature 15.2/15.3 — the one place node:crypto is used in this domain.
-// Kept in its own server-only module (the "server-only" import enforces
-// this at build time — Next.js fails the build if this file is ever
-// pulled into a client bundle, the same mechanism lib/projects.server.ts
-// and lib/orders.server.ts already rely on) so this hashing logic, and the
-// Supabase access below, can never end up in browser code. lib/buildJobs.ts
-// stays free of any Node-only or Supabase import specifically so it
-// remains safe to import from anywhere, including a future client
-// component that only needs the status/target types or transition
-// validation.
-export function computeGeneratedPosConfigHash(config: GeneratedPosConfig): string {
-  const canonical = canonicalizeGeneratedPosConfig(config);
-  return createHash("sha256").update(canonical).digest("hex");
-}
+// Feature 15.5 — the implementation now lives in lib/buildJobs.hash.ts
+// (no "server-only" import), specifically so worker/once.ts can compute
+// the same hash without pulling in this file's own "server-only" guard.
+// Re-exported here unchanged so every existing caller/test that imports
+// computeGeneratedPosConfigHash from "@/lib/buildJobs.server" keeps
+// working with no change.
+export { computeGeneratedPosConfigHash };
 
 const GENERIC_DATABASE_ERROR_MESSAGE =
   "Something went wrong while requesting the build.";

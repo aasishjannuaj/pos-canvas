@@ -1,5 +1,6 @@
 import "server-only";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { getAdminSupabaseConfig } from "@/lib/supabase/adminConfig";
 
 // Feature 15.3 correction — the first privileged Supabase credential this
 // app has ever used. Every other client in this codebase
@@ -35,18 +36,15 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 // already used by NEXT_PUBLIC_SUPABASE_ANON_KEY. Never commit the real
 // value anywhere in this repository.
 export function createAdminClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !serviceRoleKey) {
-    // Feature 15.3 correction — a fixed, secret-free message: it never
-    // echoes which specific variable is missing beyond this, and there is
-    // no secret *value* here to leak in the first place (both variables
-    // are either present or undefined at this point).
-    throw new Error(
-      "createAdminClient: required Supabase server configuration is missing."
-    );
-  }
+  // Feature 15.5 — env validation itself now lives in
+  // lib/supabase/adminConfig.ts (no "server-only" import, no client
+  // creation) specifically so worker/supabase.ts — the standalone Node
+  // worker process, never bundled through Next.js — can validate/read the
+  // same two environment values without importing this "server-only"-
+  // guarded file, which would throw unconditionally outside Next's
+  // "react-server" bundling condition. Throws the same fixed, secret-free
+  // message as before this split if either value is missing.
+  const { supabaseUrl, serviceRoleKey } = getAdminSupabaseConfig();
 
   return createSupabaseClient(supabaseUrl, serviceRoleKey, {
     auth: {
