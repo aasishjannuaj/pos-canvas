@@ -1,3 +1,8 @@
+import { LANDING_SECTION_ANCHORS } from "@/lib/landingNav";
+
+// Footer links were already working in-page anchors; they now reference the
+// shared anchor constants so they cannot drift from the section ids the
+// landing sections actually render.
 export default function Footer() {
   const year = new Date().getFullYear();
 
@@ -10,14 +15,14 @@ export default function Footer() {
 
         <nav className="flex items-center gap-6">
           <a
-            href="#templates"
+            href={LANDING_SECTION_ANCHORS.templates}
             className="text-sm text-neutral-600 transition-colors hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
           >
             Templates
           </a>
 
           <a
-            href="#features"
+            href={LANDING_SECTION_ANCHORS.features}
             className="text-sm text-neutral-600 transition-colors hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
           >
             Features
