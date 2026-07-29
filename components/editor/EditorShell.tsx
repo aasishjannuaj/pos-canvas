@@ -28,6 +28,12 @@ import type {
 } from "@/lib/projectConfig";
 import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
 import type { PosLayout } from "@/lib/posLayout";
+import OnboardingChecklist from "./onboarding/OnboardingChecklist";
+import {
+  useOnboardingProgress,
+  sectionToOnboardingStepId,
+} from "./onboarding/useOnboardingProgress";
+import type { OnboardingStepId } from "./onboarding/useOnboardingProgress";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -433,6 +439,74 @@ export default function EditorShell({
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Feature 13.3 — entirely separate from the isDirty/saveStatus save-state
+  // model above: onboarding never marks the project dirty, never touches
+  // saveStatus/saveError, and never calls handleSave. See
+  // useOnboardingProgress for the auto-open/persistence/completion rules.
+  // Correction: the hook no longer takes editorSection/editorMode — step
+  // completion is now recorded directly from user actions below (sidebar
+  // clicks, the Preview toggle, onboarding's own navigation), never from an
+  // effect watching this state.
+  const onboarding = useOnboardingProgress({
+    initialProjectId: initialProjectId ?? null,
+    projectId,
+  });
+
+  // Feature 13.3 correction — the single place that records a section as
+  // visited, used both for normal EditorSidebar clicks and (via
+  // handleOnboardingNavigate below) for the checklist's own section steps.
+  // Always forces editorMode back to "edit" alongside setEditorSection,
+  // since a section is only rendered while editorMode === "edit"
+  // (EditorPreview renders unconditionally in "preview" mode regardless of
+  // editorSection) — this also means clicking a sidebar section while in
+  // preview mode now correctly switches back to edit mode, matching what a
+  // user would expect. sectionToOnboardingStepId returns null for the
+  // reporting sections (Dashboard/Sales Report/Product Performance/
+  // Inventory Summary), which are intentionally not onboarding steps.
+  function handleEditorSectionChange(section: EditorSection) {
+    setEditorMode("edit");
+    setEditorSection(section);
+
+    const stepId = sectionToOnboardingStepId(section);
+    if (stepId) {
+      onboarding.markStepVisited(stepId);
+    }
+  }
+
+  // Feature 13.3 — the single dispatcher the checklist calls for its six
+  // navigable steps ("save" is observational-only and never reaches here —
+  // see OnboardingChecklist). The five section steps delegate to
+  // handleEditorSectionChange above so the "force edit mode + record the
+  // visit" logic isn't duplicated. Preview is handled directly (setting
+  // editorMode straight to "preview" rather than through
+  // handleToggleEditorMode's toggle), so clicking this step is idempotent
+  // even if already in preview mode.
+  function handleOnboardingNavigate(stepId: OnboardingStepId) {
+    switch (stepId) {
+      case "business":
+        handleEditorSectionChange("Business");
+        return;
+      case "menu":
+        handleEditorSectionChange("Menu");
+        return;
+      case "branding":
+        handleEditorSectionChange("Branding");
+        return;
+      case "taxes":
+        handleEditorSectionChange("Taxes");
+        return;
+      case "receipt":
+        handleEditorSectionChange("Settings");
+        return;
+      case "preview":
+        setEditorMode("preview");
+        onboarding.markStepVisited("preview");
+        return;
+      case "save":
+        return;
+    }
+  }
+
   const selectedItem =
     projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
 
@@ -458,8 +532,22 @@ export default function EditorShell({
     markDirty();
   }
 
+  // Feature 13.3 correction — records the Preview step directly from this
+  // existing user action (the EditorTopBar Preview/Back-to-Edit button),
+  // rather than from an effect watching editorMode. Computed from the
+  // current editorMode value (not a functional setEditorMode updater) since
+  // calling another state setter — onboarding.markStepVisited, which itself
+  // calls setVisitedSteps — from inside a setState updater function would
+  // be an impure side effect React explicitly warns against. Returning to
+  // edit mode never un-marks the step: it's a one-way completion signal
+  // like every other onboarding step.
   function handleToggleEditorMode() {
-    setEditorMode((prev) => (prev === "edit" ? "preview" : "edit"));
+    const nextMode: EditorMode = editorMode === "edit" ? "preview" : "edit";
+    setEditorMode(nextMode);
+
+    if (nextMode === "preview") {
+      onboarding.markStepVisited("preview");
+    }
   }
 
   function handleUpdateItem(id: string, changes: Partial<MenuItem>) {
@@ -1079,6 +1167,17 @@ export default function EditorShell({
         return;
       }
 
+      // Feature 13.3 correction — write onboarding progress to the new
+      // project's key synchronously, before anything else, rather than
+      // relying on the hook's ordinary projectId-dependent effect to have
+      // committed before router.replace below runs. That effect is only
+      // guaranteed to fire on a future commit, and router.replace is not
+      // guaranteed not to remount EditorShell before that commit happens —
+      // this call removes the race entirely. A storage failure here is
+      // caught and silently skipped inside the hook itself; it can never
+      // fail or interrupt the project save that already succeeded above.
+      onboarding.persistProgressForProject(project.id);
+
       setProjectId(project.id);
       setIsDirty(false);
       setSaveStatus("saved");
@@ -1145,7 +1244,7 @@ export default function EditorShell({
       <div className="flex flex-1 overflow-hidden">
         <EditorSidebar
           editorSection={editorSection}
-          setEditorSection={setEditorSection}
+          setEditorSection={handleEditorSectionChange}
         />
         {editorMode === "edit" && editorSection === "Dashboard" ? (
           <ProjectDashboard
@@ -1244,6 +1343,18 @@ export default function EditorShell({
           onAdjust={handleInventoryAdjustment}
         />
       </div>
+
+      <OnboardingChecklist
+        steps={onboarding.steps}
+        isStepComplete={onboarding.isStepComplete}
+        completedCount={onboarding.completedCount}
+        totalCount={onboarding.totalCount}
+        isOpen={onboarding.isOpen}
+        projectId={projectId}
+        onDismiss={onboarding.dismiss}
+        onReopen={onboarding.reopen}
+        onNavigateToStep={handleOnboardingNavigate}
+      />
     </div>
   );
 }
