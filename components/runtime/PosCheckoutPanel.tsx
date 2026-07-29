@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type {
   CartItem,
   CartSummary,
@@ -9,6 +10,10 @@ import type {
   SaleSaveStatus,
 } from "@/lib/cart";
 import type { MenuItem, ProjectConfig } from "@/lib/projectConfig";
+import {
+  NATIVE_PRINT_UNAVAILABLE_MESSAGE,
+  isCapacitorNativeShell,
+} from "@/lib/nativeShell";
 import Receipt from "@/components/editor/Receipt";
 
 // Feature 14.3 — the shared cart/checkout/receipt UI, extracted from
@@ -100,6 +105,40 @@ export default function PosCheckoutPanel({
   selectedOrder,
   onCloseReceipt,
 }: PosCheckoutPanelProps) {
+  // Feature 16.2 — only ever set inside the Android shell, where printing
+  // is unavailable. Stored alongside the order it was raised for and then
+  // matched during render, so a notice from a previous receipt is simply
+  // not displayed once a different receipt is opened. This derives the
+  // reset instead of clearing it from an effect (which React flags via
+  // react-hooks/set-state-in-effect, and which would be an extra render for
+  // no benefit).
+  const [printNotice, setPrintNotice] = useState<{
+    orderId: string;
+    message: string;
+  } | null>(null);
+
+  const activePrintNotice =
+    printNotice !== null && printNotice.orderId === selectedOrder?.id
+      ? printNotice.message
+      : null;
+
+  function handlePrintReceipt() {
+    if (!selectedOrder) {
+      return;
+    }
+
+    if (isCapacitorNativeShell()) {
+      setPrintNotice({
+        orderId: selectedOrder.id,
+        message: NATIVE_PRINT_UNAVAILABLE_MESSAGE,
+      });
+      return;
+    }
+
+    setPrintNotice(null);
+    window.print();
+  }
+
   return (
     <>
       {/* Order Summary / Cart */}
@@ -429,13 +468,31 @@ export default function PosCheckoutPanel({
           </div>
 
           <div className="flex flex-col gap-2 pt-3">
+            {/* Feature 16.2 — inside the Capacitor Android shell,
+                window.print() does not reach a print dialog, so the button
+                previously appeared to work while doing nothing. It now
+                reports that truthfully instead. Detection uses Capacitor's
+                own isNativePlatform() (see lib/nativeShell.ts), not
+                user-agent guessing. Ordinary browsers are unaffected and
+                still call window.print(); the on-screen receipt above stays
+                available in both cases. Native printing is deliberately not
+                implemented in this feature. */}
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={handlePrintReceipt}
               className="w-full rounded-full border border-neutral-200 px-5 py-2.5 text-sm font-medium text-neutral-700 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
             >
               Print Receipt
             </button>
+
+            {activePrintNotice && (
+              <p
+                aria-live="polite"
+                className="text-center text-xs text-neutral-500"
+              >
+                {activePrintNotice}
+              </p>
+            )}
 
             <button
               type="button"

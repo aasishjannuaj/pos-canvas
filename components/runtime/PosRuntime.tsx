@@ -352,8 +352,28 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
         </Link>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        <div className="flex flex-1 flex-col overflow-hidden bg-white">
+      {/* Feature 16.2 Android fix — this row was unconditionally
+          `flex-row` with a fixed 24rem (384px) cart beside a flex-1 product
+          panel, which is a desktop-only assumption. Measured on the Android
+          emulator (411 x 866 CSS px, the Medium_Phone AVD at 420dpi): the
+          384px `flex-none` cart consumed 93% of the width, leaving the
+          product panel 27px wide with its 2-column grid overflowing
+          horizontally (scrollerW=27 vs gridScrollW=51). The panel was
+          technically still scrollable, but 27px is unusable — which is why
+          it read as "the left section does not scroll".
+          Notably NOT the cause: 100vh measured exactly equal to
+          window.innerHeight (866 = 866), and the flex/overflow chain
+          already produced a correctly bounded scroll container, because
+          `overflow: hidden`/`overflow-y: auto` zero out the automatic
+          minimum size. So no 100dvh change and no scroll-container
+          restructuring were needed.
+          Below `md` the panels now stack vertically, each keeping its own
+          independent scroll (the page itself still does not scroll). At
+          `md` and above every value is byte-identical to before —
+          verified: leftW=896, cartW=384, flex-direction row, scroller
+          height 693 in both. */}
+      <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white">
           <ProductBrowser
             layout={config.project.layout}
             menuItems={menuItems}
@@ -366,7 +386,13 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
           />
         </div>
 
-        <aside className="relative flex w-96 flex-none flex-col overflow-hidden border-l border-neutral-200 bg-neutral-50">
+        {/* Below `md` the cart becomes a full-width bottom panel with a
+            bounded share of the height, so the product panel above keeps
+            the majority of the screen. `overflow-hidden` is retained
+            unchanged at every width because the checkout and receipt
+            overlays inside this panel are `absolute inset-0` and depend on
+            this element staying their positioning context. */}
+        <aside className="relative flex h-[45%] min-h-0 w-full flex-none flex-col overflow-hidden border-t border-neutral-200 bg-neutral-50 md:h-auto md:w-96 md:border-l md:border-t-0">
           <PosCheckoutPanel
             menuItems={menuItems}
             cart={cart}
