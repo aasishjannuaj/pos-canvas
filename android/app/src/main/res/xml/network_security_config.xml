@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Feature 16.2 — Local Android Shell Proof: development-only cleartext HTTP.
+
+  Why this file is needed and was written by hand: Capacitor 8's
+  `server.cleartext` config option does NOT emit any manifest or
+  network-security change (verified against @capacitor/android 8.4.2 — its
+  library manifest is empty and no cleartext handling exists in its
+  sources). Android disables all cleartext traffic by default from API 28,
+  so without this file an http:// dev server load fails with
+  net::ERR_CLEARTEXT_NOT_PERMITTED and the shell shows a broken screen.
+
+  Scope is deliberately as narrow as possible:
+    - base-config keeps cleartextTrafficPermitted="false", so cleartext is
+      NOT globally enabled — every host except the two below is still
+      HTTPS-only.
+    - 10.0.2.2 is the Android emulator's fixed alias for the host Mac's
+      loopback interface. It is unroutable from any real network, so
+      permitting cleartext to it carries no exposure off this machine.
+    - localhost covers a device port-forwarded via `adb reverse`.
+
+  PHYSICAL DEVICE NOTE: a phone on the LAN reaches this Mac by its LAN IP
+  (e.g. 192.168.x.x), which is intentionally NOT listed here. Add it
+  temporarily and locally if needed for device testing, and understand that
+  it permits cleartext to a routable LAN address. `npm run android:sync`
+  fails loudly with guidance if POS_CANVAS_ANDROID_SERVER_URL points at an
+  http host that is not covered here, rather than letting the app fail
+  confusingly at runtime.
+
+  This file must not survive into any production configuration: a released
+  build must be HTTPS-only, at which point this file should be deleted
+  outright rather than narrowed.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

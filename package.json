@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "worker:once": "node --env-file=.env.local --import tsx worker/once.ts"
+    "worker:once": "node --env-file=.env.local --import tsx worker/once.ts",
+    "android:www": "node android-shell/generateWww.mjs",
+    "android:sync": "npm run android:www && cap sync android"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",
@@ -19,6 +21,9 @@
     "server-only": "^0.0.1"
   },
   "devDependencies": {
+    "@capacitor/android": "8.4.2",
+    "@capacitor/cli": "8.4.2",
+    "@capacitor/core": "8.4.2",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
