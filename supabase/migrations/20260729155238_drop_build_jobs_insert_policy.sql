@@ -1,0 +1,49 @@
+-- Feature 15.3 correction — security fix for the already-applied Feature
+-- 15.2 migration (supabase/migrations/20260729151600_build_jobs_and_
+-- artifacts.sql). This is a NEW migration, not an edit of the original.
+--
+-- Problem: build_jobs_insert_own (created by the original migration)
+-- allowed any authenticated user who owns a project to INSERT a build_jobs
+-- row directly from the browser, choosing arbitrary values for
+-- config_snapshot, config_schema_version, config_hash, status, timestamps,
+-- and failure fields — exactly the fields the approved architecture
+-- requires the server to be the sole, trusted author of. The normal
+-- Supabase server client (lib/supabase/server.ts) is backed by the public
+-- anon key and carries the same RLS permissions as any authenticated
+-- browser session, so relying on it for job creation gave a browser a
+-- direct path around lib/buildJobs.server.ts's createBuildJob entirely.
+--
+-- Fix: build job creation now goes through createBuildJob using a
+-- service-role admin client (lib/supabase/admin.ts) only after
+-- independently authenticating the caller and validating project
+-- ownership with the normal RLS-scoped client. No browser-facing INSERT
+-- policy is needed on this table anymore — the service-role credential
+-- bypasses RLS entirely by Supabase's own design, so no policy is required
+-- (or able) to grant it access.
+--
+-- This migration is NOT applied automatically — review, then apply
+-- manually, exactly like the original.
+
+drop policy if exists build_jobs_insert_own on build_jobs;
+
+-- Feature 15.3 correction — deliberately no replacement INSERT policy.
+-- After this migration, RLS on build_jobs grants authenticated browser
+-- users SELECT only, via the untouched build_jobs_select_own policy
+-- (owner_id = auth.uid()) — INSERT, UPDATE, and DELETE are all denied by
+-- default (Postgres RLS denies any operation with no matching policy),
+-- exactly as UPDATE and DELETE already were before this migration.
+--
+-- build_artifacts is untouched by this migration: it never had a browser
+-- INSERT/UPDATE/DELETE policy to begin with (only build_artifacts_select_own
+-- from the original migration), so there is nothing to correct there.
+--
+-- After this migration:
+--   - authenticated browser users CAN select their own build_jobs rows.
+--   - authenticated browser users CANNOT insert, update, or delete
+--     build_jobs rows.
+--   - authenticated browser users CANNOT insert, update, select-bypass, or
+--     delete build_artifacts rows beyond the existing owner-scoped SELECT.
+--   - all build_jobs/build_artifacts writes happen exclusively through
+--     trusted server-side code (lib/buildJobs.server.ts) using the
+--     service-role credential, which is never reachable from the browser
+--     and is not introduced anywhere in version control by this migration.

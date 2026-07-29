@@ -4,13 +4,19 @@ import {
   BUILD_TARGETS,
   TERMINAL_BUILD_STATUSES,
   canonicalizeGeneratedPosConfig,
+  isBuildFailureCode,
   isBuildStatus,
+  isNonEmptyId,
   isSupportedBuildTarget,
   isTerminalBuildStatus,
   isValidBuildStatusTransition,
+  isValidRetryReference,
+  mapBuildJobRow,
+  normalizeRequestKey,
+  resolveExistingBuildJob,
   sanitizeBuildFailureMessage,
 } from "@/lib/buildJobs";
-import type { BuildStatus } from "@/lib/buildJobs";
+import type { BuildJobRow, BuildJobSummary, BuildStatus } from "@/lib/buildJobs";
 import { createGeneratedPosConfig } from "@/lib/generatedPosConfig";
 import { defaultProjectConfig } from "@/lib/projectConfig";
 
@@ -239,5 +245,301 @@ describe("sanitizeBuildFailureMessage", () => {
     expect(sanitizeBuildFailureMessage({})).toBe(
       "The build failed due to an internal error."
     );
+  });
+});
+
+describe("isNonEmptyId", () => {
+  it("accepts a real id string", () => {
+    expect(isNonEmptyId("project-123")).toBe(true);
+  });
+
+  it("rejects an empty or whitespace-only string", () => {
+    expect(isNonEmptyId("")).toBe(false);
+    expect(isNonEmptyId("   ")).toBe(false);
+  });
+
+  it("rejects non-string values", () => {
+    expect(isNonEmptyId(null)).toBe(false);
+    expect(isNonEmptyId(undefined)).toBe(false);
+    expect(isNonEmptyId(123)).toBe(false);
+  });
+});
+
+describe("normalizeRequestKey", () => {
+  it("trims and returns a valid key", () => {
+    expect(normalizeRequestKey("  abc-123  ")).toBe("abc-123");
+  });
+
+  it("rejects an empty or whitespace-only key", () => {
+    expect(normalizeRequestKey("")).toBeNull();
+    expect(normalizeRequestKey("   ")).toBeNull();
+  });
+
+  it("rejects a key beyond the maximum length", () => {
+    expect(normalizeRequestKey("x".repeat(201))).toBeNull();
+  });
+
+  it("accepts a key exactly at the maximum length", () => {
+    const key = "x".repeat(200);
+    expect(normalizeRequestKey(key)).toBe(key);
+  });
+});
+
+describe("isBuildFailureCode", () => {
+  it("accepts every approved failure code", () => {
+    expect(isBuildFailureCode("generation_failed")).toBe(true);
+    expect(isBuildFailureCode("invalid_config")).toBe(true);
+    expect(isBuildFailureCode("worker_timeout")).toBe(true);
+    expect(isBuildFailureCode("worker_crashed")).toBe(true);
+    expect(isBuildFailureCode("signing_failed")).toBe(true);
+    expect(isBuildFailureCode("artifact_upload_failed")).toBe(true);
+  });
+
+  it("rejects cancelled_by_user and other arbitrary values", () => {
+    expect(isBuildFailureCode("cancelled_by_user")).toBe(false);
+    expect(isBuildFailureCode("something_else")).toBe(false);
+    expect(isBuildFailureCode(null)).toBe(false);
+  });
+});
+
+function makeValidBuildJobRow(overrides: Partial<BuildJobRow> = {}): BuildJobRow {
+  return {
+    id: "job-1",
+    project_id: "project-1",
+    target: "android",
+    status: "queued",
+    config_schema_version: 1,
+    config_hash: "a".repeat(64),
+    retried_from_job_id: null,
+    failure_code: null,
+    failure_message: null,
+    started_at: null,
+    finished_at: null,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("mapBuildJobRow", () => {
+  it("maps a valid row to a BuildJobSummary", () => {
+    const row = makeValidBuildJobRow();
+    const job = mapBuildJobRow(row);
+
+    expect(job).toEqual({
+      id: "job-1",
+      projectId: "project-1",
+      target: "android",
+      status: "queued",
+      configSchemaVersion: 1,
+      configHash: "a".repeat(64),
+      retriedFromJobId: null,
+      failureCode: null,
+      failureMessage: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+  });
+
+  it("rejects a row with an invalid target", () => {
+    const row = makeValidBuildJobRow({ target: "ios" });
+    expect(mapBuildJobRow(row)).toBeNull();
+  });
+
+  it("rejects a row with an invalid status", () => {
+    const row = makeValidBuildJobRow({ status: "preparing" });
+    expect(mapBuildJobRow(row)).toBeNull();
+  });
+
+  it("normalizes an unrecognized failure_code to null rather than rejecting the row", () => {
+    const row = makeValidBuildJobRow({
+      status: "failed",
+      failure_code: "some_unrecognized_code",
+    });
+
+    const job = mapBuildJobRow(row);
+
+    expect(job).not.toBeNull();
+    expect(job?.failureCode).toBeNull();
+  });
+
+  it("preserves nullable timestamp/failure fields when set", () => {
+    const row = makeValidBuildJobRow({
+      status: "failed",
+      failure_code: "worker_crashed",
+      failure_message: "The worker crashed unexpectedly.",
+      started_at: "2026-01-01T00:01:00.000Z",
+      finished_at: "2026-01-01T00:02:00.000Z",
+    });
+
+    const job = mapBuildJobRow(row);
+
+    expect(job?.failureCode).toBe("worker_crashed");
+    expect(job?.failureMessage).toBe("The worker crashed unexpectedly.");
+    expect(job?.startedAt).toBe("2026-01-01T00:01:00.000Z");
+    expect(job?.finishedAt).toBe("2026-01-01T00:02:00.000Z");
+  });
+
+  it("never includes a configSnapshot-shaped field", () => {
+    const job = mapBuildJobRow(makeValidBuildJobRow());
+    expect(job).not.toHaveProperty("configSnapshot");
+    expect(job).not.toHaveProperty("config_snapshot");
+  });
+
+  it("never includes ownerId or requestKey — the exact key set is exhaustive", () => {
+    const job = mapBuildJobRow(makeValidBuildJobRow());
+
+    expect(job).not.toHaveProperty("ownerId");
+    expect(job).not.toHaveProperty("owner_id");
+    expect(job).not.toHaveProperty("requestKey");
+    expect(job).not.toHaveProperty("request_key");
+
+    expect(Object.keys(job as BuildJobSummary).sort()).toEqual(
+      [
+        "id",
+        "projectId",
+        "target",
+        "status",
+        "configSchemaVersion",
+        "configHash",
+        "retriedFromJobId",
+        "failureCode",
+        "failureMessage",
+        "startedAt",
+        "finishedAt",
+        "createdAt",
+        "updatedAt",
+      ].sort()
+    );
+  });
+});
+
+describe("resolveExistingBuildJob", () => {
+  const requestKeyJob = { ...makeValidBuildJobRow(), id: "by-request-key" };
+  const activeJob = { ...makeValidBuildJobRow(), id: "active-for-target" };
+
+  const requestKeySummary = mapBuildJobRow(requestKeyJob) as BuildJobSummary;
+  const activeSummary = mapBuildJobRow(activeJob) as BuildJobSummary;
+
+  it("prefers a request-key match over an active-target match", () => {
+    const result = resolveExistingBuildJob({
+      byRequestKey: requestKeySummary,
+      activeForTarget: activeSummary,
+    });
+
+    expect(result?.id).toBe("by-request-key");
+  });
+
+  it("falls back to the active-target match when there is no request-key match", () => {
+    const result = resolveExistingBuildJob({
+      byRequestKey: null,
+      activeForTarget: activeSummary,
+    });
+
+    expect(result?.id).toBe("active-for-target");
+  });
+
+  it("returns null when neither exists", () => {
+    expect(
+      resolveExistingBuildJob({ byRequestKey: null, activeForTarget: null })
+    ).toBeNull();
+  });
+});
+
+describe("isValidRetryReference", () => {
+  const baseContext = {
+    requestOwnerId: "owner-1",
+    requestProjectId: "project-1",
+    requestTarget: "android" as const,
+  };
+
+  it("accepts a matching, terminal retry reference", () => {
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "owner-1",
+          projectId: "project-1",
+          target: "android",
+          status: "failed",
+        },
+        ...baseContext,
+      })
+    ).toBe(true);
+  });
+
+  it("rejects a missing reference", () => {
+    expect(
+      isValidRetryReference({ retriedFromJob: null, ...baseContext })
+    ).toBe(false);
+  });
+
+  it("rejects a reference owned by a different owner", () => {
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "someone-else",
+          projectId: "project-1",
+          target: "android",
+          status: "failed",
+        },
+        ...baseContext,
+      })
+    ).toBe(false);
+  });
+
+  it("rejects a reference for a different project", () => {
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "owner-1",
+          projectId: "another-project",
+          target: "android",
+          status: "failed",
+        },
+        ...baseContext,
+      })
+    ).toBe(false);
+  });
+
+  it("rejects a reference for a different target", () => {
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "owner-1",
+          projectId: "project-1",
+          target: "desktop",
+          status: "failed",
+        },
+        ...baseContext,
+      })
+    ).toBe(false);
+  });
+
+  it("rejects a reference that has not reached a terminal status", () => {
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "owner-1",
+          projectId: "project-1",
+          target: "android",
+          status: "building",
+        },
+        ...baseContext,
+      })
+    ).toBe(false);
+
+    expect(
+      isValidRetryReference({
+        retriedFromJob: {
+          ownerId: "owner-1",
+          projectId: "project-1",
+          target: "android",
+          status: "queued",
+        },
+        ...baseContext,
+      })
+    ).toBe(false);
   });
 });
