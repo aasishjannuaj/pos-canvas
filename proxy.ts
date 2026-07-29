@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/proxy";
 
-const PROTECTED_PREFIXES = ["/dashboard", "/editor"];
+// Feature 14.3 — /runtime protected the same way /editor already is: an
+// unauthenticated visit redirects cleanly to /login instead of only being
+// caught by the page-level getProjectById ownership check (which would
+// otherwise just 404 rather than offer a sign-in path).
+const PROTECTED_PREFIXES = ["/dashboard", "/editor", "/runtime"];
 const AUTH_PAGES = ["/login", "/signup"];
 
 function copyCookies(from: NextResponse, to: NextResponse) {
@@ -40,5 +44,11 @@ export default async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/editor/:path*", "/login", "/signup"],
+  matcher: [
+    "/dashboard/:path*",
+    "/editor/:path*",
+    "/runtime/:path*",
+    "/login",
+    "/signup",
+  ],
 };

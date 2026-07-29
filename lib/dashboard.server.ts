@@ -2,7 +2,7 @@ import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
 import type { OrderLineItem, OrderTotal } from "@/lib/dashboard.types";
-import type { PaymentMethod } from "@/components/editor/EditorShell";
+import type { PaymentMethod } from "@/lib/cart";
 
 type OrderItemDetailRow = {
   item_id: string;

@@ -339,3 +339,92 @@ export function createGeneratedPosConfigFilename(
   const slug = slugifyProjectName(projectName);
   return `pos-canvas-${slug}-v${schemaVersion}.json`;
 }
+
+// Feature 14.3 — the exact three PosLayout values this app currently
+// resolves layouts to (lib/posLayout.ts). An explicit allow-list, not a
+// bare `typeof value === "string"` check — a malformed or arbitrary layout
+// string must be rejected outright here, never silently passed through to
+// a runtime consumer.
+const KNOWN_LAYOUTS: readonly string[] = [
+  "menu-grid",
+  "product-grid",
+  "service-grid",
+];
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Feature 14.3 — the runtime boundary's own structural validator. Built
+// now, even though today's only producer (createGeneratedPosConfig above)
+// is already trusted, because this is exactly the reusable check every
+// *future* consumer of a generated config (a downloaded-file loader, an
+// eventual Android/desktop wrapper) will also need — proving it against
+// today's one real producer is the safest way to get it right early.
+//
+// Deliberately a *structural* check, not a re-run of createGeneratedPosConfig's
+// own business-rule normalization (redundant for a config this module
+// itself just produced) — schemaVersion is checked for an exact match
+// (never coerced, never "close enough"; an unsupported version is rejected
+// outright, matching the schema-evolution convention documented above:
+// a future reader must branch on schemaVersion, never silently
+// reinterpret an unrecognized one) and layout is checked against the exact
+// known PosLayout values, never accepted as an arbitrary string.
+export function isGeneratedPosConfig(value: unknown): value is GeneratedPosConfig {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+
+  if (value.schemaVersion !== GENERATED_POS_CONFIG_SCHEMA_VERSION) {
+    return false;
+  }
+
+  if (typeof value.generatedAt !== "string") {
+    return false;
+  }
+
+  const generatedAtDate = new Date(value.generatedAt);
+  if (Number.isNaN(generatedAtDate.getTime())) {
+    return false;
+  }
+
+  if (!isPlainObject(value.project)) {
+    return false;
+  }
+
+  const project = value.project;
+
+  if (
+    !isNonEmptyString(project.projectId) ||
+    !isNonEmptyString(project.projectName) ||
+    !isNonEmptyString(project.templateId)
+  ) {
+    return false;
+  }
+
+  if (
+    typeof project.layout !== "string" ||
+    !KNOWN_LAYOUTS.includes(project.layout)
+  ) {
+    return false;
+  }
+
+  if (!Array.isArray(value.menuItems)) {
+    return false;
+  }
+
+  if (
+    !isPlainObject(value.businessProfile) ||
+    !isPlainObject(value.branding) ||
+    !isPlainObject(value.tax) ||
+    !isPlainObject(value.receipt)
+  ) {
+    return false;
+  }
+
+  return true;
+}

@@ -44,6 +44,15 @@ import {
   getGeneratedPosExportEligibility,
 } from "@/lib/generatedPosConfig";
 import { downloadJsonFile } from "@/lib/downloadJson";
+import { calculateCartSummary, canAddItemQuantity } from "@/lib/cart";
+import type {
+  CartItem,
+  CartSummary,
+  CheckoutStatus,
+  CompletedOrder,
+  PaymentMethod,
+  SaleSaveStatus,
+} from "@/lib/cart";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -55,8 +64,24 @@ import { downloadJsonFile } from "@/lib/downloadJson";
 // Feature 12.2 — MENU_CATEGORIES/MenuCategory are gone: category is now a
 // plain string (see lib/projectConfig.ts), and category tabs/sections are
 // derived per-project in EditorPreview.tsx instead of from a fixed list.
+//
+// Feature 14.3 — CartItem/CartSummary/PaymentMethod/CheckoutStatus/
+// SaleSaveStatus/CompletedOrder now live in the neutral lib/cart.ts (so
+// components/runtime/PosRuntime.tsx can share them without depending on
+// this "use client" component), re-exported here the same way ProjectConfig
+// has been since Feature 12.1, so every existing
+// `import ... from "@/components/editor/EditorShell"` call site keeps
+// working unchanged.
 export { CURRENCY_SYMBOLS };
 export type { MenuItem, Currency, ProjectConfig };
+export type {
+  CartItem,
+  CartSummary,
+  CheckoutStatus,
+  CompletedOrder,
+  PaymentMethod,
+  SaleSaveStatus,
+};
 
 export type EditorSection =
   | "Menu"
@@ -79,79 +104,18 @@ export type ExportStatus = "idle" | "exporting" | "success" | "error";
 
 export type EditorMode = "edit" | "preview";
 
-export type CartItem = {
-  itemId: string;
-  name: string;
-  price: number;
-  quantity: number;
-};
-
-export type CartSummary = {
-  itemCount: number;
-  subtotal: number;
-  taxAmount: number;
-  tip: number;
-  total: number;
-};
-
-export type PaymentMethod = "cash" | "card";
-
-export type CheckoutStatus = "idle" | "success";
-
-export type SaleSaveStatus = "idle" | "saving" | "success" | "error";
-
 export type RestockStatus = "idle" | "saving" | "success" | "error";
 
 export type AdjustStatus = "idle" | "saving" | "success" | "error";
 
-export type CompletedOrder = {
-  id: string;
-  orderNumber: string;
-  items: CartItem[];
-  subtotal: number;
-  taxAmount: number;
-  tip: number;
-  total: number;
-  paymentMethod: PaymentMethod;
-  createdAt: string;
-};
-
-// Static preview-only figure — the builder has no real payment/tip math yet.
-const STATIC_TIP = 3;
-
-function calculateCartSummary(
-  cart: CartItem[],
-  tax: TaxSettings,
-  tipsEnabled: boolean
-): CartSummary {
-  const itemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
-  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-
-  const safeRate = Number.isFinite(tax.rate) && tax.rate > 0 ? tax.rate : 0;
-
-  let taxAmount = 0;
-  let totalBeforeTip = subtotal;
-
-  if (tax.enabled) {
-    if (tax.pricesIncludeTax) {
-      taxAmount = subtotal - subtotal / (1 + safeRate / 100);
-      totalBeforeTip = subtotal;
-    } else {
-      taxAmount = subtotal * (safeRate / 100);
-      totalBeforeTip = subtotal + taxAmount;
-    }
-  }
-
-  const tip = tipsEnabled ? STATIC_TIP : 0;
-
-  return {
-    itemCount,
-    subtotal,
-    taxAmount,
-    tip,
-    total: totalBeforeTip + tip,
-  };
-}
+// Feature 14.3 money safeguard — a Builder-preview-only sample tip amount.
+// Deliberately NOT part of lib/cart.ts and never reaches the runtime: it
+// exists solely so the Builder's own preview cart keeps showing the same
+// sample tip line it always has (previously hardcoded inside
+// calculateCartSummary itself as STATIC_TIP). components/runtime/
+// PosRuntime.tsx always passes a real tip amount (0 in this MVP, since no
+// tip-entry UI exists yet) and never references this constant.
+const BUILDER_PREVIEW_SAMPLE_TIP = 3;
 
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -391,7 +355,7 @@ export default function EditorShell({
   const cartSummary = calculateCartSummary(
     cart,
     projectConfig.tax,
-    projectConfig.receipt.tipsEnabled
+    projectConfig.receipt.tipsEnabled ? BUILDER_PREVIEW_SAMPLE_TIP : 0
   );
 
   // Feature 13.2 — the single call every persisted-data mutation makes.
@@ -567,8 +531,17 @@ export default function EditorShell({
       const existing = prev.find((cartItem) => cartItem.itemId === menuItem.id);
       const currentQuantity = existing?.quantity ?? 0;
 
-      if (menuItem.trackInventory && currentQuantity >= menuItem.stockQuantity) {
-        // Already at (or beyond) available stock — do nothing.
+      // Feature 14.3 — shared with the runtime via lib/cart.ts, so both
+      // ever only enforce one stock-limit rule. Equivalent to the previous
+      // inline check (trackInventory && currentQuantity >= stockQuantity)
+      // for a single-unit add.
+      if (
+        !canAddItemQuantity({
+          item: menuItem,
+          currentQuantity,
+          addQuantity: 1,
+        })
+      ) {
         return prev;
       }
 
@@ -601,7 +574,18 @@ export default function EditorShell({
 
         const menuItem = projectConfig.menuItems.find((item) => item.id === itemId);
 
-        if (menuItem?.trackInventory && cartItem.quantity >= menuItem.stockQuantity) {
+        // Feature 14.3 — preserves the original fallthrough behavior for an
+        // orphaned cart line with no matching menu item (always allowed to
+        // increase, unchanged from before this extraction) — the shared
+        // predicate is only consulted once a real menuItem is found.
+        if (
+          menuItem &&
+          !canAddItemQuantity({
+            item: menuItem,
+            currentQuantity: cartItem.quantity,
+            addQuantity: 1,
+          })
+        ) {
           return cartItem;
         }
 

@@ -4,6 +4,7 @@ import {
   createGeneratedPosConfig,
   createGeneratedPosConfigFilename,
   getGeneratedPosExportEligibility,
+  isGeneratedPosConfig,
 } from "@/lib/generatedPosConfig";
 import { defaultProjectConfig, cloneProjectConfig } from "@/lib/projectConfig";
 import type { ProjectConfig } from "@/lib/projectConfig";
@@ -582,5 +583,88 @@ describe("pretty-printed JSON export", () => {
     const jsonTextWithNewline = `${JSON.stringify(result, null, 2)}\n`;
 
     expect(JSON.parse(jsonTextWithNewline)).toEqual(result);
+  });
+});
+
+describe("isGeneratedPosConfig", () => {
+  function makeValidConfig() {
+    return createGeneratedPosConfig({
+      ...BASE_INPUT,
+      config: defaultProjectConfig,
+    });
+  }
+
+  it("accepts a real schema v1 config", () => {
+    expect(isGeneratedPosConfig(makeValidConfig())).toBe(true);
+  });
+
+  it("rejects schemaVersion 2", () => {
+    const config = { ...makeValidConfig(), schemaVersion: 2 };
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects a missing schemaVersion", () => {
+    const config = { ...makeValidConfig() } as Record<string, unknown>;
+    delete config.schemaVersion;
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects an invalid generatedAt", () => {
+    const config = { ...makeValidConfig(), generatedAt: "not-a-date" };
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects an arbitrary layout string", () => {
+    const valid = makeValidConfig();
+    const config = {
+      ...valid,
+      project: { ...valid.project, layout: "carousel-grid" },
+    };
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("accepts every known PosLayout value", () => {
+    const valid = makeValidConfig();
+    for (const layout of ["menu-grid", "product-grid", "service-grid"]) {
+      const config = { ...valid, project: { ...valid.project, layout } };
+      expect(isGeneratedPosConfig(config)).toBe(true);
+    }
+  });
+
+  it("rejects missing project fields", () => {
+    const valid = makeValidConfig();
+    const config = {
+      ...valid,
+      project: { ...valid.project, projectId: "" },
+    };
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects a missing project object entirely", () => {
+    const config = { ...makeValidConfig() } as Record<string, unknown>;
+    delete config.project;
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects malformed menuItems", () => {
+    const config = { ...makeValidConfig(), menuItems: "not-an-array" };
+    expect(isGeneratedPosConfig(config)).toBe(false);
+  });
+
+  it("rejects malformed top-level required objects", () => {
+    const valid = makeValidConfig();
+
+    for (const key of ["businessProfile", "branding", "tax", "receipt"] as const) {
+      const config = { ...valid, [key]: "not-an-object" };
+      expect(isGeneratedPosConfig(config)).toBe(false);
+    }
+  });
+
+  it("rejects a non-object value", () => {
+    expect(isGeneratedPosConfig(null)).toBe(false);
+    expect(isGeneratedPosConfig(undefined)).toBe(false);
+    expect(isGeneratedPosConfig("a string")).toBe(false);
+    expect(isGeneratedPosConfig(42)).toBe(false);
+    expect(isGeneratedPosConfig([])).toBe(false);
   });
 });

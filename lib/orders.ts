@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
-import type { CartItem, PaymentMethod } from "@/components/editor/EditorShell";
+import type { CartItem, PaymentMethod } from "@/lib/cart";
 
 type CompleteSaleOrderInput = {
   projectId: string;

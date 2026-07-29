@@ -1,4 +1,4 @@
-import type { PaymentMethod } from "@/components/editor/EditorShell";
+import type { PaymentMethod } from "@/lib/cart";
 
 // Feature 10.3 — per-line-item detail, needed for Product Performance's
 // per-product aggregation. itemCount below stays a flat sum for the
