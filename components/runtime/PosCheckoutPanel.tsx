@@ -15,6 +15,8 @@ import {
   isCapacitorNativeShell,
 } from "@/lib/nativeShell";
 import Receipt from "@/components/editor/Receipt";
+import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import type { CompletedSaleReceipt } from "@/lib/completedSale";
 
 // Feature 14.3 — the shared cart/checkout/receipt UI, extracted from
 // EditorPreview.tsx's preview-mode branch so it isn't duplicated between
@@ -66,6 +68,10 @@ type PosCheckoutPanelProps = {
   lastCompletedOrderId: string | null;
   onOpenReceipt: (orderId: string) => void;
   selectedOrder: CompletedOrder | null;
+  // Feature 16.3 D3 — when set, the overlay renders the AUTHORITATIVE
+  // server receipt instead of the preview model. EditorPreview never passes
+  // it, so the Builder preview path is byte-identical to before.
+  authoritativeReceipt?: CompletedSaleReceipt | null;
   onCloseReceipt: () => void;
 };
 
@@ -103,6 +109,7 @@ export default function PosCheckoutPanel({
   lastCompletedOrderId,
   onOpenReceipt,
   selectedOrder,
+  authoritativeReceipt = null,
   onCloseReceipt,
 }: PosCheckoutPanelProps) {
   // Feature 16.2 — only ever set inside the Android shell, where printing
@@ -117,19 +124,23 @@ export default function PosCheckoutPanel({
     message: string;
   } | null>(null);
 
+  // One id for either receipt model, so the print notice keys correctly.
+  const shownReceiptId = authoritativeReceipt?.orderId ?? selectedOrder?.id ?? null;
+  const receiptVisible = authoritativeReceipt !== null || selectedOrder !== null;
+
   const activePrintNotice =
-    printNotice !== null && printNotice.orderId === selectedOrder?.id
+    printNotice !== null && printNotice.orderId === shownReceiptId
       ? printNotice.message
       : null;
 
   function handlePrintReceipt() {
-    if (!selectedOrder) {
+    if (shownReceiptId === null) {
       return;
     }
 
     if (isCapacitorNativeShell()) {
       setPrintNotice({
-        orderId: selectedOrder.id,
+        orderId: shownReceiptId,
         message: NATIVE_PRINT_UNAVAILABLE_MESSAGE,
       });
       return;
@@ -461,10 +472,19 @@ export default function PosCheckoutPanel({
           container, using the same selectedOrder/businessProfile/receipt
           it already passes in here — see app/globals.css's
           .receipt-print-area rules for why the DOM position matters. */}
-      {selectedOrder && (
+      {receiptVisible && (
         <div className="absolute inset-0 z-10 flex flex-col bg-white p-4">
           <div className="flex-1 overflow-y-auto">
-            <Receipt order={selectedOrder} businessProfile={businessProfile} receipt={receipt} />
+            {authoritativeReceipt ? (
+              <AuthoritativeReceipt
+                receipt={authoritativeReceipt}
+                businessProfile={businessProfile}
+                receiptSettings={receipt}
+                currencySymbol={currencySymbol}
+              />
+            ) : (
+              <Receipt order={selectedOrder!} businessProfile={businessProfile} receipt={receipt} />
+            )}
           </div>
 
           <div className="flex flex-col gap-2 pt-3">

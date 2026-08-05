@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
 import { getProjectById } from "@/lib/projects.server";
-import { getProjectOrderCount } from "@/lib/orders.server";
 import { isProjectConfig } from "@/lib/projectConfig";
 import {
   createGeneratedPosConfig,
@@ -71,30 +70,6 @@ export default async function RuntimePage({
     );
   }
 
-  // Feature 14.3 correction — an exact count, not the capped
-  // getProjectOrders() history: this runtime creates real persisted sales,
-  // so the next order number must be derived from the project's true total
-  // order count, never an approximation. getProjectOrderCount uses a
-  // count-only query (no order rows downloaded) and is intentionally
-  // separate from getProjectOrders (which stays capped at 20 for the
-  // Builder's own "recent orders" display — that bound is correct there and
-  // is untouched by this fix).
-  const { count: initialOrderCount, error: orderCountError } =
-    await getProjectOrderCount(project.id);
-
-  // Feature 14.3 correction — a failed count can never be treated as "0
-  // orders so far": doing so risks generating an order number that
-  // collides with real, already-persisted orders. This is shown as its own
-  // distinct error state rather than silently proceeding.
-  if (orderCountError) {
-    return (
-      <RuntimeErrorState
-        title="Runtime unavailable"
-        message="This POS couldn't be loaded right now. Please try again shortly."
-      />
-    );
-  }
-
   let generatedConfig;
 
   try {
@@ -140,6 +115,6 @@ export default async function RuntimePage({
   }
 
   return (
-    <PosRuntime config={generatedConfig} initialOrderCount={initialOrderCount} />
+    <PosRuntime config={generatedConfig} />
   );
 }

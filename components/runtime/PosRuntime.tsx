@@ -12,15 +12,21 @@ import {
 import type {
   CartItem,
   CheckoutStatus,
-  CompletedOrder,
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
-import { completeSaleOrder } from "@/lib/orders";
+import { completeSaleOrderV2 } from "@/lib/orders";
+import type { CompletedSaleReceipt } from "@/lib/completedSale";
+import {
+  createSaleFingerprint,
+  isSubmitBlocked,
+  resolveSaleRequest,
+} from "@/lib/saleRequest";
+import type { SaleRequestState } from "@/lib/saleRequest";
+import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import { getProjectConfig } from "@/lib/projects";
 import ProductBrowser from "@/components/editor/pos-layouts";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
-import Receipt from "@/components/editor/Receipt";
 
 type PosRuntimeProps = {
   // Feature 14.3 — the only two props this component receives, per the
@@ -29,7 +35,6 @@ type PosRuntimeProps = {
   // point) that can't be derived from the contract itself. No
   // ProjectConfig, no raw project row, no Supabase client.
   config: GeneratedPosConfig;
-  initialOrderCount: number;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -41,7 +46,7 @@ const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
 // `config` or any of its nested objects. Reuses the same ProductBrowser,
 // PosCheckoutPanel, and Receipt components the Builder's own preview mode
 // uses — this is the shared POS engine's real runtime, not a rebuild of it.
-export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProps) {
+export default function PosRuntime({ config }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
   // trackInventory, after a confirmed sale) via a fresh array/object at
@@ -62,8 +67,14 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
   // history: the receipt flow only ever needs to show/print the sale that
   // just happened, so the runtime doesn't carry a Recent Orders reprint
   // list the way the Builder's preview does.
-  const [lastCompletedOrder, setLastCompletedOrder] =
-    useState<CompletedOrder | null>(null);
+  // D3 — the completed sale is the SERVER payload, never a locally assembled
+  // object. Nothing from the cart survives past a successful checkout.
+  const [lastCompletedReceipt, setLastCompletedReceipt] =
+    useState<CompletedSaleReceipt | null>(null);
+
+  // One id per logical checkout attempt; reused across retries of the same
+  // intent so a lost response replays instead of double-selling.
+  const [saleRequest, setSaleRequest] = useState<SaleRequestState | null>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
 
   // Feature 14.3 — seeded from the server-loaded starting count
@@ -71,8 +82,6 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
   // app/runtime/[id]/page.tsx for the known MVP limitation this carries),
   // incremented once per locally confirmed sale for the rest of this
   // session. Never re-fetched mid-session.
-  const [orderCount, setOrderCount] = useState(initialOrderCount);
-
   const currencySymbol = CURRENCY_SYMBOLS[config.receipt.currency];
 
   // Feature 14.3 money safeguard — the tip amount is always 0 here. There
@@ -84,9 +93,7 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
   // real, persisted checkout path.
   const cartSummary = calculateCartSummary(cart, config.tax, 0);
 
-  const upcomingOrderNumber = `${config.receipt.orderPrefix}${1001 + orderCount}`;
-
-  const selectedOrder = receiptOpen ? lastCompletedOrder : null;
+  const shownReceipt = receiptOpen ? lastCompletedReceipt : null;
 
   // Feature 14.3 — warn only while there's a real, not-yet-checked-out cart
   // to lose; registered/removed as cart.length flips, exactly mirroring
@@ -204,7 +211,7 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
   }
 
   function openReceipt(orderId: string) {
-    if (lastCompletedOrder?.id === orderId) {
+    if (lastCompletedReceipt?.orderId === orderId) {
       setReceiptOpen(true);
     }
   }
@@ -215,6 +222,12 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
 
   async function completeSale() {
     if (cart.length === 0 || !selectedPaymentMethod || checkoutStatus === "success") {
+      return;
+    }
+
+    // Double-submit guard: a second Pay press while a request is in flight must
+    // never start a second attempt.
+    if (isSubmitBlocked(saleSaveStatus)) {
       return;
     }
 
@@ -249,41 +262,60 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
       return;
     }
 
-    const orderNumber = upcomingOrderNumber;
-
-    const { orderId, error } = await completeSaleOrder({
+    // D3 — one request id per logical attempt. resolveSaleRequest reuses the
+    // existing id when the fingerprint (project, payment method, tip, item ids
+    // and quantities) is unchanged, and issues a new one otherwise. That is
+    // exactly the boundary complete_sale_v2 hashes, so a reused id after any
+    // real change would be rejected as a mismatch rather than replayed.
+    const fingerprint = createSaleFingerprint({
       projectId: config.project.projectId,
-      orderNumber,
       paymentMethod: selectedPaymentMethod,
-      subtotal: cartSummary.subtotal,
-      taxAmount: cartSummary.taxAmount,
       tipAmount: cartSummary.tip,
-      total: cartSummary.total,
       items: cart,
     });
 
-    if (error || !orderId) {
-      // RPC failed — the sale did not happen. Cart, checkout, and
-      // inventory are left untouched so the cashier can safely retry.
+    let request: SaleRequestState;
+    try {
+      request = resolveSaleRequest(saleRequest, fingerprint);
+    } catch {
       setSaleSaveStatus("error");
-      setSaleSaveError(error ?? "Something went wrong while completing the sale.");
+      setSaleSaveError(
+        "This browser cannot complete a secure sale. Please use a different browser."
+      );
+      return;
+    }
+    setSaleRequest(request);
+
+    const { receipt, error } = await completeSaleOrderV2({
+      projectId: config.project.projectId,
+      paymentMethod: selectedPaymentMethod,
+      tipAmount: cartSummary.tip,
+      // Only itemId and quantity leave the browser. There is nowhere in the v2
+      // contract to put a client name, price or total.
+      items: cart.map((cartItem) => ({
+        itemId: cartItem.itemId,
+        quantity: cartItem.quantity,
+      })),
+      saleRequestId: request.id,
+    });
+
+    if (error || !receipt) {
+      // The cart is preserved and the request id is retained, so pressing Pay
+      // again retries the SAME attempt. A transport failure may already have
+      // committed server-side, so the message must not claim the sale failed —
+      // the retry will return the original receipt if it did.
+      setSaleSaveStatus("error");
+      setSaleSaveError(
+        error ??
+          "The sale could not be confirmed. Press Pay again to retry — if it already went through, the original receipt will be shown."
+      );
       return;
     }
 
-    const order: CompletedOrder = {
-      id: orderId,
-      orderNumber,
-      items: [...cart],
-      subtotal: cartSummary.subtotal,
-      taxAmount: cartSummary.taxAmount,
-      tip: cartSummary.tip,
-      total: cartSummary.total,
-      paymentMethod: selectedPaymentMethod,
-      createdAt: new Date().toISOString(),
-    };
-
-    setLastCompletedOrder(order);
-    setOrderCount((prev) => prev + 1);
+    // Success: the authoritative payload is the ONLY record kept. The cart is
+    // discarded and the request id cleared, so the next sale gets a new id.
+    setLastCompletedReceipt(receipt);
+    setSaleRequest(null);
     clearCart();
 
     // Lock the UI into the success view *before* attempting the reload, so
@@ -398,7 +430,7 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
             cart={cart}
             cartSummary={cartSummary}
             currencySymbol={currencySymbol}
-            orderNumber={upcomingOrderNumber}
+            orderNumber=""
             tax={config.tax}
             receipt={config.receipt}
             businessProfile={config.businessProfile}
@@ -417,9 +449,10 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
             saleSaveStatus={saleSaveStatus}
             saleSaveError={saleSaveError}
             recentOrders={[]}
-            lastCompletedOrderId={lastCompletedOrder?.id ?? null}
+            lastCompletedOrderId={lastCompletedReceipt?.orderId ?? null}
             onOpenReceipt={openReceipt}
-            selectedOrder={selectedOrder}
+            selectedOrder={null}
+            authoritativeReceipt={shownReceipt}
             onCloseReceipt={closeReceipt}
           />
         </aside>
@@ -429,12 +462,13 @@ export default function PosRuntime({ config, initialOrderCount }: PosRuntimeProp
           and PosCheckoutPanel's own comment for why this must be a
           top-level sibling of the overflow-hidden layout above rather than
           nested inside it. */}
-      {selectedOrder && (
+      {shownReceipt && (
         <div className="receipt-print-area">
-          <Receipt
-            order={selectedOrder}
+          <AuthoritativeReceipt
+            receipt={shownReceipt}
             businessProfile={config.businessProfile}
-            receipt={config.receipt}
+            receiptSettings={config.receipt}
+            currencySymbol={currencySymbol}
           />
         </div>
       )}
