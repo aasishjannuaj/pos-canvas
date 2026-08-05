@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# .env.example carries NAMES and placeholders only — never a real credential.
+# It is the one env file that must be committed, so every other .env* stays
+# ignored and this single negation re-includes it.
+!.env.example
 
 # vercel
 .vercel

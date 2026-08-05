@@ -299,8 +299,11 @@ describe("special numeric values", () => {
 
   it("uses the canonical-text predicate, not a self-inequality float idiom", () => {
     expect(executable).toContain(PREDICATE);
-    // `v <> v` would be a no-op for numeric NaN.
-    expect(executable).not.toMatch(/v_\w+\s*<>\s*v_\1\b/);
+    // `v <> v` would be a no-op for numeric NaN. The variable name must be
+    // CAPTURED for \1 to mean "the same variable on both sides": without the
+    // group, JavaScript reads \1 as the legacy octal escape \x01, so the
+    // pattern could never match anything and this assertion was vacuous.
+    expect(executable).not.toMatch(/v_(\w+)\s*<>\s*v_\1\b/);
     // isnan()/isinf() do not exist for numeric.
     expect(executable).not.toMatch(/\bisnan\s*\(|\bisinf\s*\(/i);
   });

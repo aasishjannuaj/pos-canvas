@@ -1,6 +1,13 @@
 {
   "compilerOptions": {
-    "target": "ES2017",
+    // TYPE-CHECKING ONLY. With "noEmit": true and no `tsc` emit step in any
+    // npm script, this target never produces shipped code: Next transpiles
+    // through SWC/Turbopack against browserslist, so raising it changes no
+    // runtime or browser-support behavior. ES2020 is required because BigInt
+    // literals cannot be downleveled, and the Migration C rounding vectors
+    // (supabase/migrations/20260803220000_*.test.ts) model PostgreSQL numeric
+    // arithmetic with exact bigint math.
+    "target": "ES2020",
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "skipLibCheck": true,
