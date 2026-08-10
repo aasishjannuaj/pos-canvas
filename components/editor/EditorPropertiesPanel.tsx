@@ -1391,13 +1391,19 @@ export default function EditorPropertiesPanel({
                       {/* Feature 17.1 — replaces the pre-worker copy, which
                           said processing was "not enabled yet". A scheduled
                           GitHub Actions run now claims queued jobs, so that
-                          sentence became untrue. No exact timing is promised:
-                          scheduled runs are best-effort and can be delayed. */}
+                          sentence became untrue.
+                          "about 15 minutes" matches the workflow's cadence and
+                          is deliberately hedged: scheduled runs are best-effort
+                          and GitHub can delay them, so this states a typical
+                          case rather than a promise. No countdown and no
+                          progress indicator — neither the browser nor the
+                          server knows when the next run will actually fire. */}
                       {latestBuildJob.status === "queued" && (
                         <p className="mt-1 text-neutral-400">
                           Your build is queued and will be picked up
-                          automatically. This usually starts within a few
-                          minutes. Use Refresh to check its status.
+                          automatically. It usually starts within about 15
+                          minutes, but automated runs can occasionally be
+                          delayed. Use Refresh to check its status.
                         </p>
                       )}
 
