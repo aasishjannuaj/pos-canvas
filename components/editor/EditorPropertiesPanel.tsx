@@ -1388,11 +1388,23 @@ export default function EditorPropertiesPanel({
                         </span>
                       </div>
 
+                      {/* Feature 17.1 — replaces the pre-worker copy, which
+                          said processing was "not enabled yet". A scheduled
+                          GitHub Actions run now claims queued jobs, so that
+                          sentence became untrue. No exact timing is promised:
+                          scheduled runs are best-effort and can be delayed. */}
                       {latestBuildJob.status === "queued" && (
                         <p className="mt-1 text-neutral-400">
-                          Build processing is not enabled yet. This request
-                          will remain queued until the build worker is
-                          added.
+                          Your build is queued and will be picked up
+                          automatically. This usually starts within a few
+                          minutes. Use Refresh to check its status.
+                        </p>
+                      )}
+
+                      {latestBuildJob.status === "building" && (
+                        <p className="mt-1 text-neutral-400">
+                          Your build is being processed. Use Refresh to check
+                          its status.
                         </p>
                       )}
 

@@ -1,0 +1,110 @@
+# Feature 17.1 — Production Build Execution.
+#
+# Runs the EXISTING one-shot build worker (worker/once.ts) on a schedule so a
+# hosted customer's build request is processed without anyone running a
+# terminal command. Nothing about the worker or its database RPCs changes here;
+# this file only supplies an execution environment.
+#
+# WHY THIS IS SAFE TO RUN CONCURRENTLY WITH ITSELF OR A MANUAL RUN:
+# claim_next_build_job (supabase/migrations/20260729175512) selects its
+# candidate FOR UPDATE SKIP LOCKED, mints a fresh claim_token on every claim,
+# and every subsequent transition RPC requires that exact token plus an
+# unexpired lease. Two workers therefore cannot claim the same job, and a
+# worker whose lease lapsed cannot mutate anything afterwards. The database is
+# the authority; the `concurrency` block below is only about cost and log
+# noise.
+#
+# STALE-JOB RECOVERY DEPENDS ON THIS SCHEDULE. Reclaiming a build whose worker
+# died, and force-failing one that has exhausted its 3 attempts, both happen
+# INSIDE claim_next_build_job. Nothing else performs that recovery, so this
+# workflow must keep firing even when the queue is normally empty.
+
+name: Build worker
+
+on:
+  # Manual operational recovery: catching up a backlog, or running immediately
+  # after a schedule outage.
+  workflow_dispatch:
+
+  # Every 15 minutes, offset off the top of the hour.
+  #
+  # WHY NOT THE 5-MINUTE MINIMUM: on a private repository every run bills
+  # GitHub-hosted minutes and partial job minutes round up, so a 5-minute
+  # cadence would charge for roughly 288 runs a day, nearly all of them against
+  # an empty queue. Four runs an hour is the cost-appropriate MVP setting;
+  # workflow_dispatch covers the case where someone needs a build immediately.
+  #
+  # An explicit minute list rather than */15, because a step expression starts
+  # at minute 0 and start-of-hour schedules are the most delay-prone slot.
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+# No `push`, no `pull_request`, and never `pull_request_target`: the production
+# service-role credential must never be reachable from code in a pull request,
+# least of all a fork's. Scheduled and dispatched runs execute only from the
+# default branch.
+
+# Least privilege. The worker reads and writes Supabase, never this repository.
+permissions:
+  contents: read
+
+# Serialize runs. Overlap is already safe at the database level, so this is not
+# a correctness control — it prevents redundant runs and keeps logs readable.
+# cancel-in-progress is false on purpose: cancelling mid-run could kill a worker
+# after it claimed a job, leaving that job 'building' until its lease expires
+# and burning one of its three attempts for no reason.
+concurrency:
+  group: build-worker
+  cancel-in-progress: false
+
+jobs:
+  process-queue:
+    name: Process queued Android builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # The worker runs through tsx, which is a devDependency, so the full
+      # install is required. --omit=dev would break it.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Process up to 5 queued Android builds
+        env:
+          # Injected as environment values, never interpolated into the command
+          # text below — an interpolated secret can surface in a trace or an
+          # error line. worker/once.ts reads exactly these two variables
+          # (lib/supabase/adminConfig.ts) and no others.
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          # Bounded and finite: exactly five one-shot invocations, never a
+          # polling loop. Each is a fresh process making one claim attempt.
+          #
+          # The batch is NOT stopped early when the queue empties. The worker
+          # exits 0 both when it completes a build and when it finds nothing to
+          # do, and the two are distinguishable only by the "no_job_available"
+          # line in its JSON log. That log shape is a convention, not a
+          # contract, so parsing it would let a future formatting change
+          # silently break batching. An extra invocation against an empty queue
+          # costs one RPC that returns no rows, which is not worth that risk.
+          #
+          # A non-zero exit IS the contract, and `set -e` stops the batch and
+          # fails the run on the first one.
+          for attempt in 1 2 3 4 5; do
+            echo "worker invocation ${attempt} of 5"
+            npm run worker:run -- --target android
+          done

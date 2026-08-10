@@ -17,24 +17,23 @@ For hosting, environment variables and Supabase dashboard setup, see
 | Owner POS runtime — cash/card sales, receipts, inventory | Working |
 | Server-authoritative checkout (`complete_sale_v2`) | Working — prices, totals and order numbers are computed in the database, never trusted from the browser |
 | Dashboard, sales / product / inventory reports | Working |
-| Build jobs + artifact download | Working, but a build only completes when the worker is run manually (see below) |
+| Build jobs + artifact download | Working — queued builds are processed automatically by a scheduled GitHub Actions worker (Android target) |
 | Android shell | Proves the **owner** website runs in a WebView. It is a packaging proof, not a till |
 | Paired-device pairing — database and server layer | Complete and hardened |
-| Paired-device **product UI** | **Not built.** Planned as Feature 16.4 |
+| Paired-device **product UI** | Working — owner Devices section creates pairing codes; `/device` runs the paired till |
 
 ### Current limitations
 
 These are known and intentional at this stage:
 
-- **No owner pairing-management UI** — the server actions exist
-  (`lib/devicePairing.actions.ts`), but no screen calls them.
-- **No device pairing-code entry UI** — nothing in the app calls
-  `signInAnonymously` or `redeem_device_pairing_token`.
-- **No dedicated paired-device route** — `/runtime/[id]` is owner-only; a paired
-  device has no page to load.
-- **No continuous build worker** — one shot per invocation, run by hand.
+- **No device rename or last-seen tracking** — a paired device is recorded once
+  as "POS Device" with its platform, and those fields are immutable by design.
 - **No APK artifact generation** — builds produce a `json_config` file, not an
-  installable app.
+  installable app. The Android app is a single universal shell that pairs to a
+  build; it is not generated per project.
+- **Build processing is scheduled, not instant** — a queued build is picked up
+  by a workflow that runs every 15 minutes, and GitHub may delay scheduled runs.
+  A build can be processed immediately by running the workflow manually.
 - **No offline mode** — the Android shell shows an honest failure screen when the
   network is unavailable.
 - **No native printing** — printing uses the browser print path.
@@ -78,7 +77,8 @@ on them; the app has no local fallback.
 | `npm test` | Full test suite (Vitest) |
 | `npm run lint` | ESLint |
 | `npx tsc --noEmit` | Standalone type check |
-| `npm run worker:once -- --target android` | One build-worker pass (see DEPLOYMENT.md) |
+| `npm run worker:once -- --target android` | One build-worker pass locally, using `.env.local` |
+| `npm run worker:run -- --target android` | Same worker, ambient environment only (used by CI) |
 | `npm run android:sync` | Regenerate the Android shell assets and sync Capacitor |
 
 ## Testing
@@ -105,4 +105,5 @@ migrations *say* what they must; they do not execute them.
 - **Checkout is idempotent.** Each attempt carries a client-generated request id;
   a retry returns the original receipt instead of double-selling.
 - **The build worker is a separate process**, not a route. It uses the
-  service-role key and never runs inside the web app.
+  service-role key, never runs inside the web app, and is executed on a
+  schedule by GitHub Actions rather than by hand.
