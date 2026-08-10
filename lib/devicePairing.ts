@@ -151,6 +151,13 @@ export type CreatePairingTokenResult =
       code: string;
       formattedCode: string;
       expiresAt: string;
+      // Feature 16.4B — the token's own id, so the owner can cancel the code
+      // they just created. create_device_pairing_token already returns it
+      // (returns table (id uuid, expires_at timestamptz)); the wrapper simply
+      // discarded it before. It is not secret — it identifies the caller's own
+      // token, and cancel_device_pairing_token re-verifies ownership in SQL —
+      // and it is NOT the code, the hash, or anything derived from either.
+      tokenId: string;
     }
   | { ok: false; error: PairingErrorCode; message: string };
 

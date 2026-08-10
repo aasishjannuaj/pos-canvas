@@ -5,7 +5,7 @@ import {
   createGeneratedPosConfig,
   isGeneratedPosConfig,
 } from "@/lib/generatedPosConfig";
-import PosRuntime from "@/components/runtime/PosRuntime";
+import OwnerPosRuntime from "@/components/runtime/OwnerPosRuntime";
 
 const PROJECT_ROUTE_PREFIX = "project-";
 
@@ -115,6 +115,6 @@ export default async function RuntimePage({
   }
 
   return (
-    <PosRuntime config={generatedConfig} />
+    <OwnerPosRuntime config={generatedConfig} />
   );
 }

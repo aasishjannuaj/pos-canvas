@@ -129,12 +129,16 @@ export async function createDevicePairingToken(input: {
 
       const row = Array.isArray(data) ? data[0] : data;
 
-      if (!error && row?.expires_at) {
+      // Feature 16.4B — the token id is now required as well as the expiry, so
+      // the owner UI can cancel the code it just created. Both come straight
+      // from the RPC's own RETURNS TABLE; nothing new is queried.
+      if (!error && row?.expires_at && row?.id) {
         return {
           ok: true,
           code,
           formattedCode: formatPairingCode(code),
           expiresAt: row.expires_at as string,
+          tokenId: row.id as string,
         };
       }
 

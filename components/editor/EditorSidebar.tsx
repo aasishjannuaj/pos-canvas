@@ -8,6 +8,7 @@ const sections: { label: EditorSection; icon: string }[] = [
   { label: "Business", icon: "🏢" },
   { label: "Taxes", icon: "🧾" },
   { label: "Settings", icon: "⚙️" },
+  { label: "Devices", icon: "📱" },
   { label: "Dashboard", icon: "📊" },
   { label: "Sales Report", icon: "📈" },
   { label: "Product Performance", icon: "🏆" },

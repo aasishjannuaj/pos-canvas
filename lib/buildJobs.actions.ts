@@ -13,6 +13,7 @@ import {
   createBuildArtifactDownloadUrl,
   createBuildJob,
   getBuildJobById,
+  getProjectBuildJobs,
 } from "@/lib/buildJobs.server";
 
 // Feature 15.4 — the only server boundary the browser can reach for build
@@ -131,4 +132,38 @@ export async function downloadBuildArtifact(
   }
 
   return createBuildArtifactDownloadUrl(buildJobId);
+}
+
+
+// Feature 16.4B — the only server boundary the browser can reach to list a
+// project's build jobs. The thinnest possible wrapper around the EXISTING
+// getProjectBuildJobs: one shape-check, then delegation. No new query, no
+// duplicated column list, no second ordering rule.
+//
+// Added because the Devices panel must resolve the latest succeeded build to
+// pair against, and getProjectBuildJobs had no action exposing it. It returns
+// BuildJobSummary values only — the same sanitized shape refreshBuildJobStatus
+// already returns, carrying no config snapshot, no owner id, no claim token
+// and no storage path.
+//
+// Ownership is enforced by RLS inside getProjectBuildJobs: a project belonging
+// to another owner yields an empty list rather than an error that would
+// confirm it exists.
+export async function listProjectBuildJobs(
+  projectId: string
+): Promise<{ ok: true; jobs: BuildJobSummary[] } | { ok: false; message: string }> {
+  // projects.id is a uuid column, so a malformed value would otherwise reach
+  // the database as an invalid-input-syntax error rather than matching zero
+  // rows — the same correction Feature 15.7 applied to downloadBuildArtifact.
+  if (!isValidUuid(projectId)) {
+    return { ok: false, message: "A valid project is required." };
+  }
+
+  const { jobs, error } = await getProjectBuildJobs(projectId);
+
+  if (error) {
+    return { ok: false, message: error };
+  }
+
+  return { ok: true, jobs };
 }

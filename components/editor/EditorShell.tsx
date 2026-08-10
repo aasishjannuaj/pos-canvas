@@ -60,6 +60,7 @@ import {
   refreshBuildJobStatus,
 } from "@/lib/buildJobs.actions";
 import type { BuildJobSummary, BuildRequestStatus, BuildTarget } from "@/lib/buildJobs";
+import DeviceManagementPanel from "@/components/devices/DeviceManagementPanel";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -96,6 +97,7 @@ export type EditorSection =
   | "Business"
   | "Taxes"
   | "Settings"
+  | "Devices"
   | "Dashboard"
   | "Sales Report"
   | "Product Performance"
@@ -1391,6 +1393,14 @@ export default function EditorShell({
             menuItems={projectConfig.menuItems}
             inventoryTransactions={inventoryTransactions}
             inventoryTransactionsError={inventoryTransactionsError}
+          />
+        ) : editorMode === "edit" && editorSection === "Devices" ? (
+          /* Feature 16.4B — self-contained: the panel loads its own devices
+             and builds through existing server actions, so only the project
+             id crosses this boundary. */
+          <DeviceManagementPanel
+            projectId={projectId}
+            onGoToBuild={() => handleEditorSectionChange("Settings")}
           />
         ) : editorMode === "edit" && editorSection === "Settings" ? (
           <ReceiptPreview

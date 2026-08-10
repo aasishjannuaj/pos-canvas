@@ -15,7 +15,6 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
-import { completeSaleOrderV2 } from "@/lib/orders";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import {
   createSaleFingerprint,
@@ -24,17 +23,42 @@ import {
 } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
-import { getProjectConfig } from "@/lib/projects";
 import ProductBrowser from "@/components/editor/pos-layouts";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
+import type {
+  PosRuntimeCompleteSale,
+  PosRuntimeHomeLink,
+  PosRuntimeOnSaleRejected,
+  PosRuntimeRefreshStock,
+} from "@/lib/posRuntimeHost";
 
 type PosRuntimeProps = {
-  // Feature 14.3 — the only two props this component receives, per the
-  // approved architecture: the immutable generated contract, and the one
-  // piece of minimal server-loaded metadata (an order-number starting
-  // point) that can't be derived from the contract itself. No
-  // ProjectConfig, no raw project row, no Supabase client.
+  // Feature 14.3 — the immutable generated contract. No ProjectConfig, no raw
+  // project row, no Supabase client.
   config: GeneratedPosConfig;
+
+  // Feature 16.4A — host-injected behavior. Previously this component imported
+  // lib/orders.ts and lib/projects.ts directly, which hardwired it to the
+  // cookie-backed owner client and to an owner-RLS read of `projects`. A paired
+  // device can do neither: its session lives in its own localStorage namespace,
+  // and `projects` is invisible to it under RLS.
+  //
+  // These are REQUIRED rather than optional-with-owner-defaults on purpose. A
+  // default would keep an owner-session code path compiled into the device
+  // bundle, where a bug could transact a device sale through whatever owner
+  // cookie happened to exist in the same browser. Injection makes that
+  // structurally impossible. components/runtime/OwnerPosRuntime.tsx supplies
+  // the owner implementations, unchanged.
+  submitSale: PosRuntimeCompleteSale;
+
+  // null = this host has no live stock source (paired device).
+  refreshStock: PosRuntimeRefreshStock | null;
+
+  // null = render no exit link (a till has nowhere to go back to).
+  homeLink: PosRuntimeHomeLink | null;
+
+  // Optional: lets a host re-check its own authorization after a rejected sale.
+  onSaleRejected?: PosRuntimeOnSaleRejected;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -46,7 +70,13 @@ const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
 // `config` or any of its nested objects. Reuses the same ProductBrowser,
 // PosCheckoutPanel, and Receipt components the Builder's own preview mode
 // uses — this is the shared POS engine's real runtime, not a rebuild of it.
-export default function PosRuntime({ config }: PosRuntimeProps) {
+export default function PosRuntime({
+  config,
+  submitSale,
+  refreshStock,
+  homeLink,
+  onSaleRejected,
+}: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
   // trackInventory, after a confirmed sale) via a fresh array/object at
@@ -286,7 +316,7 @@ export default function PosRuntime({ config }: PosRuntimeProps) {
     }
     setSaleRequest(request);
 
-    const { receipt, error } = await completeSaleOrderV2({
+    const { receipt, error } = await submitSale({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
       tipAmount: cartSummary.tip,
@@ -309,6 +339,12 @@ export default function PosRuntime({ config }: PosRuntimeProps) {
         error ??
           "The sale could not be confirmed. Press Pay again to retry — if it already went through, the original receipt will be shown."
       );
+
+      // Feature 16.4A — the host decides what a rejection means for its own
+      // authorization. A paired device re-resolves its pairing state here, so a
+      // revocation that landed mid-shift moves it to the revoked screen instead
+      // of leaving a dead Pay button. The engine itself draws no conclusion.
+      onSaleRejected?.(error);
       return;
     }
 
@@ -323,11 +359,20 @@ export default function PosRuntime({ config }: PosRuntimeProps) {
     // sale that already succeeded — mirrors EditorShell's completeSale.
     setCheckoutStatus("success");
 
-    const { config: latestConfig, error: reloadError } = await getProjectConfig(
+    // Feature 16.4A — a host with no live stock source (a paired device, which
+    // cannot read `projects` under RLS) passes null. The sale is complete and
+    // authoritative either way; there is simply nothing to refresh, so the
+    // operator is not shown a warning about something they cannot fix.
+    if (refreshStock === null) {
+      setSaleSaveStatus("success");
+      return;
+    }
+
+    const { menuItems: latestMenuItems, error: reloadError } = await refreshStock(
       config.project.projectId
     );
 
-    if (reloadError || !latestConfig) {
+    if (reloadError || !latestMenuItems) {
       // The sale already happened — this is a read-only refresh failure,
       // not a failed sale. Non-blocking warning, not an error.
       setSaleSaveStatus("success");
@@ -342,7 +387,7 @@ export default function PosRuntime({ config }: PosRuntimeProps) {
     // config.menuItems itself.
     setMenuItems((prev) =>
       prev.map((item) => {
-        const dbItem = latestConfig.menuItems.find(
+        const dbItem = latestMenuItems.find(
           (dbMenuItem) => dbMenuItem.id === item.id
         );
 
@@ -371,17 +416,21 @@ export default function PosRuntime({ config }: PosRuntimeProps) {
           {config.businessProfile.businessName.trim()}
         </span>
 
-        <Link
-          href="/dashboard"
-          onClick={(event) => {
-            if (cart.length > 0 && !window.confirm(LEAVE_CONFIRM_MESSAGE)) {
-              event.preventDefault();
-            }
-          }}
-          className="text-sm font-medium text-white/90 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-        >
-          ← Back to Dashboard
-        </Link>
+        {/* Feature 16.4A — a paired device passes null: a till has nowhere to
+            go back to, and must not offer a route into the owner app. */}
+        {homeLink !== null && (
+          <Link
+            href={homeLink.href}
+            onClick={(event) => {
+              if (cart.length > 0 && !window.confirm(LEAVE_CONFIRM_MESSAGE)) {
+                event.preventDefault();
+              }
+            }}
+            className="text-sm font-medium text-white/90 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          >
+            {homeLink.label}
+          </Link>
+        )}
       </header>
 
       {/* Feature 16.2 Android fix — this row was unconditionally
