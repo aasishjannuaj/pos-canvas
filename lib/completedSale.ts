@@ -16,12 +16,32 @@
 // Dependency-free (no React, no Supabase, no node builtins), so both the client
 // runtime and Vitest can use it.
 
+/**
+ * Feature 18.1 — one selected modifier as the SERVER recorded it at sale time.
+ *
+ * Read from the persisted order_items.modifiers snapshot, never recomputed
+ * from the current menu, so a receipt reprinted after a price change still
+ * shows what the customer actually paid.
+ */
+export type CompletedSaleItemModifier = {
+  groupId: string;
+  groupName: string;
+  optionId: string;
+  optionName: string;
+  /** Fixed two-decimal string, like every other money value here. */
+  priceAdjustment: string;
+};
+
 export type CompletedSaleItem = {
   itemId: string;
   itemName: string;
   unitPrice: string;
   quantity: number;
   lineTotal: string;
+  // Feature 18.1 — OPTIONAL on purpose. complete_sale_v2 does not emit this
+  // key, and neither do receipts already rendered in a stale tab, so its
+  // absence must parse as "no modifiers" rather than as a contract break.
+  modifiers?: CompletedSaleItemModifier[];
 };
 
 export type CompletedSaleReceipt = {
@@ -43,6 +63,21 @@ export function isFixedDecimalString(value: unknown): value is string {
   return typeof value === "string" && MONEY_PATTERN.test(value);
 }
 
+function isCompletedSaleItemModifier(
+  value: unknown
+): value is CompletedSaleItemModifier {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+
+  return (
+    typeof entry.groupId === "string" &&
+    typeof entry.groupName === "string" &&
+    typeof entry.optionId === "string" &&
+    typeof entry.optionName === "string" &&
+    isFixedDecimalString(entry.priceAdjustment)
+  );
+}
+
 function isCompletedSaleItem(value: unknown): value is CompletedSaleItem {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
@@ -54,7 +89,12 @@ function isCompletedSaleItem(value: unknown): value is CompletedSaleItem {
     typeof item.quantity === "number" &&
     Number.isInteger(item.quantity) &&
     item.quantity > 0 &&
-    isFixedDecimalString(item.lineTotal)
+    isFixedDecimalString(item.lineTotal) &&
+    // Feature 18.1 — absent is valid (a v2 payload). Present must be an array
+    // of well-formed entries; a malformed one is a contract break, matching
+    // this module's reject-rather-than-coerce rule.
+    (item.modifiers === undefined ||
+      (Array.isArray(item.modifiers) && item.modifiers.every(isCompletedSaleItemModifier)))
   );
 }
 

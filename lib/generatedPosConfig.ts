@@ -1,3 +1,4 @@
+import { normalizeModifierGroups } from "@/lib/modifiers";
 // Feature 14.1 — the Generated POS Configuration contract: a stable,
 // versioned, dependency-free export shape that a future Web POS runtime,
 // Android/Capacitor wrapper, desktop wrapper, or build-queue worker can
@@ -158,6 +159,12 @@ function toRuntimeSafeMenuItem(item: MenuItem, index: number): MenuItem {
     name,
     category: item.category,
     trackInventory,
+    // Feature 18.1 — carried into the pinned snapshot so a paired device
+    // prices from the modifiers that existed when its build was made, not from
+    // whatever the live menu says now. Re-normalized here rather than trusted:
+    // this is the boundary every build passes through, and the snapshot is
+    // frozen by D4c once written.
+    modifierGroups: normalizeModifierGroups(item.modifierGroups),
     price,
     stockQuantity,
   };

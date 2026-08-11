@@ -1,3 +1,6 @@
+import { normalizeModifierGroups } from "@/lib/modifiers";
+import type { ModifierGroup } from "@/lib/modifiers";
+
 // Feature 12.1 — the neutral home for ProjectConfig and its nested types,
 // plus the single shared default/starter configuration value. This module
 // has no dependency on EditorShell.tsx (or any "use client" component) so
@@ -20,6 +23,11 @@ export type MenuItem = {
   category: string;
   trackInventory: boolean;
   stockQuantity: number;
+  // Feature 18.1 — optional and additive. A project saved before modifiers
+  // existed has no such key, and normalizeMenuItem resolves that to [] exactly
+  // as Feature 7.5 did for trackInventory/stockQuantity. Absent or empty means
+  // the item sells exactly as it always has.
+  modifierGroups?: ModifierGroup[];
 };
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
@@ -289,6 +297,11 @@ export function normalizeMenuItem(item: MenuItem): MenuItem {
       typeof item.stockQuantity === "number" && Number.isFinite(item.stockQuantity)
         ? item.stockQuantity
         : 0,
+    // Feature 18.1 — same convention: a missing or malformed value becomes an
+    // empty list rather than crashing or being carried through unvalidated.
+    // normalizeModifierGroups also enforces the per-item and per-group caps and
+    // drops any group or option that could not be sold safely.
+    modifierGroups: normalizeModifierGroups(item.modifierGroups),
   };
 }
 
