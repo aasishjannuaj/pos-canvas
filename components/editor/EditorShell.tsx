@@ -58,8 +58,15 @@ import {
   downloadBuildArtifact,
   requestBuildJob,
   refreshBuildJobStatus,
+  startBuildProcessing,
 } from "@/lib/buildJobs.actions";
-import type { BuildJobSummary, BuildRequestStatus, BuildTarget } from "@/lib/buildJobs";
+import { needsBuildProcessing } from "@/lib/buildJobs";
+import type {
+  BuildJobSummary,
+  BuildProcessingState,
+  BuildRequestStatus,
+  BuildTarget,
+} from "@/lib/buildJobs";
 import DeviceManagementPanel from "@/components/devices/DeviceManagementPanel";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
@@ -304,6 +311,18 @@ export default function EditorShell({
     null
   );
   const [latestBuildWasReused, setLatestBuildWasReused] = useState(false);
+  // Feature 17.2 — whether a worker run was actually started for the displayed
+  // build. Separate from buildRequestStatus because the request can succeed
+  // (the build IS queued) while the trigger fails, and those two facts get
+  // different copy. Never persisted and never read back from the server: it
+  // describes the outcome of the last trigger attempt this session made.
+  const [buildProcessing, setBuildProcessing] =
+    useState<BuildProcessingState>("not_needed");
+  // Feature 17.2 — guards a duplicate "Retry processing" click, kept distinct
+  // from isRefreshingBuildStatus for the same reason that flag is distinct from
+  // buildRequestStatus: three different actions, three different in-flight bits.
+  const [isRetryingBuildProcessing, setIsRetryingBuildProcessing] =
+    useState(false);
   // Feature 15.4 — the pending idempotency key for the *current* build
   // attempt. Generated only inside handleRequestBuild (never during
   // render), kept on a failed attempt so a retry reuses it, and cleared on
@@ -1249,6 +1268,38 @@ export default function EditorShell({
     setLatestBuildWasReused(result.reusedExisting);
     setBuildRequestStatus("success");
     setBuildRequestError(null);
+    // Feature 17.2 — the build is queued either way; this only decides whether
+    // the panel says processing has started or offers "Retry processing".
+    setBuildProcessing(result.processing);
+  }
+
+  // Feature 17.2 — retries the GitHub trigger for the build that is ALREADY
+  // displayed. Never calls requestBuildJob, so it cannot create a second
+  // build_jobs row; the id it sends is the one the server itself returned.
+  async function handleRetryBuildProcessing() {
+    if (latestBuildJob === null || isRetryingBuildProcessing) {
+      return;
+    }
+
+    setIsRetryingBuildProcessing(true);
+
+    const result = await startBuildProcessing(latestBuildJob.id);
+
+    if (!result.ok) {
+      // Surfaced through buildRequestError, which the panel already renders
+      // inside the job card. buildProcessing stays "unavailable", so the retry
+      // button remains available.
+      setBuildRequestError(result.message);
+      setIsRetryingBuildProcessing(false);
+      return;
+    }
+
+    // The action re-read the job, so this also picks up a build that finished
+    // while the notice was on screen.
+    setLatestBuildJob(result.job);
+    setBuildProcessing(result.processing);
+    setBuildRequestError(null);
+    setIsRetryingBuildProcessing(false);
   }
 
   // Feature 15.4 — a manual, one-shot refresh of the currently displayed
@@ -1483,6 +1534,18 @@ export default function EditorShell({
           buildRequestError={buildRequestError}
           latestBuildJob={latestBuildJob}
           latestBuildWasReused={latestBuildWasReused}
+          // Feature 17.2 — derived, not stored: a job that has since finished
+          // needs no processing notice at all, so "Retry processing" disappears
+          // by itself as soon as a Refresh shows the build succeeded or failed.
+          // Deriving it here rather than writing state in an effect keeps this
+          // a pure function of the job that is actually on screen.
+          buildProcessing={
+            latestBuildJob !== null && needsBuildProcessing(latestBuildJob.status)
+              ? buildProcessing
+              : "not_needed"
+          }
+          isRetryingBuildProcessing={isRetryingBuildProcessing}
+          onRetryBuildProcessing={handleRetryBuildProcessing}
           onRequestBuild={handleRequestBuild}
           onRefreshBuildStatus={handleRefreshBuildStatus}
           isRefreshingBuildStatus={isRefreshingBuildStatus}

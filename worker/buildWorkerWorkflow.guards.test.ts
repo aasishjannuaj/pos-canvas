@@ -52,11 +52,7 @@ describe("the workflow exists and is well formed", () => {
 });
 
 describe("triggers", () => {
-  it("runs on a schedule", () => {
-    expect(wf).toMatch(/^\s{2}schedule:$/m);
-  });
-
-  it("can be dispatched manually for operational recovery", () => {
+  it("can be dispatched — the only way a run ever starts", () => {
     expect(wf).toMatch(/^\s{2}workflow_dispatch:$/m);
   });
 
@@ -72,54 +68,54 @@ describe("triggers", () => {
     expect(wf).not.toMatch(/^\s{2}push:$/m);
   });
 
-  it("declares no trigger beyond those two", () => {
+  it("declares no trigger beyond workflow_dispatch", () => {
     // Top-level trigger keys are the two-space entries between `on:` and the
     // `permissions:` block. An allowlist, so an unconsidered trigger is caught.
     const triggerBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));
     const keys = [...triggerBlock.matchAll(/^ {2}([a-z_]+):/gm)].map((m) => m[1]);
-    expect(keys.sort()).toEqual(["schedule", "workflow_dispatch"]);
+    expect(keys.sort()).toEqual(["workflow_dispatch"]);
   });
 });
 
-describe("schedule", () => {
-  const cron = /cron:\s*"([^"]+)"/.exec(wf)?.[1] ?? "";
+describe("Feature 17.2 — the schedule is gone", () => {
+  // The point of 17.2 is that GitHub creates a run ONLY when POS Canvas
+  // dispatches one, or when an operator clicks Run workflow. A schedule
+  // reintroduced by a later edit would restore the 15-minute polling this
+  // feature exists to remove, and would do it silently: everything would still
+  // work, just wastefully. These four assertions are the tripwire.
 
-  it("declares exactly one cron expression", () => {
-    expect([...wf.matchAll(/cron:/g)]).toHaveLength(1);
-    expect(cron).not.toBe("");
+  it("declares no schedule trigger", () => {
+    expect(wf).not.toMatch(/^\s{2}schedule:$/m);
+    expect(wf).not.toContain("schedule:");
   });
 
-  it("is a valid five-field cron", () => {
-    expect(cron.trim().split(/\s+/)).toHaveLength(5);
+  it("contains no cron expression at all", () => {
+    expect(wf).not.toContain("cron");
+    expect([...wf.matchAll(/cron:/g)]).toHaveLength(0);
   });
 
-  it("declares exactly four scheduled minute values", () => {
-    // Four runs an hour, not twelve: on a private repository every run bills
-    // GitHub-hosted minutes and partial job minutes round up, so a 5-minute
-    // cadence would charge for ~288 mostly-empty runs a day.
-    const minutes = cron.split(" ")[0].split(",").map(Number);
-    expect(minutes).toHaveLength(4);
-  });
-
-  it("fires every 15 minutes, including across the hour boundary", () => {
-    const minutes = cron.split(" ")[0].split(",").map(Number);
-    for (let i = 1; i < minutes.length; i += 1) {
-      expect(minutes[i] - minutes[i - 1]).toBe(15);
+  it("has no trigger that fires without an explicit request", () => {
+    // Every event that can start a run on its own. workflow_dispatch and
+    // repository_dispatch are the two request-driven ones; only the first is
+    // allowed here (repository_dispatch would need a differently scoped token).
+    for (const event of [
+      "schedule",
+      "push",
+      "pull_request",
+      "pull_request_target",
+      "repository_dispatch",
+      "workflow_run",
+      "workflow_call",
+      "issues",
+      "release",
+    ]) {
+      expect(wf).not.toMatch(new RegExp(`^\\s{2}${event}:`, "m"));
     }
-    expect(60 - minutes[minutes.length - 1] + minutes[0]).toBe(15);
   });
 
-  it("avoids the top of the hour, which is the most delay-prone slot", () => {
-    const minutes = cron.split(" ")[0].split(",").map(Number);
-    expect(minutes).not.toContain(0);
-    expect(minutes[0]).toBeGreaterThan(0);
-    // Any bare step expression (*/15, */5, …) would start at minute 0, which
-    // is exactly what the explicit list avoids.
-    expect(cron.split(" ")[0]).not.toContain("*/");
-  });
-
-  it("keeps manual dispatch available as the immediate-execution path", () => {
-    // With a 15-minute cadence this is the operator's way to avoid waiting.
+  it("keeps manual dispatch as the emergency fallback", () => {
+    // If POS Canvas cannot reach the GitHub API, this is the only remaining way
+    // to drain the queue — so removing it would leave no recovery path at all.
     expect(wf).toMatch(/^\s{2}workflow_dispatch:$/m);
   });
 });

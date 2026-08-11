@@ -1,9 +1,16 @@
 # Feature 17.1 — Production Build Execution.
+# Feature 17.2 — demand-triggered: the schedule was REMOVED.
 #
-# Runs the EXISTING one-shot build worker (worker/once.ts) on a schedule so a
-# hosted customer's build request is processed without anyone running a
-# terminal command. Nothing about the worker or its database RPCs changes here;
-# this file only supplies an execution environment.
+# Runs the EXISTING one-shot build worker (worker/once.ts) so a hosted
+# customer's build request is processed without anyone running a terminal
+# command. Nothing about the worker or its database RPCs changes here; this
+# file only supplies an execution environment.
+#
+# WHY THERE IS NO LONGER A SCHEDULE: 17.1 polled every 15 minutes, so an owner
+# waited up to 15 minutes for a build that takes seconds, and ~96 runs a day
+# fired against an empty queue. POS Canvas now dispatches this workflow itself
+# (lib/githubBuildWorker.server.ts) the moment a build job is queued, so a run
+# happens when — and only when — there is a reason for one.
 #
 # WHY THIS IS SAFE TO RUN CONCURRENTLY WITH ITSELF OR A MANUAL RUN:
 # claim_next_build_job (supabase/migrations/20260729175512) selects its
@@ -12,37 +19,35 @@
 # unexpired lease. Two workers therefore cannot claim the same job, and a
 # worker whose lease lapsed cannot mutate anything afterwards. The database is
 # the authority; the `concurrency` block below is only about cost and log
-# noise.
+# noise. That property is what makes an occasional duplicate dispatch — a
+# double-clicked Build button — harmless rather than something to prevent.
 #
-# STALE-JOB RECOVERY DEPENDS ON THIS SCHEDULE. Reclaiming a build whose worker
-# died, and force-failing one that has exhausted its 3 attempts, both happen
-# INSIDE claim_next_build_job. Nothing else performs that recovery, so this
-# workflow must keep firing even when the queue is normally empty.
+# STALE-JOB RECOVERY NOW RIDES ON DEMAND, NOT ON A CLOCK. Reclaiming a build
+# whose worker died, and force-failing one that has exhausted its 3 attempts,
+# both still happen INSIDE claim_next_build_job, and nothing else performs that
+# recovery. With no schedule, that recovery only runs when this workflow is
+# dispatched. POS Canvas therefore dispatches for a job in `building` as well
+# as one in `queued` (lib/buildJobs.ts::needsBuildProcessing) — a job stuck
+# `building` after a dead worker also blocks its project's active-job index, so
+# every later Build click resolves to it, and each of those clicks is what
+# brings a worker back to reclaim it. Manual `Run workflow` below remains the
+# operator's fallback if POS Canvas itself cannot reach GitHub.
 
 name: Build worker
 
 on:
-  # Manual operational recovery: catching up a backlog, or running immediately
-  # after a schedule outage.
+  # The emergency fallback, and the ONLY trigger left. Used when POS Canvas
+  # cannot reach the GitHub API, or to catch up a backlog by hand.
+  #
+  # Every ordinary run arrives through this same trigger via the REST API:
+  # POST /repos/:owner/:repo/actions/workflows/build-worker.yml/dispatches.
   workflow_dispatch:
 
-  # Every 15 minutes, offset off the top of the hour.
-  #
-  # WHY NOT THE 5-MINUTE MINIMUM: on a private repository every run bills
-  # GitHub-hosted minutes and partial job minutes round up, so a 5-minute
-  # cadence would charge for roughly 288 runs a day, nearly all of them against
-  # an empty queue. Four runs an hour is the cost-appropriate MVP setting;
-  # workflow_dispatch covers the case where someone needs a build immediately.
-  #
-  # An explicit minute list rather than */15, because a step expression starts
-  # at minute 0 and start-of-hour schedules are the most delay-prone slot.
-  schedule:
-    - cron: "7,22,37,52 * * * *"
-
-# No `push`, no `pull_request`, and never `pull_request_target`: the production
-# service-role credential must never be reachable from code in a pull request,
-# least of all a fork's. Scheduled and dispatched runs execute only from the
-# default branch.
+# No `schedule`, no `push`, no `pull_request`, and never `pull_request_target`.
+# The production service-role credential must never be reachable from code in a
+# pull request, least of all a fork's. Dispatched runs execute only from the
+# default branch, so a workflow edited on a side branch cannot run with these
+# secrets until it is merged.
 
 # Least privilege. The worker reads and writes Supabase, never this repository.
 permissions:
@@ -53,6 +58,12 @@ permissions:
 # cancel-in-progress is false on purpose: cancelling mid-run could kill a worker
 # after it claimed a job, leaving that job 'building' until its lease expires
 # and burning one of its three attempts for no reason.
+#
+# Feature 17.2 — expect to see cancelled runs here, and expect them to be fine.
+# A concurrency group holds at most one running plus one pending run; a third
+# dispatch cancels the pending one before it ever starts a job. So a burst of
+# Build clicks collapses to the in-flight run plus one queued behind it, and
+# the cancelled entries never claimed anything.
 concurrency:
   group: build-worker
   cancel-in-progress: false

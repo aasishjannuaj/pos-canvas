@@ -20,6 +20,8 @@ import type {
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
 import {
+  BUILD_PROCESSING_STARTED_MESSAGE,
+  getBuildProcessingUnavailableMessage,
   getBuildRequestButtonLabel,
   getBuildRequestSuccessMessage,
   getBuildStatusLabel,
@@ -27,6 +29,7 @@ import {
 } from "@/lib/buildJobs";
 import type {
   BuildJobSummary,
+  BuildProcessingState,
   BuildRequestStatus,
   BuildTarget,
 } from "@/lib/buildJobs";
@@ -84,6 +87,12 @@ type EditorPropertiesPanelProps = {
   buildRequestError: string | null;
   latestBuildJob: BuildJobSummary | null;
   latestBuildWasReused: boolean;
+  // Feature 17.2 — already derived against the displayed job's status by
+  // EditorShell, so this component never has to ask whether the notice still
+  // applies; "not_needed" simply renders nothing.
+  buildProcessing: BuildProcessingState;
+  isRetryingBuildProcessing: boolean;
+  onRetryBuildProcessing: () => void;
   onRequestBuild: () => void;
   onRefreshBuildStatus: () => void;
   isRefreshingBuildStatus: boolean;
@@ -243,6 +252,9 @@ export default function EditorPropertiesPanel({
   buildRequestError,
   latestBuildJob,
   latestBuildWasReused,
+  buildProcessing,
+  isRetryingBuildProcessing,
+  onRetryBuildProcessing,
   onRequestBuild,
   onRefreshBuildStatus,
   isRefreshingBuildStatus,
@@ -1388,30 +1400,52 @@ export default function EditorPropertiesPanel({
                         </span>
                       </div>
 
-                      {/* Feature 17.1 — replaces the pre-worker copy, which
-                          said processing was "not enabled yet". A scheduled
-                          GitHub Actions run now claims queued jobs, so that
-                          sentence became untrue.
-                          "about 15 minutes" matches the workflow's cadence and
-                          is deliberately hedged: scheduled runs are best-effort
-                          and GitHub can delay them, so this states a typical
-                          case rather than a promise. No countdown and no
-                          progress indicator — neither the browser nor the
-                          server knows when the next run will actually fire. */}
-                      {latestBuildJob.status === "queued" && (
-                        <p className="mt-1 text-neutral-400">
-                          Your build is queued and will be picked up
-                          automatically. It usually starts within about 15
-                          minutes, but automated runs can occasionally be
-                          delayed. Use Refresh to check its status.
-                        </p>
-                      )}
+                      {/* Feature 17.2 — replaces 17.1's "usually starts within
+                          about 15 minutes". That number described a polling
+                          schedule that no longer exists: the worker is now
+                          dispatched the moment a build is queued, so there is
+                          no cadence left to quote and nothing to hedge about.
+                          Still no countdown and no progress indicator — a
+                          dispatch means GitHub accepted a run, which is not the
+                          same as knowing when that run reaches this job. */}
+                      {latestBuildJob.status === "queued" &&
+                        buildProcessing !== "unavailable" && (
+                          <p className="mt-1 text-neutral-400">
+                            {BUILD_PROCESSING_STARTED_MESSAGE} Use Refresh to
+                            check its status.
+                          </p>
+                        )}
 
                       {latestBuildJob.status === "building" && (
                         <p className="mt-1 text-neutral-400">
                           Your build is being processed. Use Refresh to check
                           its status.
                         </p>
+                      )}
+
+                      {/* Feature 17.2 — the build IS queued; only the trigger
+                          failed. Amber, not red: nothing was lost and nothing
+                          needs re-requesting. The button re-dispatches for this
+                          exact build id and creates no second build. */}
+                      {buildProcessing === "unavailable" && (
+                        <div className="mt-1 flex flex-col gap-1.5">
+                          <p className="text-amber-700">
+                            {getBuildProcessingUnavailableMessage(
+                              latestBuildJob.status
+                            )}
+                          </p>
+
+                          <button
+                            type="button"
+                            onClick={onRetryBuildProcessing}
+                            disabled={isRetryingBuildProcessing}
+                            className="w-full rounded-full border border-amber-300 px-4 py-2 text-xs font-medium text-amber-800 transition-colors hover:border-amber-500 hover:text-amber-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isRetryingBuildProcessing
+                              ? "Starting…"
+                              : "Retry processing"}
+                          </button>
+                        </div>
                       )}
 
                       {latestBuildJob.status === "failed" &&

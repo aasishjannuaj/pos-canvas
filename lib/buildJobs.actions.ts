@@ -1,12 +1,20 @@
 "use server";
 
 import {
+  BUILD_PROCESSING_RETRY_FAILED_MESSAGE,
   isNonEmptyId,
   isSupportedBuildTarget,
   isValidUuid,
+  needsBuildProcessing,
   normalizeRequestKey,
 } from "@/lib/buildJobs";
-import type { BuildJobSummary, CreateBuildJobResult } from "@/lib/buildJobs";
+import type {
+  BuildJobSummary,
+  BuildProcessingState,
+  RequestBuildJobResult,
+  StartBuildProcessingResult,
+} from "@/lib/buildJobs";
+import { dispatchBuildWorkerWorkflow } from "@/lib/githubBuildWorker.server";
 import { createDownloadArtifactFailure } from "@/lib/buildJobs.download";
 import type { DownloadArtifactResult } from "@/lib/buildJobs.download";
 import {
@@ -30,11 +38,15 @@ import {
 // status, or any timestamp — createBuildJob derives all of that itself,
 // and this function's own input type has no field for any of it in the
 // first place.
+//
+// Feature 17.2 — after (and only after) the database has accepted the build,
+// this action also asks GitHub to start a worker run. See
+// triggerBuildProcessing below for why that ordering is the whole design.
 export async function requestBuildJob(input: {
   projectId: string;
   target: unknown;
   requestKey: string;
-}): Promise<CreateBuildJobResult> {
+}): Promise<RequestBuildJobResult> {
   if (!isNonEmptyId(input.projectId)) {
     return {
       ok: false,
@@ -61,11 +73,86 @@ export async function requestBuildJob(input: {
     };
   }
 
-  return createBuildJob({
+  const result = await createBuildJob({
     projectId: input.projectId,
     target: input.target,
     requestKey,
   });
+
+  if (!result.ok) {
+    // Nothing was queued, so there is nothing for a worker to do. No dispatch,
+    // and the failure shape is passed through byte-for-byte — createBuildJob's
+    // messages are already sanitized and this action adds no field to them.
+    return result;
+  }
+
+  return {
+    ok: true,
+    job: result.job,
+    reusedExisting: result.reusedExisting,
+    processing: await triggerBuildProcessing(result.job.status),
+  };
+}
+
+// Feature 17.2 — the one place a queued build turns into a worker run.
+//
+// ORDERING IS THE DESIGN: the build_jobs row is committed before this runs, and
+// its fate never depends on the outcome here. A dispatch failure leaves a
+// perfectly valid queued build in the database — it is NOT deleted, NOT failed,
+// and NOT marked in any way. The only consequence is that the caller is told
+// `unavailable`, so the Builder can offer "Retry processing" for that same row.
+// Doing it the other way round (dispatch first, or roll the row back on a
+// dispatch failure) would make GitHub's availability an input to whether a
+// customer's build exists, which it must never be.
+//
+// The status gate is needsBuildProcessing, shared with the retry path so the
+// two can never disagree about what "still needs a worker" means.
+async function triggerBuildProcessing(
+  status: BuildJobSummary["status"]
+): Promise<BuildProcessingState> {
+  if (!needsBuildProcessing(status)) {
+    return "not_needed";
+  }
+
+  const dispatch = await dispatchBuildWorkerWorkflow();
+
+  // Only ok/not-ok crosses this line. dispatch.reason is an operator
+  // diagnostic; it was already logged server-side and is dropped here so it
+  // cannot reach a browser through the action's return value.
+  return dispatch.ok ? "started" : "unavailable";
+}
+
+// Feature 17.2 — "Retry processing".
+//
+// Exists so a failed dispatch can be retried WITHOUT a second build_jobs row.
+// The Builder's Build button would also have worked (the active-job index would
+// resolve a second click back to this same job), but only by way of a request
+// that reads as "make me another build" — this action says what it means, and
+// contains no insert path at all.
+//
+// Authorization is getBuildJobById's, unchanged: it is owner-scoped, and a job
+// belonging to someone else is indistinguishable from one that does not exist.
+// A caller therefore cannot use this action to discover another owner's build
+// ids, and cannot cause a workflow run by naming one.
+export async function startBuildProcessing(
+  buildJobId: string
+): Promise<StartBuildProcessingResult> {
+  if (!isValidUuid(buildJobId)) {
+    return { ok: false, message: BUILD_PROCESSING_RETRY_FAILED_MESSAGE };
+  }
+
+  const { job, error } = await getBuildJobById(buildJobId);
+
+  if (error || !job) {
+    return { ok: false, message: BUILD_PROCESSING_RETRY_FAILED_MESSAGE };
+  }
+
+  // A build that finished between the failed dispatch and this retry needs no
+  // worker. Reported as a success with the fresh job, so the Builder replaces
+  // its stale "could not be started" notice with the real status.
+  const processing = await triggerBuildProcessing(job.status);
+
+  return { ok: true, job, processing };
 }
 
 // Feature 15.4 — the only server boundary the browser can reach to refresh

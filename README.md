@@ -17,7 +17,7 @@ For hosting, environment variables and Supabase dashboard setup, see
 | Owner POS runtime — cash/card sales, receipts, inventory | Working |
 | Server-authoritative checkout (`complete_sale_v2`) | Working — prices, totals and order numbers are computed in the database, never trusted from the browser |
 | Dashboard, sales / product / inventory reports | Working |
-| Build jobs + artifact download | Working — queued builds are processed automatically by a scheduled GitHub Actions worker (Android target) |
+| Build jobs + artifact download | Working — requesting a build starts a GitHub Actions worker on demand (Android target) |
 | Android shell | Proves the **owner** website runs in a WebView. It is a packaging proof, not a till |
 | Paired-device pairing — database and server layer | Complete and hardened |
 | Paired-device **product UI** | Working — owner Devices section creates pairing codes; `/device` runs the paired till |
@@ -31,9 +31,11 @@ These are known and intentional at this stage:
 - **No APK artifact generation** — builds produce a `json_config` file, not an
   installable app. The Android app is a single universal shell that pairs to a
   build; it is not generated per project.
-- **Build processing is scheduled, not instant** — a queued build is picked up
-  by a workflow that runs every 15 minutes, and GitHub may delay scheduled runs.
-  A build can be processed immediately by running the workflow manually.
+- **Build processing starts on demand.** Requesting a build queues it in the
+  database and then asks GitHub Actions to start a worker run immediately; there
+  is no polling schedule. The build row is the source of truth, so if GitHub
+  cannot be reached the build stays safely queued and the Builder offers "Retry
+  processing" rather than losing it.
 - **No offline mode** — the Android shell shows an honest failure screen when the
   network is unavailable.
 - **No native printing** — printing uses the browser print path.
@@ -105,5 +107,5 @@ migrations *say* what they must; they do not execute them.
 - **Checkout is idempotent.** Each attempt carries a client-generated request id;
   a retry returns the original receipt instead of double-selling.
 - **The build worker is a separate process**, not a route. It uses the
-  service-role key, never runs inside the web app, and is executed on a
-  schedule by GitHub Actions rather than by hand.
+  service-role key, never runs inside the web app, and runs on GitHub Actions —
+  dispatched by the web app when a build is queued, never on a schedule.

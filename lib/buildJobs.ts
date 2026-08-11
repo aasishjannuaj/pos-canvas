@@ -239,6 +239,76 @@ export type CreateBuildJobResult =
       message: string;
     };
 
+// ---------------------------------------------------------------------------
+// Feature 17.2 — automatic processing
+// ---------------------------------------------------------------------------
+
+/**
+ * What happened to the attempt to start a worker run, as far as the browser is
+ * ever told. Never carries a reason: lib/githubBuildWorker.ts's failure reasons
+ * are operator diagnostics that stay in the server log.
+ *
+ * `not_needed` is not a failure — it is a build that is already finished, so
+ * no worker run was requested for it.
+ */
+export type BuildProcessingState = "started" | "unavailable" | "not_needed";
+
+/**
+ * Whether a job still needs a worker to look at it.
+ *
+ * INCLUDES `building`, which is not an oversight. With Feature 17.2's schedule
+ * removed, a dispatch is the only thing that ever calls claim_next_build_job,
+ * and stale-job recovery (reclaiming a build whose worker died, force-failing
+ * one that exhausted its 3 attempts) happens INSIDE that function. A job left
+ * `building` by a dead worker also occupies its project's active-job index, so
+ * every later Build click resolves to that same job rather than inserting a new
+ * one. If `building` did not dispatch, that project could never again cause a
+ * worker run and the job would sit `building` forever — a deadlock the old
+ * 15-minute schedule used to paper over.
+ *
+ * Dispatching for a healthy in-flight build costs one workflow run that finds
+ * nothing claimable (the lease is live, and claim_next_build_job selects FOR
+ * UPDATE SKIP LOCKED) and exits.
+ */
+export function needsBuildProcessing(status: BuildStatus): boolean {
+  return status === "queued" || status === "building";
+}
+
+/**
+ * requestBuildJob's result: createBuildJob's outcome plus what became of the
+ * worker trigger. The two are reported separately and never merged, because
+ * they have different authorities — `ok` is the database's answer, `processing`
+ * is GitHub's, and a failure of the second never invalidates the first.
+ */
+export type RequestBuildJobResult =
+  | {
+      ok: true;
+      job: BuildJobSummary;
+      reusedExisting: boolean;
+      processing: BuildProcessingState;
+    }
+  | {
+      ok: false;
+      errorCode: CreateBuildJobErrorCode;
+      message: string;
+    };
+
+/**
+ * The retry path's result. Deliberately has no `reusedExisting` field: this
+ * action can only ever act on a build that already exists, so there is no
+ * creation for a caller to reason about.
+ */
+export type StartBuildProcessingResult =
+  | {
+      ok: true;
+      job: BuildJobSummary;
+      processing: BuildProcessingState;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
+
 // Feature 15.3 — the exact narrow row shape lib/buildJobs.server.ts selects
 // from build_jobs for every read path (request-key lookup, active-job
 // lookup, the insert's own return value, and the two read helpers).
@@ -512,3 +582,48 @@ export function getBuildRequestSuccessMessage(reusedExisting: boolean): string {
     ? "An existing active build request was found."
     : "Build request queued.";
 }
+
+// Feature 17.2 — the two sentences that replace 17.1's "usually starts within
+// about 15 minutes". That estimate described a polling schedule that no longer
+// exists; with the worker dispatched on demand there is no cadence to quote.
+//
+// Neither sentence promises a start time. The first says processing begins
+// automatically because a dispatch was accepted, which is a fact about GitHub
+// having queued a run — not a prediction about when that run reaches this job.
+export const BUILD_PROCESSING_STARTED_MESSAGE =
+  "Your build is queued and processing will start automatically.";
+
+// Shown when the build IS safely queued but GitHub could not be told to start.
+// Pairs with the "Retry processing" button, which re-dispatches for this exact
+// build and never creates a second one.
+export const BUILD_PROCESSING_UNAVAILABLE_MESSAGE =
+  "Your build is queued, but automatic processing could not be started.";
+
+// The same failure against a build that is already `building`. It gets its own
+// sentence rather than reusing the one above, which would tell an owner their
+// build is "queued" while the panel's own Status row says "Building".
+//
+// A build sits in this state when its worker died mid-run: the job stays
+// `building` until claim_next_build_job reclaims it, and only a worker run
+// performs that reclaim — which is exactly what the retry button asks for.
+export const BUILD_PROCESSING_STALLED_MESSAGE =
+  "Your build is still processing, but a worker could not be started to pick it back up.";
+
+/**
+ * The right "could not be started" sentence for the status actually on screen.
+ *
+ * Both lead to the same "Retry processing" button; only the description of
+ * where the build currently stands differs.
+ */
+export function getBuildProcessingUnavailableMessage(status: BuildStatus): string {
+  return status === "building"
+    ? BUILD_PROCESSING_STALLED_MESSAGE
+    : BUILD_PROCESSING_UNAVAILABLE_MESSAGE;
+}
+
+/**
+ * The single sanitized failure line for the retry action. A retry that cannot
+ * reach GitHub tells the owner nothing about tokens, status codes or hosts.
+ */
+export const BUILD_PROCESSING_RETRY_FAILED_MESSAGE =
+  "Processing could not be started right now. Please try again.";

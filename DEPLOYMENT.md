@@ -9,7 +9,7 @@ into one deployment:
 |---|---|
 | Web app (owner site + POS runtime) | Vercel |
 | Backend — Postgres, Auth, Storage | Supabase (hosted) |
-| Build worker | GitHub Actions (scheduled) — **not** Vercel |
+| Build worker | GitHub Actions, dispatched on demand by the web app — **not** Vercel |
 
 The Android shell is not hosted; it is an app that points at the web app's URL.
 
@@ -39,7 +39,7 @@ work — nothing that conflicts with serverless hosting.
 
 ### Environment variables
 
-Set all three in **Project Settings → Environment Variables** for the
+Set all four in **Project Settings → Environment Variables** for the
 Production environment (and Preview, if you want auth to work on preview
 deployments).
 
@@ -48,6 +48,7 @@ deployments).
 | `NEXT_PUBLIC_SUPABASE_URL` | Production (+ Preview) | Public — inlined into the browser bundle |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Production (+ Preview) | Public — inlined into the browser bundle |
 | `SUPABASE_SERVICE_ROLE_KEY` | Production (+ Preview) | **Secret — server-only** |
+| `GITHUB_BUILD_WORKER_TOKEN` | Production (Preview optional) | **Secret — server-only** (see §3a) |
 
 Two rules that cause real outages if missed:
 
@@ -60,6 +61,10 @@ Two rules that cause real outages if missed:
 - **`NEXT_PUBLIC_*` values are baked in at build time.** Editing either one in
   the Vercel dashboard changes nothing until you **redeploy**. There is no
   runtime pickup.
+- **`GITHUB_BUILD_WORKER_TOKEN` must stay server-only too.** It is what starts
+  the build worker. Without it, builds still queue safely but never start on
+  their own; §3a covers creating it, its exact permissions, and the symptom when
+  it is missing.
 
 `POS_CANVAS_ANDROID_SERVER_URL` is **not** a Vercel variable. It is used only
 when building the Android app locally.
@@ -120,33 +125,66 @@ It runs on **GitHub Actions** instead — `.github/workflows/build-worker.yml`.
 
 | Property | Value |
 |---|---|
-| Triggers | `schedule` (every 15 minutes) and `workflow_dispatch` (manual) |
+| Triggers | `workflow_dispatch` **only** — no `schedule`, no `push` |
+| Started by | POS Canvas, via the GitHub REST API, when a build is queued |
 | Target | **Android only** for the MVP |
 | Batch | Up to 5 one-shot worker invocations per run, never a polling loop |
 | Permissions | `contents: read` — the workflow never writes to the repository |
 | Concurrency | Serialized, `cancel-in-progress: false` |
 
+### How a run starts (Feature 17.2)
+
+There is **no schedule**. The chain is:
+
+1. An owner clicks **Build** in the Builder.
+2. `requestBuildJob` (a Server Action) inserts the `build_jobs` row. This is the
+   only thing that decides whether the build exists.
+3. Only after that row is committed, the server calls
+   `POST /repos/aasishjannuaj/pos-canvas/actions/workflows/build-worker.yml/dispatches`
+   with `{"ref":"main"}`, authenticated by `GITHUB_BUILD_WORKER_TOKEN`.
+4. GitHub starts a run; the worker claims the job and processes it.
+
+The dispatch is content-free — no project id, owner id, or configuration is sent
+to GitHub. The worker discovers its work by claiming from Postgres.
+
+**If the dispatch fails, the queued build is left completely alone.** It is not
+deleted, not failed, not modified. The Builder says *"Your build is queued, but
+automatic processing could not be started"* and offers **Retry processing**,
+which re-dispatches for that same build id and never creates a second one.
+
 ### Timing, honestly
 
-A queued build is normally picked up within **0–15 minutes**. GitHub schedules
-are **best-effort and can be delayed** under platform load, so no exact time is
-promised anywhere in the product UI. The build itself takes about a second —
-essentially all of the wait is scheduling latency. Use **Run workflow** in the
-Actions tab for immediate processing.
+A run is requested the moment a build is queued, so the wait is GitHub's
+runner-startup time (typically well under a minute) plus `npm ci`, not a polling
+interval. Nothing in the product UI promises a start time, because a successful
+dispatch means GitHub *accepted* a run — not that a runner was available.
 
-The cadence is 15 minutes rather than GitHub's 5-minute minimum because on a
-private repository each run bills GitHub-hosted minutes and partial job minutes
-round up. Four runs an hour keeps a mostly-empty polling worker inexpensive;
-manual dispatch covers anyone who needs a build right away.
+Expect to see **cancelled** runs in the Actions tab and expect them to be fine: a
+concurrency group holds at most one running plus one pending run, so a burst of
+Build clicks collapses to the in-flight run plus one behind it. The cancelled
+entries never claimed a job.
 
-### This schedule is also the recovery mechanism
+### Stale-job recovery now rides on demand
 
 Reclaiming a build whose worker died, and force-failing one that has exhausted
-its three attempts, both happen inside `claim_next_build_job`. Nothing else
-performs that recovery, so the workflow must keep running even when the queue
-is normally empty. **On a public repository, GitHub disables scheduled
-workflows after 60 days without repository activity** — if that happens, builds
-*and* stale-job recovery both stop silently.
+its three attempts, both happen inside `claim_next_build_job`, and nothing else
+performs that recovery. With no schedule, that recovery only runs when the
+workflow is dispatched.
+
+POS Canvas therefore dispatches for a job in `building` as well as one in
+`queued` (`needsBuildProcessing` in `lib/buildJobs.ts`). A job stuck `building`
+after a dead worker also occupies its project's active-job index, so every later
+Build click resolves to that job — and each of those clicks is what brings a
+worker back to reclaim it.
+
+**Known limitation:** if a build gets stuck and *nobody ever requests another
+build*, nothing reclaims it on its own. The recovery paths are the owner's
+**Retry processing** button and, for an operator, **Run workflow** in the Actions
+tab. This is the accepted trade for removing ~96 empty runs a day.
+
+One thing this change removes for free: GitHub disables scheduled workflows on
+public repositories after 60 days of inactivity. With no schedule, there is
+nothing left to be disabled.
 
 ### Secrets
 
@@ -156,6 +194,10 @@ Add these in **Settings → Secrets and variables → Actions**:
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Your `service_role` key |
+
+These are still required and unchanged — they are what the *worker* uses. The
+GitHub token that *starts* the workflow is a Vercel variable, not a GitHub
+secret; see §3a.
 
 Both are stored as secrets. The URL is not sensitive, but keeping both in one
 place avoids a mixed secrets/variables setup for two values that are always
@@ -181,6 +223,66 @@ npm run worker:once -- --target android
 
 `npm run worker:run` is the same worker reading ambient environment only, which
 is what CI invokes.
+
+---
+
+## 3a. `GITHUB_BUILD_WORKER_TOKEN` (Vercel)
+
+The credential POS Canvas uses to start the workflow. It lives **only in Vercel**
+— never in this repository, never in `.env.local` committed anywhere, and never
+in a GitHub secret.
+
+### Creating the token
+
+**Settings → Developer settings → Personal access tokens → Fine-grained tokens**
+
+| Field | Value |
+|---|---|
+| Resource owner | `aasishjannuaj` |
+| Repository access | **Only select repositories** → `aasishjannuaj/pos-canvas` |
+| Repository permission → **Actions** | **Read and write** |
+| Repository permission → Metadata | Read-only (mandatory; GitHub enables it automatically) |
+| Every other permission | **No access** |
+| Expiration | Set one, and calendar the rotation |
+
+**Actions: Read and write is the only permission that needs granting.** It is
+what `workflow_dispatch` requires. In particular **Contents write is NOT
+required** — the workflow triggers a run, it does not push anything, and the
+workflow itself still declares `permissions: contents: read`. If a dispatch ever
+returns 403, the cause is a missing *Actions* write permission or a token whose
+repository access does not include this repository; it is never a Contents
+permission.
+
+A classic (non-fine-grained) PAT would work but needs the whole `repo` scope,
+which grants code write access to every repository the account can reach. Use a
+fine-grained token.
+
+### Adding it to Vercel
+
+**Project → Settings → Environment Variables**
+
+| Field | Value |
+|---|---|
+| Name | `GITHUB_BUILD_WORKER_TOKEN` |
+| Value | the fine-grained PAT |
+| Environments | Production (add Preview only if you want preview deploys to start real builds) |
+| Type | Sensitive / encrypted |
+
+Then **redeploy** — Vercel only picks up new environment variables on a new
+deployment.
+
+**Never prefix it with `NEXT_PUBLIC_`.** That prefix inlines a value into the
+browser bundle, which would publish the token to every visitor.
+`lib/githubBuildWorker.guards.test.ts` fails the test suite if the variable is
+named in any file other than `lib/githubBuildWorker.server.ts`, if any client
+component imports that module, or if the token is ever logged or returned.
+
+### If it is missing
+
+Build requests still work — the row is queued and nothing is lost — but every
+one of them reports *"automatic processing could not be started"*, and the Vercel
+function log carries `GITHUB_BUILD_WORKER_TOKEN is not configured`. Use **Run
+workflow** in the Actions tab to drain the queue until the variable is set.
 
 ---
 
@@ -230,8 +332,9 @@ see the command above.
 
 1. Apply migrations to the Supabase project (if not already applied).
 2. Create the Vercel project from GitHub; keep default install/build commands.
-3. Add the three environment variables **before** the first build — two of them
-   are inlined at build time.
+3. Add the four environment variables **before** the first build — two of them
+   are inlined at build time, and `GITHUB_BUILD_WORKER_TOKEN` is only picked up
+   on a deployment (§3a).
 4. Set the Supabase Site URL, Redirect URLs, anonymous sign-ins and the
    email-confirmation choice.
 5. Deploy, then smoke-test in the browser: sign up, create a project, edit the
@@ -239,8 +342,11 @@ see the command above.
    number and receipt, confirm inventory moved, and press Pay twice on an
    unchanged cart to confirm the retry returns the same order rather than
    selling twice.
-6. Request a build and confirm the scheduled worker moves it to `succeeded`
-   and the artifact downloads. Use **Run workflow** to avoid waiting.
+6. Request a build and confirm a **Build worker** run appears in the Actions tab
+   within seconds without anyone starting it, that the job reaches `succeeded`,
+   and that the artifact downloads. If the Builder instead says processing could
+   not be started, `GITHUB_BUILD_WORKER_TOKEN` is missing or under-permissioned
+   (§3a) — the build itself is still safely queued.
 7. Re-sync and rebuild the Android app against the hosted URL, and confirm the
    owner runtime loads over HTTPS in the shell.
 
@@ -255,8 +361,14 @@ see the command above.
   applies immediately with no redeploy and does not disturb existing sessions.
 - **Build worker misbehaving** — disable the workflow in the Actions tab. No
   deploy and no schema change is involved; queued builds simply wait, exactly
-  as they did before this workflow existed. Rotate the service-role key if the
-  workflow is removed for a security reason.
+  as they did before this workflow existed. Dispatches will then fail, so owners
+  see "automatic processing could not be started" instead of a silent stall.
+  Rotate the service-role key if the workflow is removed for a security reason.
+- **GitHub token compromised or expiring** — revoke it on GitHub, issue a new
+  fine-grained token (§3a), update the Vercel variable and redeploy. The token
+  can only start runs of one workflow in one repository; it cannot read code,
+  write contents, or reach Supabase. Builds queue normally throughout, and
+  **Run workflow** drains them in the meantime.
 - **Bad Android URL** — the previously installed APK still points at the old
   origin. Re-sync with the correct URL, rebuild, reinstall. No server-side change
   can fix an already-deployed APK.
