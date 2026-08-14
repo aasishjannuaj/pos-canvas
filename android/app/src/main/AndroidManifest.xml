@@ -1,8 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Feature 20 — allowBackup is FALSE.
+
+      A paired till keeps its device session in WebView localStorage, inside the
+      app's private data directory. With backup enabled, Android may copy that
+      directory to the owner's Google account and restore it onto DIFFERENT
+      hardware — which would place a working till credential on a device the
+      owner never paired. Disabling backup makes a factory-reset device
+      re-pair, which is the correct behaviour for point-of-sale hardware.
+
+      An in-place APK upgrade (same applicationId, same signing key) is
+      unaffected: it preserves the data directory without involving backup at
+      all, so a paired device stays paired across updates.
+    -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"

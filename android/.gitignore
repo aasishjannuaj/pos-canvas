@@ -53,9 +53,32 @@ captures/
 .idea/navEditor.xml
 
 # Keystore files
-# Uncomment the following lines if you do not want to check your keystore files in.
-#*.jks
-#*.keystore
+#
+# Feature 20 — these were the Capacitor/Android template's COMMENTED-OUT
+# defaults, which meant a keystore dropped anywhere under android/ was fully
+# committable. They are now active, and this was the first change of the
+# feature: no keystore may exist on this machine until after these lines are in
+# place and verified with `git check-ignore`.
+#
+# WHY THIS MATTERS MORE THAN AN ORDINARY IGNORE RULE: an Android app's identity
+# is its applicationId PLUS its signing certificate. A leaked release key lets
+# anyone publish an "update" that Android will install over a real customer's
+# till. There is no revocation, no rotation after distribution, and no recovery.
+# Git history is effectively permanent, so a single committed .jks would mean
+# abandoning the signing identity entirely.
+#
+# The real keystore lives OUTSIDE this repository (see DEPLOYMENT.md). These
+# patterns exist as a second line of defence for the case where someone
+# generates one into the project directory by habit.
+*.jks
+*.keystore
+*.p12
+*.pepk
+
+# Local signing configuration. Holds the keystore path and three passwords, and
+# is read conditionally by app/build.gradle. Never committed; an example with
+# placeholders only is documented in DEPLOYMENT.md.
+keystore.properties
 
 # External native build folder generated in Android Studio 2.2 and later
 .externalNativeBuild

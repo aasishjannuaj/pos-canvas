@@ -291,31 +291,48 @@ workflow** in the Actions tab to drain the queue until the variable is set.
 The Android app is a Capacitor WebView that loads the hosted site over the
 network. It bundles no POS runtime, no configuration and no credentials.
 
-**What it proves today:** that the **owner** website runs correctly inside a
-WebView on Android, signed in with the owner's own web session. Pointing it at
-`/device` (below) is what turns it into a paired till.
+Since Feature 20 it is a **production-signable app**: a single universal APK
+that any customer installs and then pairs to their own project. The APK is
+byte-identical for every customer — a till becomes a specific business's till
+through **pairing at runtime**, never through the binary.
+
+| | |
+|---|---|
+| applicationId | `com.poscanvas.app` |
+| Display name | POS Canvas |
+| Release URL | `https://pos-canvas.vercel.app/device` (pinned in tracked code) |
+| Distribution | Signed APK, hosted on GitHub Releases |
 
 ### The server URL is build-time, not runtime
 
-`POS_CANVAS_ANDROID_SERVER_URL` is read during `npm run android:sync` and
-written into `android/app/src/main/assets/capacitor.config.json`, which ships
-**inside the APK**. There is no settings screen and no runtime switching.
+The URL is written into `android/app/src/main/assets/capacitor.config.json`
+during `npm run android:sync`, and that file ships **inside the APK**. There is
+no settings screen and no runtime switching, so **a deployed APK can never be
+re-pointed from the server side** — changing the URL always requires a re-sync
+and a rebuild.
 
-To point the app at a hosted deployment:
+There are two modes, and the distinction is a safety boundary:
+
+**Development** — `POS_CANVAS_ANDROID_SERVER_URL` supplies the URL:
 
 ```bash
-POS_CANVAS_ANDROID_SERVER_URL=https://your-app.vercel.app npm run android:sync
+POS_CANVAS_ANDROID_SERVER_URL=http://10.0.2.2:3000 npm run android:sync
 ```
 
-Then rebuild and reinstall the APK from Android Studio (or
-`./gradlew assembleDebug` in `android/`).
+**Release** — `npm run android:release:sync` sets `POS_CANVAS_ANDROID_RELEASE=1`,
+which makes the resolver **ignore `POS_CANVAS_ANDROID_SERVER_URL` entirely** and
+use the constant `PRODUCTION_ANDROID_SERVER_URL` in
+`android-shell/serverUrl.mjs`. It also forces `webContentsDebuggingEnabled` off.
 
-**Changing the URL always requires both a re-sync and an APK rebuild.** A
-deployed APK cannot be re-pointed from the server side.
+That flag exists because of a specific hazard: without it, syncing for the
+emulator and then assembling a release would ship an APK pointed at
+`http://10.0.2.2:3000`. It would install, launch, and show the offline screen
+forever on a customer's till, unfixable from the server.
 
-An `https://` URL needs no native changes: cleartext is disabled by default and
-is narrowly allowed only for `10.0.2.2` (emulator) and `localhost` (via
-`adb reverse`) for local development.
+Cleartext is disabled by default. The `10.0.2.2` and `localhost` exceptions live
+inside `<debug-overrides>` in `network_security_config.xml`, which Android
+honours **only for a debuggable build** — so a release APK has no cleartext
+exception at all, by construction.
 
 ### The paired-device flow
 
@@ -324,9 +341,130 @@ the editor's **Devices** section; a device opens `/device`, enters the code, and
 runs the menu and prices from the build it was pinned to. Revoking a device from
 the Devices section stops it selling on its next request.
 
-The Android app currently still points at the site root, so it runs the **owner**
-site in a WebView. Re-syncing it to `/device` turns it into a dedicated till —
-see the command above.
+A release build always loads `/device` — the constant is asserted to end in that
+path, because the site root is the **owner** application and must never be what
+a customer's till loads.
+
+### 4a. Android release build
+
+Everything below is manual and run on the developer's Mac. Signing secrets are
+never placed in CI for the MVP.
+
+**One-time setup — creating the keystore.**
+
+The keystore is **not** in this repository and must never be. Create it once,
+outside the repo:
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+mkdir -p ~/pos-canvas-signing
+"$JAVA_HOME/bin/keytool" -genkeypair -v \
+  -keystore ~/pos-canvas-signing/pos-canvas-release.jks \
+  -alias <your-alias> \
+  -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Then create `android/keystore.properties` (gitignored — verify with
+`git check-ignore android/keystore.properties`). **Placeholders only below; put
+your real values in the file, never in the repo, a commit, a screenshot or a
+chat:**
+
+```properties
+storeFile=/absolute/path/to/pos-canvas-release.jks
+storePassword=<secret>
+keyAlias=<secret>
+keyPassword=<secret>
+```
+
+> **The keystore is irreplaceable.** An Android app is identified by its
+> applicationId **plus** its signing certificate. Lose the key and you can never
+> update the app: every customer must uninstall (losing their pairing) and
+> install a differently-identified app. There is no reset, no appeal, and Google
+> cannot help. Back it up **before** distributing anything:
+>
+> 1. Primary copy outside the repo (above).
+> 2. Encrypted cloud — password manager file attachment, plus a secure note with
+>    the store password, key password and alias.
+> 3. Offline — encrypted USB or a printed copy of the credentials.
+> 4. Record the SHA-256 certificate fingerprint (`keytool -list -v`) so a
+>    recovered keystore can be proven correct.
+> 5. Verify the backup actually restores before trusting it.
+
+**Building a release.**
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+
+npm ci
+npm run android:release:sync      # pins the production URL, disables WebView debugging
+
+cd android
+./gradlew clean assembleRelease
+```
+
+Output: `android/app/build/outputs/apk/release/app-release.apk`
+
+No `npm run build` is needed — the runtime is hosted on Vercel and the APK
+bundles no web assets beyond the offline page. **Deploy the web app first**: the
+shell is useless against a stale deployment.
+
+Without `android/keystore.properties`, `assembleRelease` fails with an explicit
+message rather than producing an unsigned or debug-signed APK.
+
+**Verifying the artifact.**
+
+```bash
+BT="$HOME/Library/Android/sdk/build-tools/36.0.0"
+APK=android/app/build/outputs/apk/release/app-release.apk
+
+"$BT/apksigner" verify --verbose --print-certs "$APK"   # signed; record the SHA-256 fingerprint
+"$BT/aapt2" dump badging "$APK" | head -5               # package, versionCode, versionName
+"$BT/zipalign" -c -v 4 "$APK"                           # alignment
+unzip -p "$APK" assets/capacitor.config.json            # URL + webContentsDebuggingEnabled
+shasum -a 256 "$APK"                                    # checksum for release metadata
+```
+
+Expect: package `com.poscanvas.app`; the URL exactly
+`https://pos-canvas.vercel.app/device`; `webContentsDebuggingEnabled: false`;
+`INTERNET` as the only permission.
+
+**Versioning.** The canonical version lives in `android/app/build.gradle`, not
+`package.json`. `versionCode` must **strictly increase** on every APK that
+leaves the machine — Android refuses to install a lower code over a higher one.
+`versionName` is the user-facing label.
+
+| Release | versionName | versionCode |
+|---|---|---|
+| First | `1.0.0` | 1 |
+| Patch | `1.0.1` | 2 |
+| Minor | `1.1.0` | 3 |
+
+**Updates.** An in-place upgrade requires the **same applicationId** and the
+**same signing key**, plus a higher `versionCode`. Install with
+`adb install -r app-release.apk`. The device's paired session lives in WebView
+`localStorage` inside the app's private data directory, which an in-place
+upgrade preserves — so a paired till stays paired. Changing either the
+applicationId or the key breaks this permanently.
+
+### 4b. Distribution
+
+The APK is hosted on **GitHub Releases** — versioned binaries, permanent URLs,
+no repo bloat, and no coupling to Vercel deploys. It contains no secret.
+
+> **The APK is not a build artifact.** The `json_config` files produced by the
+> build worker are **per-project** configuration snapshots. The APK is
+> **universal**: one binary for every customer, containing no project id, no
+> configuration and no branding. Do not conflate the two.
+
+Owner flow: sign in → download the universal APK → Android warns about
+installing from an unknown source → install → open → pair with a code from the
+editor's **Devices** section.
+
+`lib/androidRelease.ts` holds the release metadata contract (`versionName`,
+`versionCode`, `downloadUrl`, `checksum`, `fileSizeBytes`, `releasedAt`).
+`CURRENT_ANDROID_RELEASE` is `null` until a real signed APK exists; fill it in by
+hand, in a normal reviewable commit, once the binary is built, verified and
+uploaded. Creating the GitHub Release is manual — not automated in this feature.
 
 ## 5. Deployment order
 

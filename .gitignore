@@ -55,3 +55,20 @@ next-env.d.ts
 # local.properties is re-listed here because it contains a machine-specific
 # absolute SDK path.
 android/local.properties
+
+# Feature 20 — Android release signing material, ignored REPO-WIDE.
+#
+# android/.gitignore already covers these for the native project. They are
+# repeated here without a path prefix so a keystore generated anywhere else —
+# the repo root, a scratch folder, a stray `keytool` invocation from the wrong
+# working directory — is caught too. A signing key is the one secret in this
+# project that cannot be rotated after customers have installed the app, so the
+# protection is deliberately broader than the place it is expected to live.
+#
+# The real keystore is stored OUTSIDE this repository entirely; see
+# DEPLOYMENT.md. These rules are a backstop, not the storage plan.
+*.jks
+*.keystore
+*.p12
+*.pepk
+keystore.properties

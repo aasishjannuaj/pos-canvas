@@ -1,14 +1,69 @@
 apply plugin: 'com.android.application'
 
+// Feature 20 — release signing, loaded from an UNTRACKED local file.
+//
+// android/keystore.properties holds the keystore path and three passwords. It
+// is gitignored (see android/.gitignore), and the .jks it points at lives
+// outside this repository entirely. Nothing in this file, or in any tracked
+// file, contains a credential, an alias, or a machine-specific keystore path.
+//
+// Loaded CONDITIONALLY on purpose: a fresh clone, a CI checkout, and any
+// machine without signing material must still be able to run debug builds and
+// tests. Only the release task requires it, and it fails loudly rather than
+// silently producing an unsigned or debug-signed APK — see the release
+// buildType below for why that distinction matters.
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+def hasReleaseSigning = keystorePropertiesFile.exists()
+
+if (hasReleaseSigning) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+
+    // A partially filled file is worse than a missing one: it would produce a
+    // confusing Gradle error deep in the signing task. Check up front.
+    ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { key ->
+        if (!keystoreProperties.containsKey(key) || !keystoreProperties.getProperty(key)?.trim()) {
+            throw new GradleException(
+                "android/keystore.properties is missing a value for '${key}'. " +
+                "See DEPLOYMENT.md for the expected keys."
+            )
+        }
+    }
+}
+
 android {
-    namespace = "com.poscanvas.dev"
+    namespace = "com.poscanvas.app"
     compileSdk = rootProject.ext.compileSdkVersion
+
+    signingConfigs {
+        // Declared only when the local file exists. Referencing a signingConfig
+        // that was never created is a configuration-time failure, which is why
+        // the release buildType below also guards on hasReleaseSigning.
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
     defaultConfig {
-        applicationId "com.poscanvas.dev"
+        applicationId "com.poscanvas.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
+
+        // Feature 20 — the canonical Android version lives HERE, deliberately
+        // not derived from package.json: the web app deploys continuously while
+        // the APK ships rarely, and coupling them would force meaningless
+        // version churn on every web release.
+        //
+        // versionCode MUST strictly increase for every APK that leaves this
+        // machine — Android refuses to install a lower code over a higher one.
+        // versionName is the user-facing string.
         versionCode 1
-        versionName "1.0"
+        versionName "1.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -18,11 +73,70 @@ android {
     }
     buildTypes {
         release {
+            // Feature 20 — reliability over optimization, deliberately.
+            //
+            // R8/ProGuard on a Capacitor WebView shell risks stripping bridge
+            // classes that are reached reflectively, and the APK is a few MB
+            // either way because no web runtime is bundled. There is no
+            // meaningful upside and a real breakage risk, so both stay off.
             minifyEnabled false
+            shrinkResources false
+
+            // AGP's default for release, stated explicitly so a guard can
+            // assert it and so a future edit cannot flip it silently.
+            //
+            // Note that the release build's HTTPS-only posture does NOT depend
+            // on this flag: the cleartext exceptions live in
+            // src/debug/res/xml/network_security_config.xml, a debug build-type
+            // resource override that is simply never packaged into a release.
+            debuggable false
+
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+
+            // Signed only when android/keystore.properties is present.
+            //
+            // WHY NOT FALL BACK TO THE DEBUG KEY: AGP's historical default was
+            // to sign release with the debug keystore, which produces an APK
+            // that installs happily and is signed by a key every Android
+            // developer on earth already has. Shipping that would be worse than
+            // shipping nothing. Without local signing material this build type
+            // is simply unsigned, and the check task below turns any attempt to
+            // assemble it into an explicit, explained failure.
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
+
+// Feature 20 — fail the RELEASE task loudly when signing material is absent.
+//
+// Registered as a task action rather than a configuration-time check so that
+// `assembleDebug`, `test`, and a bare `./gradlew tasks` all keep working on a
+// machine with no keystore. Only someone actually asking for a release build is
+// stopped, and they are told exactly what is missing.
+//
+// packageRelease is matched as well as assembleRelease, deliberately: package
+// runs FIRST and writes app-release-unsigned.apk to the outputs directory
+// before assemble's own action would fire. Guarding only assemble still failed
+// the build, but left an unsigned artifact on disk with a plausible-looking
+// name. Catching the package task means no release APK is ever written without
+// signing material present.
+tasks.matching { it.name ==~ /^(assemble|bundle|package)Release.*/ }
+    .configureEach { task ->
+        task.doFirst {
+            if (!hasReleaseSigning) {
+                throw new GradleException(
+                    "Release signing is not configured.\n\n" +
+                    "android/keystore.properties was not found, so this build would " +
+                    "produce an UNSIGNED APK that no device will install.\n\n" +
+                    "Create it (it is gitignored) with storeFile, storePassword, " +
+                    "keyAlias and keyPassword pointing at a keystore stored OUTSIDE " +
+                    "this repository. See DEPLOYMENT.md, section 'Android release build'."
+                )
+            }
+        }
+    }
 
 repositories {
     flatDir{

@@ -21,13 +21,19 @@ import { readAndroidServerUrl } from "./serverUrl.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wwwDir = join(here, "www");
+// Feature 20 — the DEBUG config, not src/main.
+//
+// Cleartext exceptions moved to the debug build type's own resource override so
+// they cannot reach a release APK (src/main's copy is now HTTPS-only). This
+// check only ever concerns an http:// dev URL, which by definition is a debug
+// build, so the debug config is the correct thing to validate against.
 const networkSecurityConfigPath = join(
   here,
   "..",
   "android",
   "app",
   "src",
-  "main",
+  "debug",
   "res",
   "xml",
   "network_security_config.xml"
