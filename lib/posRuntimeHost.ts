@@ -66,6 +66,22 @@ export type PosRuntimeHomeLink = {
 };
 
 /**
+ * Feature 19 — the origin a stored logo path is resolved against.
+ *
+ * INJECTED for the same reason submitSale and refreshStock are: the engine must
+ * stay unaware of Supabase. Reading NEXT_PUBLIC_SUPABASE_URL inside PosRuntime
+ * would put the word "supabase" back into a component whose whole contract is
+ * that it does not know what is behind its host — a property lib/
+ * device.guards.test.ts asserts directly.
+ *
+ * `null` disables logo rendering entirely; the business name still shows.
+ * A logo is never fetched from anywhere but this origin — createLogoPublicUrl
+ * rejects a non-http(s) value and any path that is not the exact
+ * `{uuid}/{sha256}.{ext}` shape.
+ */
+export type PosRuntimeLogoBaseUrl = string | null;
+
+/**
  * Called when a sale fails in a way that may mean this device is no longer
  * authorized. The host re-resolves authoritative state; the engine never
  * decides this for itself.

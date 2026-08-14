@@ -23,11 +23,13 @@ import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
 import { SALE_UNCONFIRMED_MESSAGE, planSaleSubmission } from "@/lib/saleSubmission";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import PosHeader from "@/components/runtime/PosHeader";
 import ProductBrowser from "@/components/editor/pos-layouts";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
 import type {
   PosRuntimeCompleteSale,
   PosRuntimeHomeLink,
+  PosRuntimeLogoBaseUrl,
   PosRuntimeOnSaleRejected,
   PosRuntimeRefreshStock,
 } from "@/lib/posRuntimeHost";
@@ -57,6 +59,10 @@ type PosRuntimeProps = {
   // null = render no exit link (a till has nowhere to go back to).
   homeLink: PosRuntimeHomeLink | null;
 
+  // Feature 19 — the origin a stored logo path resolves against, supplied by
+  // the host so this component never names Supabase. null = no logo rendering.
+  logoBaseUrl: PosRuntimeLogoBaseUrl;
+
   // Optional: lets a host re-check its own authorization after a rejected sale.
   onSaleRejected?: PosRuntimeOnSaleRejected;
 };
@@ -75,6 +81,7 @@ export default function PosRuntime({
   submitSale,
   refreshStock,
   homeLink,
+  logoBaseUrl,
   onSaleRejected,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
@@ -370,30 +377,32 @@ export default function PosRuntime({
 
   return (
     <div className="flex h-screen flex-col bg-neutral-50">
-      <header
-        className="flex h-16 flex-none items-center justify-between px-6"
-        style={{ backgroundColor: config.branding.accentColor }}
-      >
-        <span className="text-sm font-semibold tracking-tight text-white">
-          {config.businessProfile.businessName.trim()}
-        </span>
-
-        {/* Feature 16.4A — a paired device passes null: a till has nowhere to
-            go back to, and must not offer a route into the owner app. */}
-        {homeLink !== null && (
-          <Link
-            href={homeLink.href}
-            onClick={(event) => {
-              if (cart.length > 0 && !window.confirm(LEAVE_CONFIRM_MESSAGE)) {
-                event.preventDefault();
-              }
-            }}
-            className="text-sm font-medium text-white/90 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-          >
-            {homeLink.label}
-          </Link>
-        )}
-      </header>
+      {/* Feature 19 — the shared header, identical here and in the Builder's
+          preview. Serves the owner runtime and the paired device alike, since
+          both render this component. */}
+      <PosHeader
+        businessProfile={config.businessProfile}
+        branding={config.branding}
+        logoBaseUrl={logoBaseUrl ?? undefined}
+        size="full"
+        trailing={
+          /* Feature 16.4A — a paired device passes null: a till has nowhere to
+             go back to, and must not offer a route into the owner app. */
+          homeLink !== null ? (
+            <Link
+              href={homeLink.href}
+              onClick={(event) => {
+                if (cart.length > 0 && !window.confirm(LEAVE_CONFIRM_MESSAGE)) {
+                  event.preventDefault();
+                }
+              }}
+              className="flex-none text-sm font-medium text-white/90 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              {homeLink.label}
+            </Link>
+          ) : undefined
+        }
+      />
 
       {/* Feature 16.2 Android fix — this row was unconditionally
           `flex-row` with a fixed 24rem (384px) cart beside a flex-1 product

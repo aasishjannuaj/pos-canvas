@@ -191,6 +191,30 @@ function toRuntimeSafeTax(tax: TaxSettings): TaxSettings {
   };
 }
 
+// Feature 19 — branding for the snapshot a build freezes and a paired device
+// pins.
+//
+// The logo key is carried through ONLY when normalizeProjectConfig produced one
+// (it has already validated the path, mime, checksum and dimensions), and is
+// OMITTED entirely otherwise. Emitting `logo: null` instead would change the
+// canonical string — and therefore the config hash — of every existing
+// no-logo project, purely because the type gained a field.
+//
+// A PATH is stored, never a URL: the URL embeds the Supabase project ref, which
+// differs per environment, and a signed URL would have expired long before a
+// device reads the snapshot months later. The URL is composed at render time.
+function toRuntimeSafeBranding(branding: BrandingSettings): BrandingSettings {
+  const runtimeSafe: BrandingSettings = {
+    accentColor: branding.accentColor.trim(),
+  };
+
+  if (branding.logo) {
+    runtimeSafe.logo = { ...branding.logo };
+  }
+
+  return runtimeSafe;
+}
+
 // Feature 14.1 — trims every business-facing display string for the
 // generated output. Values themselves are already migrated/defaulted by
 // normalizeProjectConfig (via normalizeBusinessProfile) before this runs;
@@ -264,7 +288,7 @@ export function createGeneratedPosConfig(
       layout,
     },
     businessProfile: toRuntimeSafeBusinessProfile(normalizedConfig.businessProfile),
-    branding: { accentColor: normalizedConfig.branding.accentColor.trim() },
+    branding: toRuntimeSafeBranding(normalizedConfig.branding),
     menuItems: normalizedConfig.menuItems.map(toRuntimeSafeMenuItem),
     tax: toRuntimeSafeTax(normalizedConfig.tax),
     receipt: toRuntimeSafeReceipt(normalizedConfig.receipt),

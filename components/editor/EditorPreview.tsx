@@ -17,6 +17,7 @@ import type { PosLayout } from "@/lib/posLayout";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
 import Receipt from "./Receipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import PosHeader from "@/components/runtime/PosHeader";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 
 // Static preview-only figures used only for the unchanged edit-mode mock below.
@@ -138,15 +139,16 @@ export default function EditorPreview({
       )}
 
       <div className="relative flex aspect-[9/16] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm">
-        {/* POS Header */}
-        <div
-          className="flex-none px-4 py-3"
-          style={{ backgroundColor: branding.accentColor }}
-        >
-          <span className="text-sm font-semibold tracking-tight text-white">
-            {businessProfile.businessName.trim()}
-          </span>
-        </div>
+        {/* POS Header. Feature 19 — the same component the real runtime uses,
+            in its compact variant for the phone mockup, so a logo can never
+            render one way here and another way on a till. Reads the live draft
+            branding, so an upload appears in the preview immediately. */}
+        <PosHeader
+          businessProfile={businessProfile}
+          branding={branding}
+          logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL}
+          size="compact"
+        />
 
         {/* Feature 12.3 — product browser, selected via layout inside the
             stable ProductBrowser component. Owns category tabs + item grid

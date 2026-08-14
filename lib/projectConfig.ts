@@ -1,5 +1,11 @@
 import { normalizeModifierGroups } from "@/lib/modifiers";
 import type { ModifierGroup } from "@/lib/modifiers";
+// Feature 19 — the logo contract lives in lib/logoUpload.ts for the same reason
+// ModifierGroup lives in lib/modifiers.ts: normalizing a stored logo needs that
+// module's path/mime/dimension validators, so declaring the type here too would
+// make the two modules import each other.
+import { cloneBrandingLogo, normalizeBrandingLogo } from "@/lib/logoUpload";
+import type { BrandingLogo } from "@/lib/logoUpload";
 
 // Feature 12.1 — the neutral home for ProjectConfig and its nested types,
 // plus the single shared default/starter configuration value. This module
@@ -68,7 +74,16 @@ export type ReceiptSettings = {
 // BusinessProfile (identity, not appearance) below.
 export type BrandingSettings = {
   accentColor: string;
+  // Feature 19 — optional and additive, exactly like MenuItem.modifierGroups in
+  // Feature 18.1. A project saved before logos existed has no such key, and
+  // normalizeBranding resolves that to "absent" rather than to null: the key is
+  // OMITTED entirely when there is no logo, so an existing project's canonical
+  // generated-config string (and therefore its config hash) is byte-identical
+  // to what it was before this type gained a field.
+  logo?: BrandingLogo;
 };
+
+export type { BrandingLogo };
 
 // Feature 13.1 — the customer-facing business identity/contact record,
 // separate from the project's own internal dashboard name (`projects.name`,
@@ -227,7 +242,17 @@ export const defaultProjectConfig: ProjectConfig = {
 export function cloneProjectConfig(config: ProjectConfig): ProjectConfig {
   return {
     menuItems: config.menuItems.map((item) => ({ ...item })),
-    branding: { ...config.branding },
+    // Feature 19 — the spread copies branding itself, but `logo` is a nested
+    // object that would otherwise stay shared by reference between two editor
+    // sessions, which is exactly what this function exists to prevent. The key
+    // is only re-added when present, so a no-logo config still clones to a
+    // config with no `logo` key at all.
+    branding: {
+      ...config.branding,
+      ...(config.branding.logo
+        ? { logo: cloneBrandingLogo(config.branding.logo) }
+        : {}),
+    },
     businessProfile: { ...config.businessProfile },
     tax: { ...config.tax },
     receipt: { ...config.receipt },
@@ -349,9 +374,24 @@ export function normalizeReceiptSettings(receipt: ReceiptSettings): ReceiptSetti
 // saved project's raw branding JSON must never be carried forward once
 // BrandingSettings no longer declares it.
 export function normalizeBranding(branding: BrandingSettings): BrandingSettings {
-  return {
+  const normalized: BrandingSettings = {
     accentColor: branding.accentColor,
   };
+
+  // Feature 19 — the key is ADDED only when a usable logo survives validation,
+  // never set to null or undefined. Two consequences, both deliberate:
+  //   - a project that never had a logo serializes exactly as it did before
+  //     this feature, so no existing config hash shifts;
+  //   - a malformed or partially-written logo is dropped rather than repaired,
+  //     because a half-understood reference would render a broken image on a
+  //     customer-facing till and there is nothing to recover it from.
+  const logo = normalizeBrandingLogo(branding.logo);
+
+  if (logo !== null) {
+    normalized.logo = logo;
+  }
+
+  return normalized;
 }
 
 // Feature 13.1 — the one place in the app allowed to read a project's

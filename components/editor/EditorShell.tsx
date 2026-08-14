@@ -86,6 +86,9 @@ import type {
   BuildTarget,
 } from "@/lib/buildJobs";
 import DeviceManagementPanel from "@/components/devices/DeviceManagementPanel";
+import { uploadProjectLogoAction } from "@/lib/logoUpload.actions";
+import type { UploadLogoActionResult } from "@/lib/logoUpload.actions";
+import type { LogoUploadStatus } from "./BrandingLogoField";
 
 // Feature 12.1 — ProjectConfig and its nested types/defaults now live in the
 // neutral lib/projectConfig.ts (so the template registry in data/templates.ts
@@ -274,6 +277,18 @@ export default function EditorShell({
   // reused to mean "the sale failed" in that case.
   const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
   const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
+
+  // Feature 19 — logo upload lifecycle. Deliberately its own pair of fields,
+  // following exportStatus/buildRequestStatus rather than reusing saveStatus:
+  // an upload is a separate operation from a save, and a failed upload must
+  // never read as "your project failed to save".
+  //
+  // The governing rule this state exists to make visible: branding.logo is
+  // reassigned ONLY on a confirmed successful upload, so every failure path
+  // leaves the existing logo exactly as it was.
+  const [logoUploadStatus, setLogoUploadStatus] =
+    useState<LogoUploadStatus>("idle");
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
 
   // Feature 9.6 — restock status for the current restock attempt.
   const [restockStatus, setRestockStatus] = useState<RestockStatus>("idle");
@@ -641,6 +656,73 @@ export default function EditorShell({
       ...prev,
       branding: { ...prev.branding, ...changes },
     }));
+  }
+
+  // Feature 19 — the logo handlers.
+  //
+  // ORDER IS THE WHOLE POINT of handleLogoUpload: the server action must
+  // succeed first, and only its returned, server-computed BrandingLogo is
+  // written into the draft. Nothing optimistic is applied, so an upload that
+  // fails for any reason — bad format, oversized, corrupt, offline, revoked
+  // session — leaves the existing logo untouched and still rendering.
+  async function handleLogoUpload(file: File) {
+    if (logoUploadStatus === "uploading") {
+      return;
+    }
+
+    // A logo object is namespaced by project id, so there is nowhere to put one
+    // for a project that has no database row yet.
+    if (projectId === null) {
+      setLogoUploadStatus("error");
+      setLogoUploadError("Save this project before uploading a logo.");
+      return;
+    }
+
+    setLogoUploadStatus("uploading");
+    setLogoUploadError(null);
+
+    let result: UploadLogoActionResult;
+
+    try {
+      result = await uploadProjectLogoAction({ projectId, file });
+    } catch {
+      // A transport-level failure (offline, aborted). The action itself returns
+      // a controlled result for every error it can describe.
+      setLogoUploadStatus("error");
+      setLogoUploadError(
+        "The logo could not be uploaded. Check your connection and try again."
+      );
+      return;
+    }
+
+    if (!result.ok) {
+      setLogoUploadStatus("error");
+      setLogoUploadError(result.message);
+      return;
+    }
+
+    // Confirmed. Only now does the draft change — and through the same
+    // handleBrandingChange every other Branding control uses, so the preview
+    // updates immediately and the project is marked dirty for Save.
+    handleBrandingChange({ logo: result.logo });
+    setLogoUploadStatus("idle");
+    setLogoUploadError(null);
+  }
+
+  // Clears the project's REFERENCE only. The stored object is never deleted:
+  // an older build snapshot may still point at it, and a device pinned to that
+  // build must keep rendering the logo it was built with. See
+  // supabase/migrations/20260813120000_project_logo_storage.sql.
+  function handleLogoRemove() {
+    handleBrandingChange({ logo: undefined });
+    setLogoUploadStatus("idle");
+    setLogoUploadError(null);
+  }
+
+  /** A client-side rejection, shown without a pointless round trip. */
+  function handleLogoReject(message: string) {
+    setLogoUploadStatus("error");
+    setLogoUploadError(message);
   }
 
   function handleBusinessProfileChange(changes: Partial<BusinessProfile>) {
@@ -1667,6 +1749,11 @@ export default function EditorShell({
           onDelete={handleDeleteItem}
           branding={projectConfig.branding}
           onBrandingChange={handleBrandingChange}
+          logoUploadStatus={logoUploadStatus}
+          logoUploadError={logoUploadError}
+          onLogoUpload={handleLogoUpload}
+          onLogoRemove={handleLogoRemove}
+          onLogoReject={handleLogoReject}
           businessProfile={projectConfig.businessProfile}
           onBusinessProfileChange={handleBusinessProfileChange}
           tax={projectConfig.tax}

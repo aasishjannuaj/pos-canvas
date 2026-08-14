@@ -55,6 +55,9 @@ export default function OwnerPosRuntime({
       submitSale={completeSale}
       refreshStock={refreshStock}
       homeLink={{ href: "/dashboard", label: "← Back to Dashboard" }}
+      // Feature 19 — supplied by the host, so the engine never names Supabase.
+      // Inlined at build time by Next; undefined simply disables logo rendering.
+      logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
     />
   );
 }

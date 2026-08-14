@@ -20,6 +20,8 @@ import type {
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
 import ModifierGroupsEditor from "./ModifierGroupsEditor";
+import BrandingLogoField from "./BrandingLogoField";
+import type { LogoUploadStatus } from "./BrandingLogoField";
 // Phase 5B — deliberately NOT normalizeModifierGroups. The authoring surface
 // must never import the persistence normalizer: it deletes incomplete groups,
 // which is correct at the save/build boundary and destructive at a render one.
@@ -50,6 +52,14 @@ type EditorPropertiesPanelProps = {
   onDelete: () => void;
   branding: ProjectConfig["branding"];
   onBrandingChange: (changes: Partial<ProjectConfig["branding"]>) => void;
+  // Feature 19 — logo upload lifecycle, owned by EditorShell beside the rest of
+  // the project state. Deliberately separate from saveStatus/saveError: an
+  // upload failure is not a save failure and must not read as one.
+  logoUploadStatus: LogoUploadStatus;
+  logoUploadError: string | null;
+  onLogoUpload: (file: File) => void;
+  onLogoRemove: () => void;
+  onLogoReject: (message: string) => void;
   businessProfile: ProjectConfig["businessProfile"];
   onBusinessProfileChange: (
     changes: Partial<ProjectConfig["businessProfile"]>
@@ -224,6 +234,11 @@ export default function EditorPropertiesPanel({
   onDelete,
   branding,
   onBrandingChange,
+  logoUploadStatus,
+  logoUploadError,
+  onLogoUpload,
+  onLogoRemove,
+  onLogoReject,
   businessProfile,
   onBusinessProfileChange,
   tax,
@@ -808,17 +823,21 @@ export default function EditorPropertiesPanel({
                 </div>
               </div>
 
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                  Logo
-                </label>
-                <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">
-                  <span className="text-2xl">🖼️</span>
-                  <p className="text-sm text-neutral-500">
-                    Logo upload coming soon
-                  </p>
-                </div>
-              </div>
+              {/* Feature 19 — replaces the "Logo upload coming soon"
+                  placeholder, in place. Routed through EditorShell exactly as
+                  every other Branding control is: the upload happens first,
+                  and only a confirmed server result reaches
+                  onBrandingChange. */}
+              <BrandingLogoField
+                logo={branding.logo}
+                logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL}
+                projectId={projectId}
+                status={logoUploadStatus}
+                error={logoUploadError}
+                onUpload={onLogoUpload}
+                onRemove={onLogoRemove}
+                onReject={onLogoReject}
+              />
             </div>
           )}
 

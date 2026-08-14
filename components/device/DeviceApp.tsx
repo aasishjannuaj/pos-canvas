@@ -252,6 +252,11 @@ export default function DeviceApp() {
           refreshStock={null}
           // A till has nowhere to go back to.
           homeLink={null}
+          // Feature 19 — the logo origin. A device reads its logo from the
+          // PINNED snapshot's path, so replacing the owner's logo later cannot
+          // change what this till displays. Public bucket: no signing, and no
+          // storage grant a device does not already have.
+          logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
           onSaleRejected={handleSaleRejected}
         />
       );
