@@ -7,7 +7,7 @@ import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
-import { completeSaleOrder } from "@/lib/orders";
+import { completeSaleOrderV3 } from "@/lib/orders";
 import { restockInventory, adjustInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
@@ -45,15 +45,33 @@ import {
   getGeneratedPosExportEligibility,
 } from "@/lib/generatedPosConfig";
 import { downloadJsonFile } from "@/lib/downloadJson";
-import { calculateCartSummary, canAddItemQuantity } from "@/lib/cart";
+import {
+  getModifierSaveBlockerMessage,
+  normalizeConfigModifiers,
+} from "@/lib/modifierAuthoring";
+import {
+  calculateCartSummary,
+  canAddItemQuantity,
+  createCartItem,
+  getItemQuantityInCart,
+} from "@/lib/cart";
 import type {
   CartItem,
+  CartModifierSelection,
   CartSummary,
   CheckoutStatus,
   CompletedOrder,
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
+import type { CompletedSaleReceipt } from "@/lib/completedSale";
+import { isSubmitBlocked } from "@/lib/saleRequest";
+import type { SaleRequestState } from "@/lib/saleRequest";
+import {
+  SALE_UNCONFIRMED_MESSAGE,
+  planSaleSubmission,
+  toCompletedOrder,
+} from "@/lib/saleSubmission";
 import {
   downloadBuildArtifact,
   requestBuildJob,
@@ -124,14 +142,32 @@ export type RestockStatus = "idle" | "saving" | "success" | "error";
 
 export type AdjustStatus = "idle" | "saving" | "success" | "error";
 
-// Feature 14.3 money safeguard — a Builder-preview-only sample tip amount.
-// Deliberately NOT part of lib/cart.ts and never reaches the runtime: it
-// exists solely so the Builder's own preview cart keeps showing the same
-// sample tip line it always has (previously hardcoded inside
-// calculateCartSummary itself as STATIC_TIP). components/runtime/
-// PosRuntime.tsx always passes a real tip amount (0 in this MVP, since no
-// tip-entry UI exists yet) and never references this constant.
-const BUILDER_PREVIEW_SAMPLE_TIP = 3;
+// Feature 18.2 Phase 5A — the Builder-preview sample tip is GONE, and this
+// comment is the record of why, because deleting a number is the sort of change
+// that gets quietly reinstated.
+//
+// Feature 14.3 introduced BUILDER_PREVIEW_SAMPLE_TIP = 3 so the preview cart
+// kept showing a tip line. At the time that was cosmetic-adjacent: the Builder's
+// checkout called complete_sale v1, which trusted every client amount anyway, so
+// the sample tip was one invented number among several.
+//
+// Phase 5A migrates this checkout to complete_sale_v3, which recomputes
+// subtotal, tax and totals from the authorized config and accepts exactly one
+// client-supplied money value: the tip (v3 allows an owner tip because a real
+// tip genuinely is a client input; it rejects any nonzero tip from a device).
+// Passing 3 through that door would mean the ONE remaining trusted amount on the
+// hardened path is a hardcoded sample — a phantom $3 of revenue on every preview
+// sale, persisted to orders.tip_amount and counted by the Dashboard and Sales
+// Report. It would also make the cart estimate disagree with the authoritative
+// receipt, which would now correctly show what was actually charged.
+//
+// So the interactive preview cart passes a real tip amount of 0, exactly as
+// components/runtime/PosRuntime.tsx has always done and for the same stated
+// reason: there is no tip-entry UI in this MVP, so no nonzero tip may be
+// fabricated. The Builder's EDIT-mode static mock is untouched — it keeps its
+// own STATIC_TIP in EditorPreview.tsx, which is a design mock that completes no
+// sale and persists nothing.
+const BUILDER_PREVIEW_TIP = 0;
 
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -212,6 +248,25 @@ export default function EditorShell({
   const [lastCompletedOrderId, setLastCompletedOrderId] = useState<
     string | null
   >(null);
+
+  // Feature 18.2 Phase 5A — the AUTHORITATIVE payload complete_sale_v3 returned
+  // for the sale just completed in this session, kept alongside (not instead of)
+  // completedOrders.
+  //
+  // Both are needed and neither is redundant: completedOrders is the Builder's
+  // number-typed history model, seeded server-side at page load and used by
+  // Recent Orders and every reporting panel, while this is the server's exact
+  // answer for one sale — fixed two-decimal strings, rendered directly. Whenever
+  // the receipt overlay is showing that sale, it renders THIS rather than the
+  // projection, so the figures on screen are the ones the server charged.
+  const [lastCompletedReceipt, setLastCompletedReceipt] =
+    useState<CompletedSaleReceipt | null>(null);
+
+  // One id per logical checkout attempt, reused across retries of an unchanged
+  // cart so a lost response replays the original receipt instead of ringing up a
+  // second sale. Identical in role to PosRuntime's own saleRequest state; both
+  // are resolved by the shared planSaleSubmission.
+  const [saleRequest, setSaleRequest] = useState<SaleRequestState | null>(null);
 
   // Feature 8.3/9.3 — persistence status for the current checkout attempt.
   // After a successful sale, saleSaveError may hold a non-blocking inventory
@@ -419,11 +474,30 @@ export default function EditorShell({
   const selectedItem =
     projectConfig.menuItems.find((item) => item.id === selectedItemId) ?? null;
 
+  // The tip is always BUILDER_PREVIEW_TIP (0) — see its declaration for why the
+  // former tipsEnabled-conditional sample amount cannot survive the move to
+  // complete_sale_v3. calculateCartSummary independently guards a non-finite or
+  // negative value, but this literal is what guarantees the preview cart's
+  // estimate matches the tip the server will actually record.
   const cartSummary = calculateCartSummary(
     cart,
     projectConfig.tax,
-    projectConfig.receipt.tipsEnabled ? BUILDER_PREVIEW_SAMPLE_TIP : 0
+    BUILDER_PREVIEW_TIP
   );
+
+  // Feature 18.2 Phase 5A — the receipt overlay shows the SERVER's payload
+  // whenever the order being opened is the one completed in this session, and
+  // falls back to the number-typed history model for anything older (those rows
+  // are server data too — lib/orders.server.ts mapped them from order_items —
+  // just without the fixed-decimal strings a live v3 response carries).
+  //
+  // Derived rather than stored: openReceipt keeps setting selectedReceiptId
+  // alone, so there is no second piece of state that could name a different
+  // order than the overlay is actually showing.
+  const authoritativeReceipt =
+    lastCompletedReceipt !== null && lastCompletedReceipt.orderId === selectedReceiptId
+      ? lastCompletedReceipt
+      : null;
 
   // Feature 13.2 — the single call every persisted-data mutation makes.
   // Marks the project dirty and clears any stale error from a previous save
@@ -593,10 +667,13 @@ export default function EditorShell({
     }));
   }
 
-  function addToCart(menuItem: MenuItem) {
+  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []) {
     setCart((prev) => {
-      const existing = prev.find((cartItem) => cartItem.itemId === menuItem.id);
-      const currentQuantity = existing?.quantity ?? 0;
+      // Feature 18.2 — same line-identity rule as the runtime: a product with
+      // two different selections is two lines, while stock is counted per
+      // product across all of them.
+      const line = createCartItem(menuItem, selections);
+      const existing = prev.find((cartItem) => cartItem.lineKey === line.lineKey);
 
       // Feature 14.3 — shared with the runtime via lib/cart.ts, so both
       // ever only enforce one stock-limit rule. Equivalent to the previous
@@ -605,7 +682,7 @@ export default function EditorShell({
       if (
         !canAddItemQuantity({
           item: menuItem,
-          currentQuantity,
+          currentQuantity: getItemQuantityInCart(prev, menuItem.id),
           addQuantity: 1,
         })
       ) {
@@ -614,32 +691,24 @@ export default function EditorShell({
 
       if (existing) {
         return prev.map((cartItem) =>
-          cartItem.itemId === menuItem.id
+          cartItem.lineKey === line.lineKey
             ? { ...cartItem, quantity: cartItem.quantity + 1 }
             : cartItem
         );
       }
 
-      return [
-        ...prev,
-        {
-          itemId: menuItem.id,
-          name: menuItem.name,
-          price: menuItem.price,
-          quantity: 1,
-        },
-      ];
+      return [...prev, line];
     });
   }
 
-  function increaseQuantity(itemId: string) {
+  function increaseQuantity(lineKey: string) {
     setCart((prev) =>
       prev.map((cartItem) => {
-        if (cartItem.itemId !== itemId) {
+        if (cartItem.lineKey !== lineKey) {
           return cartItem;
         }
 
-        const menuItem = projectConfig.menuItems.find((item) => item.id === itemId);
+        const menuItem = projectConfig.menuItems.find((item) => item.id === cartItem.itemId);
 
         // Feature 14.3 — preserves the original fallthrough behavior for an
         // orphaned cart line with no matching menu item (always allowed to
@@ -649,7 +718,7 @@ export default function EditorShell({
           menuItem &&
           !canAddItemQuantity({
             item: menuItem,
-            currentQuantity: cartItem.quantity,
+            currentQuantity: getItemQuantityInCart(prev, cartItem.itemId),
             addQuantity: 1,
           })
         ) {
@@ -661,11 +730,11 @@ export default function EditorShell({
     );
   }
 
-  function decreaseQuantity(itemId: string) {
+  function decreaseQuantity(lineKey: string) {
     setCart((prev) =>
       prev
         .map((cartItem) =>
-          cartItem.itemId === itemId
+          cartItem.lineKey === lineKey
             ? { ...cartItem, quantity: cartItem.quantity - 1 }
             : cartItem
         )
@@ -673,8 +742,8 @@ export default function EditorShell({
     );
   }
 
-  function removeFromCart(itemId: string) {
-    setCart((prev) => prev.filter((cartItem) => cartItem.itemId !== itemId));
+  function removeFromCart(lineKey: string) {
+    setCart((prev) => prev.filter((cartItem) => cartItem.lineKey !== lineKey));
   }
 
   function clearCart() {
@@ -700,9 +769,47 @@ export default function EditorShell({
     setSelectedPaymentMethod(method);
   }
 
+  // Feature 18.2 Phase 5A — the Builder Preview checkout, migrated from
+  // complete_sale (v1) to complete_sale_v3.
+  //
+  // WHAT THIS PREVIEW ACTUALLY IS, since the name misleads: it completes a REAL
+  // sale. It always has. Since Feature 8.3/9.2 it has written an orders row and
+  // order_items rows, deducted inventory, recorded inventory_transactions, and
+  // fed the Dashboard, Sales Report, Product Performance and Inventory Summary.
+  // "Preview" describes the Builder surface it is driven from, not the
+  // persistence. That is why this path is migrated rather than made simulated:
+  // making it non-persistent would delete shipped, load-bearing behavior, and
+  // would leave the same money defects standing until someone reinstated it.
+  //
+  // WHAT v1 GOT WRONG, and what v3 fixes here:
+  //   - v1 trusted the client's subtotal, tax, tip, total, item names and unit
+  //     prices. v3 accepts identifiers and quantities only and recomputes every
+  //     amount from the authorized config.
+  //   - Phase 3 made this cart modifier-bearing, so a preview line could carry
+  //     modifier-adjusted money. v1 has no modifiers concept: it would have
+  //     persisted the client's adjusted price with NO record of what was chosen,
+  //     leaving order_items.modifiers empty. v3 revalidates the selection and
+  //     writes the historical snapshot.
+  //   - v1 took a client-generated order number derived from
+  //     completedOrders.length, which two open tabs could collide on. v3
+  //     allocates the number server-side.
+  //   - v1 had no sale_request_id, so a lost response could ring up a second
+  //     sale. v3 replays the original receipt for a repeated request id.
+  //
+  // The stock re-check, request-id decision and payload build are the SHARED
+  // ones from lib/saleSubmission.ts — the same functions PosRuntime calls, not a
+  // copy — so the Builder and the runtime cannot drift apart about what leaves
+  // the browser.
   async function completeSale() {
     // Preserve the existing guards — unchanged from before Feature 8.3.
     if (cart.length === 0 || !selectedPaymentMethod || checkoutStatus === "success") {
+      return;
+    }
+
+    // Double-submit guard, matching PosRuntime: a second click while a request
+    // is in flight must never start a second attempt. The Builder previously
+    // lacked this, relying on the disabled button alone.
+    if (isSubmitBlocked(saleSaveStatus)) {
       return;
     }
 
@@ -718,60 +825,74 @@ export default function EditorShell({
       return;
     }
 
-    const orderNumber = `${projectConfig.receipt.orderPrefix}${1001 + completedOrders.length}`;
-
-    const { orderId, error } = await completeSaleOrder({
+    const plan = planSaleSubmission({
       projectId,
-      orderNumber,
       paymentMethod: selectedPaymentMethod,
-      subtotal: cartSummary.subtotal,
-      taxAmount: cartSummary.taxAmount,
       tipAmount: cartSummary.tip,
-      total: cartSummary.total,
-      items: cart,
+      cart,
+      menuItems: projectConfig.menuItems,
+      current: saleRequest,
     });
 
-    if (error || !orderId) {
-      // RPC failed — the sale did not happen. Nothing local changes, so the
-      // cashier can safely retry: cart, checkout, and inventory are untouched.
+    if (!plan.ok) {
       setSaleSaveStatus("error");
-      setSaleSaveError(error ?? "Something went wrong while completing the sale.");
+      setSaleSaveError(plan.error);
       return;
     }
 
-    // RPC succeeded — the sale is now real. complete_sale (9.2) already
-    // validated and deducted inventory and recorded inventory_transactions
-    // atomically; the client does none of that math anymore.
-    const order: CompletedOrder = {
-      id: orderId,
-      orderNumber,
-      items: [...cart],
-      subtotal: cartSummary.subtotal,
-      taxAmount: cartSummary.taxAmount,
-      tip: cartSummary.tip,
-      total: cartSummary.total,
+    setSaleRequest(plan.request);
+
+    const { receipt, error } = await completeSaleOrderV3({
+      projectId,
       paymentMethod: selectedPaymentMethod,
-      createdAt: new Date().toISOString(),
-    };
+      tipAmount: cartSummary.tip,
+      // Identifiers and quantities only — there is nowhere in this payload for
+      // a client name, price, tax or total to sit.
+      items: plan.items,
+      saleRequestId: plan.request.id,
+    });
+
+    if (error || !receipt) {
+      // The cart and the request id are both preserved, so pressing Complete
+      // Sale again retries the SAME attempt. A transport failure may already
+      // have committed server-side, so the message must not claim the sale
+      // failed — the retry returns the original receipt if it did.
+      setSaleSaveStatus("error");
+      setSaleSaveError(error ?? SALE_UNCONFIRMED_MESSAGE);
+      return;
+    }
+
+    // The sale is real and the server's payload is the record of it.
+    // complete_sale_v3 has already revalidated the modifier selection, priced
+    // every line from the authorized config, deducted inventory and written
+    // inventory_transactions atomically; the client does none of that math.
+    setLastCompletedReceipt(receipt);
+
+    // A completed attempt must not reuse its id: the next sale is a new one.
+    setSaleRequest(null);
+
+    // Feature 11.1 — the exact confirmed order id for this sale, so the success
+    // screen's "View Receipt" button can open it directly. It now comes from
+    // the server rather than from a locally minted value.
+    setLastCompletedOrderId(receipt.orderId);
+
+    // The Builder's number-typed history model, projected from the SERVER's
+    // answer rather than assembled from the cart that was submitted. Every
+    // figure below therefore reflects what was actually charged, including any
+    // modifier adjustment the server applied and any place its rounding differs
+    // from the cart's estimate.
+    const order: CompletedOrder = toCompletedOrder(receipt);
 
     setCompletedOrders((prev) => [order, ...prev]);
 
-    // Feature 11.1 — the exact confirmed order id for this sale, so the
-    // success screen's "View Receipt" button can open it directly.
-    setLastCompletedOrderId(order.id);
-
-    // Feature 10.1/10.2/10.3 — reuse the same confirmed values used for the
-    // receipt above (order.orderNumber/subtotal/taxAmount/tip/total/
-    // paymentMethod/createdAt/items) so the Dashboard, Sales Report, and
-    // Product Performance all reflect this sale immediately, without a page
-    // reload or a second fetch. itemCount/items are computed from
-    // order.items rather than the cart state directly since clearCart()
-    // runs right after this. lineTotal is derived as price * quantity —
-    // the real order_items.line_total isn't known client-side until the
-    // next server reload, but this matches how the DB itself would compute
-    // it for a plain per-unit price with no discounts. This is a local
-    // append only; the server-side order totals query is never re-run, so
-    // the sale can't be double-counted there.
+    // Feature 10.1/10.2/10.3 — so the Dashboard, Sales Report and Product
+    // Performance all reflect this sale immediately, without a page reload or a
+    // second fetch. This is a local append only; the server-side order totals
+    // query is never re-run, so the sale cannot be double-counted there.
+    //
+    // lineTotal is now the server's own order_items.line_total rather than the
+    // previous client-side price * quantity derivation, which could disagree
+    // with the stored figure for a modifier-adjusted line.
     setOrderTotals((prev) => [
       {
         id: order.id,
@@ -781,15 +902,12 @@ export default function EditorShell({
         tip: order.tip,
         total: order.total,
         paymentMethod: order.paymentMethod,
-        itemCount: order.items.reduce(
-          (sum, item) => sum + item.quantity,
-          0
-        ),
-        items: order.items.map((item) => ({
+        itemCount: receipt.items.reduce((sum, item) => sum + item.quantity, 0),
+        items: receipt.items.map((item) => ({
           itemId: item.itemId,
-          itemName: item.name,
+          itemName: item.itemName,
           quantity: item.quantity,
-          lineTotal: item.price * item.quantity,
+          lineTotal: Number(item.lineTotal),
         })),
         createdAt: order.createdAt,
       },
@@ -797,20 +915,28 @@ export default function EditorShell({
     ]);
 
     // Feature 10.4 — append one synthetic "sale" inventory transaction per
-    // tracked cart line, so Inventory Summary (and the Inventory Activity
-    // panel, which reads this same state) reflect this sale's stock
-    // deduction immediately. quantityBefore is read from
-    // projectConfig.menuItems as it stands right here — nothing has
-    // decremented it locally yet, the only update happens later via the
-    // getProjectConfig() reload below — so this is the exact pre-sale
-    // snapshot, not an inferred value. Untracked items are skipped (no
-    // stock concept to record, matching what complete_sale's own inventory
-    // bookkeeping already does). This only runs after completeSaleOrder has
-    // already succeeded above, so a failed sale never produces phantom
-    // transactions. Each id is deterministic (orderId + itemId + line
-    // index) so React keys and activity rows can't collide even if this
-    // were ever called twice for the same order.
-    const saleInventoryTransactions: InventoryTransaction[] = order.items
+    // tracked line, so Inventory Summary (and the Inventory Activity panel,
+    // which reads this same state) reflect this sale's stock deduction
+    // immediately. Untracked items are skipped (no stock concept to record,
+    // matching what complete_sale_v3's own inventory bookkeeping already does).
+    //
+    // Feature 18.2 Phase 5A — driven off the SERVER's line list, with a RUNNING
+    // stock figure per product.
+    //
+    // complete_sale_v3 writes one inventory_transactions row per LINE, deducting
+    // sequentially (10 -> 8 -> 6 for two lines of two). Since Phase 3 a cart can
+    // hold two lines of the same product with different modifiers, so the
+    // previous code — which read menuItem.stockQuantity fresh for every line —
+    // would have shown the same quantityBefore twice and understated the
+    // deduction. Tracking the running value reproduces the server's own numbers
+    // exactly, and produces the same number of rows, so this session's Inventory
+    // Activity matches what a page reload will show.
+    //
+    // (Before 18.2 the cart keyed on itemId and could not hold two lines of one
+    // product, which is why reading the snapshot per line was correct then.)
+    const runningStock = new Map<string, number>();
+
+    const saleInventoryTransactions: InventoryTransaction[] = receipt.items
       .map((item, index): InventoryTransaction | null => {
         const menuItem = projectConfig.menuItems.find(
           (candidate) => candidate.id === item.itemId
@@ -820,18 +946,23 @@ export default function EditorShell({
           return null;
         }
 
-        const quantityBefore = menuItem.stockQuantity;
-        const quantityChange = -item.quantity;
+        // The first line of a product starts from the pre-sale snapshot in
+        // projectConfig.menuItems — nothing has decremented it locally yet, the
+        // only update happens via the getProjectConfig() reload below.
+        const quantityBefore = runningStock.get(item.itemId) ?? menuItem.stockQuantity;
+        const quantityAfter = quantityBefore - item.quantity;
+
+        runningStock.set(item.itemId, quantityAfter);
 
         return {
           id: `sale-${order.id}-${item.itemId}-${index}`,
           orderId: order.id,
           itemId: item.itemId,
-          itemName: item.name,
+          itemName: item.itemName,
           transactionType: "sale",
-          quantityChange,
+          quantityChange: -item.quantity,
           quantityBefore,
-          quantityAfter: quantityBefore + quantityChange,
+          quantityAfter,
           createdAt: order.createdAt,
         };
       })
@@ -1074,6 +1205,25 @@ export default function EditorShell({
       return;
     }
 
+    // Feature 18.2 Phase 5A — the modifier save boundary, blocked rather than
+    // silently applied.
+    //
+    // Phase 4 warned per group ("Name this group so it can be saved") and then
+    // let Save succeed anyway, normalizing the unsaveable group away. An owner
+    // who missed the amber line lost work with no confirmation and no undo. This
+    // uses the identical mechanism as the empty-name check directly above — the
+    // long-standing way this editor refuses a save — so it introduces no new
+    // blocking concept, and it deliberately fires only on LOSSY normalization
+    // (a group that would vanish, or options that would be dropped). The
+    // harmless maxSelections clamp still saves silently and keeps its notice.
+    const modifierSaveBlocker = getModifierSaveBlockerMessage(projectConfig);
+
+    if (modifierSaveBlocker !== null) {
+      setSaveStatus("error");
+      setSaveError(modifierSaveBlocker);
+      return;
+    }
+
     // Nothing to persist and no failed attempt to retry — skip the network
     // request entirely rather than silently re-saving identical data.
     if (!isDirty && saveStatus !== "error") {
@@ -1083,11 +1233,26 @@ export default function EditorShell({
     setSaveStatus("saving");
     setSaveError(null);
 
+    // Feature 18.2 Phase 4 — the save boundary for authored modifiers.
+    //
+    // The Builder writes every keystroke straight into projectConfig, which is
+    // the long-standing behavior for item name, price and category and is left
+    // alone. That means a half-typed modifier group IS in the draft, and before
+    // this line it would have been written verbatim into projects.config and
+    // then silently dropped by normalizeProjectConfig on the next load.
+    //
+    // Normalizing here — with the same lib/modifiers.ts function that runs at
+    // load and at build, never a second implementation — keeps typing free-form
+    // while guaranteeing the persisted config only ever holds sellable groups.
+    // Deliberately only modifierGroups: running the whole normalizeProjectConfig
+    // on save would change behavior for every unrelated field.
+    const configToPersist = normalizeConfigModifiers(projectConfig);
+
     if (projectId === null) {
       const { project, error } = await saveNewProject({
         name: trimmedName,
         templateId,
-        config: projectConfig,
+        config: configToPersist,
       });
 
       if (error || !project) {
@@ -1127,7 +1292,7 @@ export default function EditorShell({
     const { project, error } = await updateProject({
       projectId,
       name: trimmedName,
-      config: projectConfig,
+      config: configToPersist,
     });
 
     if (error || !project) {
@@ -1486,6 +1651,7 @@ export default function EditorShell({
             saleSaveError={saleSaveError}
             completedOrders={completedOrders}
             selectedReceiptId={selectedReceiptId}
+            authoritativeReceipt={authoritativeReceipt}
             onOpenReceipt={openReceipt}
             onCloseReceipt={closeReceipt}
             lastCompletedOrderId={lastCompletedOrderId}

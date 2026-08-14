@@ -67,12 +67,18 @@ export function createSaleFingerprint(input: {
   projectId: string;
   paymentMethod: PaymentMethod | null;
   tipAmount: number;
-  items: readonly Pick<CartItem, "itemId" | "quantity">[];
+  // Feature 18.2 — keyed on lineKey rather than itemId. lineKey is the
+  // canonical (product + selection) identity from lib/modifiers.ts, so this
+  // fingerprint inherits its properties for free: changing a modifier changes
+  // the fingerprint, while merely reordering groups or options does not. Under
+  // the old itemId keying, swapping Bacon for Cheese would have reused the
+  // sale_request_id and been rejected by the server as a hash mismatch.
+  items: readonly Pick<CartItem, "lineKey" | "quantity">[];
 }): string {
   const items = [...input.items]
-    .map((item) => ({ itemId: item.itemId.trim(), quantity: item.quantity }))
-    .sort((a, b) => (a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0))
-    .map((item) => `${item.itemId}=${item.quantity}`)
+    .map((item) => ({ lineKey: item.lineKey.trim(), quantity: item.quantity }))
+    .sort((a, b) => (a.lineKey < b.lineKey ? -1 : a.lineKey > b.lineKey ? 1 : 0))
+    .map((item) => `${item.lineKey}=${item.quantity}`)
     .join(",");
 
   return [

@@ -7,22 +7,26 @@
 // a paired device can render it without dragging the cookie-backed owner
 // client into its bundle.
 //
-// Behavior is deliberately unchanged: the same completeSaleOrderV2 call with
-// the same arguments, the same getProjectConfig refresh with the same
+// Behavior at extraction time was deliberately unchanged: the same checkout call
+// with the same arguments, the same getProjectConfig refresh with the same
 // stock/trackInventory merge semantics, and the same Back to Dashboard link.
 // This file adds no logic of its own — it only supplies what the engine
-// previously imported.
+// previously imported. (Feature 18.2 has since moved that call to
+// complete_sale_v3; see below.)
 import PosRuntime from "@/components/runtime/PosRuntime";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
-import { completeSaleOrderV2 } from "@/lib/orders";
+import { completeSaleOrderV3 } from "@/lib/orders";
 import { getProjectConfig } from "@/lib/projects";
 import type {
   PosRuntimeCompleteSale,
   PosRuntimeRefreshStock,
 } from "@/lib/posRuntimeHost";
 
+// Feature 18.2 — the owner runtime now calls complete_sale_v3. v2 remains
+// exported from lib/orders.ts for a stale tab and for rollback, but no current
+// code path reaches it.
 const completeSale: PosRuntimeCompleteSale = (input) =>
-  completeSaleOrderV2({
+  completeSaleOrderV3({
     projectId: input.projectId,
     paymentMethod: input.paymentMethod,
     tipAmount: input.tipAmount,

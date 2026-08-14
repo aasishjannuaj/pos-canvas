@@ -16,7 +16,7 @@ import PosRuntime from "@/components/runtime/PosRuntime";
 import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import {
-  completeDeviceSale,
+  completeDeviceSaleV3,
   fetchDeviceConfig,
   fetchDevicePairingState,
   getDeviceSession,
@@ -150,10 +150,12 @@ export default function DeviceApp() {
     await resolveDeviceState();
   }
 
-  // Feature 16.4A — device checkout. complete_sale_v2 through the device
-  // client, with the pinned project id from trusted server state.
+  // Feature 16.4A — device checkout through the device client, with the pinned
+  // project id from trusted server state. Feature 18.2 moved it to
+  // complete_sale_v3 (see below); v2 is no longer reached from here.
   const completeSale: PosRuntimeCompleteSale = useCallback(
-    async (input) => completeDeviceSale({
+    // Feature 18.2 — the device now calls complete_sale_v3.
+    async (input) => completeDeviceSaleV3({
       projectId: input.projectId,
       paymentMethod: input.paymentMethod,
       items: input.items,
@@ -243,7 +245,7 @@ export default function DeviceApp() {
         <PosRuntime
           // Stock tracking is stripped for display: the pinned snapshot's
           // stockQuantity is frozen at build time and is NOT live inventory.
-          // The server still enforces stock inside complete_sale_v2.
+          // The server still enforces stock inside complete_sale_v3.
           config={toDeviceDisplayConfig(state.config)}
           submitSale={completeSale}
           // No live stock source: `projects` is invisible to a device under RLS.

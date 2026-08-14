@@ -8,20 +8,20 @@ import type { MenuItem } from "@/lib/projectConfig";
 import {
   calculateCartSummary,
   canAddItemQuantity,
+  createCartItem,
+  getItemQuantityInCart,
 } from "@/lib/cart";
 import type {
   CartItem,
+  CartModifierSelection,
   CheckoutStatus,
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
-import {
-  createSaleFingerprint,
-  isSubmitBlocked,
-  resolveSaleRequest,
-} from "@/lib/saleRequest";
+import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
+import { SALE_UNCONFIRMED_MESSAGE, planSaleSubmission } from "@/lib/saleSubmission";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import ProductBrowser from "@/components/editor/pos-layouts";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
@@ -141,15 +141,20 @@ export default function PosRuntime({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [cart.length]);
 
-  function addToCart(menuItem: MenuItem) {
+  // Feature 18.2 — every cart operation keys on lineKey, not itemId, so the
+  // same product with two different modifier selections stays two independent
+  // lines. Stock, by contrast, is held against the PRODUCT, so the quantity
+  // checks below count every line carrying that itemId.
+  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []) {
     setCart((prev) => {
-      const existing = prev.find((cartItem) => cartItem.itemId === menuItem.id);
-      const currentQuantity = existing?.quantity ?? 0;
+      const line = createCartItem(menuItem, selections);
+      const existing = prev.find((cartItem) => cartItem.lineKey === line.lineKey);
 
       if (
         !canAddItemQuantity({
           item: menuItem,
-          currentQuantity,
+          // Across ALL lines of this product, not just this one.
+          currentQuantity: getItemQuantityInCart(prev, menuItem.id),
           addQuantity: 1,
         })
       ) {
@@ -158,38 +163,30 @@ export default function PosRuntime({
 
       if (existing) {
         return prev.map((cartItem) =>
-          cartItem.itemId === menuItem.id
+          cartItem.lineKey === line.lineKey
             ? { ...cartItem, quantity: cartItem.quantity + 1 }
             : cartItem
         );
       }
 
-      return [
-        ...prev,
-        {
-          itemId: menuItem.id,
-          name: menuItem.name,
-          price: menuItem.price,
-          quantity: 1,
-        },
-      ];
+      return [...prev, line];
     });
   }
 
-  function increaseQuantity(itemId: string) {
+  function increaseQuantity(lineKey: string) {
     setCart((prev) =>
       prev.map((cartItem) => {
-        if (cartItem.itemId !== itemId) {
+        if (cartItem.lineKey !== lineKey) {
           return cartItem;
         }
 
-        const menuItem = menuItems.find((item) => item.id === itemId);
+        const menuItem = menuItems.find((item) => item.id === cartItem.itemId);
 
         if (
           menuItem &&
           !canAddItemQuantity({
             item: menuItem,
-            currentQuantity: cartItem.quantity,
+            currentQuantity: getItemQuantityInCart(prev, cartItem.itemId),
             addQuantity: 1,
           })
         ) {
@@ -201,11 +198,11 @@ export default function PosRuntime({
     );
   }
 
-  function decreaseQuantity(itemId: string) {
+  function decreaseQuantity(lineKey: string) {
     setCart((prev) =>
       prev
         .map((cartItem) =>
-          cartItem.itemId === itemId
+          cartItem.lineKey === lineKey
             ? { ...cartItem, quantity: cartItem.quantity - 1 }
             : cartItem
         )
@@ -213,8 +210,8 @@ export default function PosRuntime({
     );
   }
 
-  function removeFromCart(itemId: string) {
-    setCart((prev) => prev.filter((cartItem) => cartItem.itemId !== itemId));
+  function removeFromCart(lineKey: string) {
+    setCart((prev) => prev.filter((cartItem) => cartItem.lineKey !== lineKey));
   }
 
   function clearCart() {
@@ -264,69 +261,37 @@ export default function PosRuntime({
     setSaleSaveStatus("saving");
     setSaleSaveError(null);
 
-    // Feature 14.3 — re-check the full requested quantity for every cart
-    // line against the current local stock right before submitting (stock
-    // may have changed since items were added — e.g. another device
-    // completing a sale on the same project in the meantime). Checked
-    // against 0 (not the cart's own quantity) so this validates the whole
-    // requested amount against current stock, not just an incremental step.
-    const hasInsufficientStock = cart.some((cartItem) => {
-      const menuItem = menuItems.find((item) => item.id === cartItem.itemId);
-
-      if (!menuItem) {
-        return false;
-      }
-
-      return !canAddItemQuantity({
-        item: menuItem,
-        currentQuantity: 0,
-        addQuantity: cartItem.quantity,
-      });
-    });
-
-    if (hasInsufficientStock) {
-      setSaleSaveStatus("error");
-      setSaleSaveError(
-        "One or more items are no longer available in the requested quantity."
-      );
-      return;
-    }
-
-    // D3 — one request id per logical attempt. resolveSaleRequest reuses the
-    // existing id when the fingerprint (project, payment method, tip, item ids
-    // and quantities) is unchanged, and issues a new one otherwise. That is
-    // exactly the boundary complete_sale_v2 hashes, so a reused id after any
-    // real change would be rejected as a mismatch rather than replayed.
-    const fingerprint = createSaleFingerprint({
+    // Feature 18.2 Phase 5A — the stock re-check, the request-id decision and
+    // the payload build all moved to lib/saleSubmission.ts, unchanged in
+    // behavior, so the Builder Preview's own v3 checkout runs the exact same
+    // rules rather than a second copy of them. See that module's header for why
+    // sharing these three specifically is what matters.
+    const plan = planSaleSubmission({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
       tipAmount: cartSummary.tip,
-      items: cart,
+      cart,
+      menuItems,
+      current: saleRequest,
     });
 
-    let request: SaleRequestState;
-    try {
-      request = resolveSaleRequest(saleRequest, fingerprint);
-    } catch {
+    if (!plan.ok) {
       setSaleSaveStatus("error");
-      setSaleSaveError(
-        "This browser cannot complete a secure sale. Please use a different browser."
-      );
+      setSaleSaveError(plan.error);
       return;
     }
-    setSaleRequest(request);
+
+    setSaleRequest(plan.request);
 
     const { receipt, error } = await submitSale({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
       tipAmount: cartSummary.tip,
-      // Only itemId and quantity leave the browser. There is nowhere in the v2
-      // contract to put a client name, price or total.
-      items: cart.map((cartItem) => ({
-        itemId: cartItem.itemId,
-        quantity: cartItem.quantity,
-      })),
-      saleRequestId: request.id,
+      // Identifiers and quantities only. buildSaleRequestItems (inside the plan)
+      // strips every display name and price adjustment, so there is nowhere in
+      // this payload for a client-supplied amount to sit.
+      items: plan.items,
+      saleRequestId: plan.request.id,
     });
 
     if (error || !receipt) {
@@ -335,10 +300,7 @@ export default function PosRuntime({
       // committed server-side, so the message must not claim the sale failed —
       // the retry will return the original receipt if it did.
       setSaleSaveStatus("error");
-      setSaleSaveError(
-        error ??
-          "The sale could not be confirmed. Press Pay again to retry — if it already went through, the original receipt will be shown."
-      );
+      setSaleSaveError(error ?? SALE_UNCONFIRMED_MESSAGE);
 
       // Feature 16.4A — the host decides what a rejection means for its own
       // authorization. A paired device re-resolves its pairing state here, so a

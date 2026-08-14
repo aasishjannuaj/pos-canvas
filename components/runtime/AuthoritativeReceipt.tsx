@@ -81,16 +81,41 @@ export default function AuthoritativeReceipt({
       </div>
 
       <div className="mt-3 border-t border-dashed border-neutral-300 pt-2">
-        {receipt.items.map((item) => (
-          <div key={item.itemId} className="flex justify-between gap-2 py-0.5">
-            <span className="min-w-0 flex-1 truncate">
-              {item.quantity} × {item.itemName}
-            </span>
-            {/* The server's stored line total, never quantity × price. */}
-            <span className="flex-none tabular-nums">
-              {currencySymbol}
-              {item.lineTotal}
-            </span>
+        {receipt.items.map((item, index) => (
+          // Feature 18.2 — two lines of the same product with different options
+          // share an itemId, so the key includes the index. The server already
+          // returns them in a stable order; nothing is re-sorted here.
+          <div key={`${item.itemId}-${index}`} className="py-0.5">
+            <div className="flex justify-between gap-2">
+              <span className="min-w-0 flex-1 truncate">
+                {item.quantity} × {item.itemName}
+              </span>
+              {/* The server's stored line total, never quantity × price. */}
+              <span className="flex-none tabular-nums">
+                {currencySymbol}
+                {item.lineTotal}
+              </span>
+            </div>
+
+            {/* Feature 18.2 — modifiers come from the AUTHORITATIVE payload,
+                which carries the names and prices recorded at sale time. They
+                are never looked up in the current menu, so a renamed or
+                repriced option cannot rewrite a printed receipt. An older
+                payload has no `modifiers` key at all and renders nothing. */}
+            {item.modifiers?.map((modifier) => (
+              <div
+                key={`${modifier.groupId}-${modifier.optionId}`}
+                className="flex justify-between gap-2 pl-4 text-[11px] text-neutral-500"
+              >
+                <span className="min-w-0 flex-1 truncate">{modifier.optionName}</span>
+                {modifier.priceAdjustment !== "0.00" && (
+                  <span className="flex-none tabular-nums">
+                    +{currencySymbol}
+                    {modifier.priceAdjustment}
+                  </span>
+                )}
+              </div>
+            ))}
           </div>
         ))}
       </div>

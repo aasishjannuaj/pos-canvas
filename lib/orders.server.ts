@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { createHistoricalCartItem } from "@/lib/cart";
 import type { CartItem, CompletedOrder, PaymentMethod } from "@/lib/cart";
 
 type OrderItemRow = {
@@ -9,6 +10,15 @@ type OrderItemRow = {
   unit_price: number;
   quantity: number;
   line_total: number;
+  // Feature 18.2 — defaulted to [] by the migration, so every historical row
+  // has a valid value and no reader has to handle null.
+  modifiers: {
+    groupId: string;
+    groupName: string;
+    optionId: string;
+    optionName: string;
+    priceAdjustment: string;
+  }[] | null;
 };
 
 type OrderRow = {
@@ -24,12 +34,31 @@ type OrderRow = {
 };
 
 function mapOrderRow(row: OrderRow): CompletedOrder {
-  const items: CartItem[] = (row.order_items ?? []).map((orderItem) => ({
-    itemId: orderItem.item_id,
-    name: orderItem.item_name,
-    price: orderItem.unit_price,
-    quantity: orderItem.quantity,
-  }));
+  // Feature 18.2 — historical order lines carry their stored modifier snapshot.
+  // Names and prices come from what was recorded AT SALE TIME, never from the
+  // current menu, so a renamed or repriced option cannot rewrite history.
+  //
+  // unit_price already includes the modifier adjustments (complete_sale_v3
+  // stores the combined figure), so basePrice is derived by subtracting the
+  // recorded adjustments rather than being looked up.
+  //
+  // Feature 18.2 Phase 5A — the grouping/basePrice derivation itself moved to
+  // lib/cart.ts's createHistoricalCartItem, which lib/saleSubmission.ts also
+  // uses to project a just-returned complete_sale_v3 receipt into the same
+  // model. Both are reading the server's own snapshot of one sold line, so a
+  // second copy here would eventually let a reprinted receipt and a
+  // just-completed one describe the same sale differently.
+  const items: CartItem[] = (row.order_items ?? []).map((orderItem) =>
+    createHistoricalCartItem({
+      itemId: orderItem.item_id,
+      itemName: orderItem.item_name,
+      unitPrice: orderItem.unit_price,
+      quantity: orderItem.quantity,
+      // A missing or non-array snapshot reads as "no modifiers" rather than
+      // throwing — every historical row predates the column.
+      snapshot: Array.isArray(orderItem.modifiers) ? orderItem.modifiers : [],
+    })
+  );
 
   return {
     id: row.id,
@@ -77,7 +106,8 @@ export async function getProjectOrders(projectId: string): Promise<{
         item_name,
         unit_price,
         quantity,
-        line_total
+        line_total,
+        modifiers
       )
     `
     )

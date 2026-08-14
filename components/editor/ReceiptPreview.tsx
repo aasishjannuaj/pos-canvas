@@ -4,16 +4,21 @@ import Receipt from "./Receipt";
 import type { CompletedOrder, ProjectConfig } from "./EditorShell";
 
 // Feature 11.1 — fixed sample order data for the Settings-tab live preview.
-// Local to this module only: it never enters completedOrders state, is
-// never passed to completeSaleOrder, and has no persistence path
-// whatsoever. orderNumber is deliberately NOT included here — it depends on
+// Local to this module only: it never enters completedOrders state, is never
+// passed to any checkout function (Phase 5A: the Builder's checkout is
+// completeSaleOrderV3, and this file does not import it or any other), and has
+// no persistence path whatsoever.
+// orderNumber is deliberately NOT included here — it depends on
 // the live receipt.orderPrefix setting, so it's built fresh on every render
 // inside the component below instead of being frozen at module load.
 const SAMPLE_ORDER_BASE: Omit<CompletedOrder, "orderNumber"> = {
   id: "sample-preview-order",
   items: [
-    { itemId: "sample-1", name: "Sample Item", price: 6.5, quantity: 2 },
-    { itemId: "sample-2", name: "Another Item", price: 3.25, quantity: 1 },
+    // Feature 18.2 — sample lines carry the new cart shape. lineKey is the
+    // canonical no-modifier form, and basePrice equals price because no sample
+    // option is selected.
+    { lineKey: "8:sample-1[0]", itemId: "sample-1", name: "Sample Item", basePrice: 6.5, price: 6.5, quantity: 2, modifiers: [] },
+    { lineKey: "8:sample-2[0]", itemId: "sample-2", name: "Another Item", basePrice: 3.25, price: 3.25, quantity: 1, modifiers: [] },
   ],
   subtotal: 16.25,
   taxAmount: 1.03,

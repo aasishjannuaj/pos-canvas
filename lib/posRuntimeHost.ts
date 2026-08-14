@@ -17,7 +17,7 @@ import type { PaymentMethod } from "@/lib/cart";
 
 /**
  * Completes one sale. Implementations must round-trip through
- * complete_sale_v2 and return the SERVER's authoritative receipt — never a
+ * complete_sale_v3 and return the SERVER's authoritative receipt — never a
  * locally assembled object.
  *
  * Only itemId and quantity are accepted: there is deliberately nowhere in
@@ -29,10 +29,17 @@ export type PosRuntimeCompleteSale = (input: {
   // Always 0 in the current runtime (there is no tip-entry UI and
   // calculateCartSummary is called with a literal 0), but carried through the
   // contract rather than assumed, so this refactor makes no equivalence claim
-  // about a money field. complete_sale_v2 rejects any nonzero tip from a
+  // about a money field. complete_sale_v3 rejects any nonzero tip from a
   // paired device.
   tipAmount: number;
-  items: { itemId: string; quantity: number }[];
+  // Feature 18.2 — each line may carry modifier IDENTIFIERS. Still no field
+  // exists for a name, price, tax or total: complete_sale_v3 resolves all of
+  // them from the authorized config.
+  items: {
+    itemId: string;
+    quantity: number;
+    modifiers: { groupId: string; optionIds: string[] }[];
+  }[];
   saleRequestId: string;
 }) => Promise<{ receipt: CompletedSaleReceipt | null; error: string | null }>;
 

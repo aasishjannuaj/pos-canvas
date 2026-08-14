@@ -11,7 +11,7 @@ const P = "11111111-1111-4111-8111-111111111111";
 const ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-const cart = (items: { itemId: string; quantity: number }[]) =>
+const cart = (items: { lineKey: string; quantity: number }[]) =>
   createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 0, items });
 
 describe("isValidSaleRequestId", () => {
@@ -50,29 +50,29 @@ describe("createSaleRequestId", () => {
 
 describe("createSaleFingerprint", () => {
   it("is independent of item order", () => {
-    expect(cart([{ itemId: "m2", quantity: 1 }, { itemId: "m1", quantity: 2 }]))
-      .toBe(cart([{ itemId: "m1", quantity: 2 }, { itemId: "m2", quantity: 1 }]));
+    expect(cart([{ lineKey: "2:m2[0]", quantity: 1 }, { lineKey: "2:m1[0]", quantity: 2 }]))
+      .toBe(cart([{ lineKey: "2:m1[0]", quantity: 2 }, { lineKey: "2:m2[0]", quantity: 1 }]));
   });
 
   it("changes with quantity, item set, payment method, tip and project", () => {
-    const baseline = cart([{ itemId: "m1", quantity: 1 }]);
-    expect(cart([{ itemId: "m1", quantity: 2 }])).not.toBe(baseline);
-    expect(cart([{ itemId: "m2", quantity: 1 }])).not.toBe(baseline);
-    expect(cart([{ itemId: "m1", quantity: 1 }, { itemId: "m2", quantity: 1 }])).not.toBe(baseline);
-    expect(createSaleFingerprint({ projectId: P, paymentMethod: "card", tipAmount: 0, items: [{ itemId: "m1", quantity: 1 }] })).not.toBe(baseline);
-    expect(createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 1, items: [{ itemId: "m1", quantity: 1 }] })).not.toBe(baseline);
-    expect(createSaleFingerprint({ projectId: "other", paymentMethod: "cash", tipAmount: 0, items: [{ itemId: "m1", quantity: 1 }] })).not.toBe(baseline);
+    const baseline = cart([{ lineKey: "2:m1[0]", quantity: 1 }]);
+    expect(cart([{ lineKey: "2:m1[0]", quantity: 2 }])).not.toBe(baseline);
+    expect(cart([{ lineKey: "2:m2[0]", quantity: 1 }])).not.toBe(baseline);
+    expect(cart([{ lineKey: "2:m1[0]", quantity: 1 }, { lineKey: "2:m2[0]", quantity: 1 }])).not.toBe(baseline);
+    expect(createSaleFingerprint({ projectId: P, paymentMethod: "card", tipAmount: 0, items: [{ lineKey: "2:m1[0]", quantity: 1 }] })).not.toBe(baseline);
+    expect(createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 1, items: [{ lineKey: "2:m1[0]", quantity: 1 }] })).not.toBe(baseline);
+    expect(createSaleFingerprint({ projectId: "other", paymentMethod: "cash", tipAmount: 0, items: [{ lineKey: "2:m1[0]", quantity: 1 }] })).not.toBe(baseline);
   });
 
   it("ignores names and prices, which the server derives", () => {
-    const a = createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 0, items: [{ itemId: "m1", quantity: 1 }] });
-    const b = createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 0, items: [{ itemId: "m1", quantity: 1 }] });
+    const a = createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 0, items: [{ lineKey: "2:m1[0]", quantity: 1 }] });
+    const b = createSaleFingerprint({ projectId: P, paymentMethod: "cash", tipAmount: 0, items: [{ lineKey: "2:m1[0]", quantity: 1 }] });
     expect(a).toBe(b);
   });
 });
 
 describe("resolveSaleRequest", () => {
-  const fp = cart([{ itemId: "m1", quantity: 1 }]);
+  const fp = cart([{ lineKey: "2:m1[0]", quantity: 1 }]);
 
   it("generates an id on the first attempt", () => {
     const state = resolveSaleRequest(null, fp, () => ID_A);
@@ -88,13 +88,13 @@ describe("resolveSaleRequest", () => {
 
   it("issues a NEW id when the cart changes", () => {
     const first = resolveSaleRequest(null, fp, () => ID_A);
-    const changed = resolveSaleRequest(first, cart([{ itemId: "m1", quantity: 2 }]), () => ID_B);
+    const changed = resolveSaleRequest(first, cart([{ lineKey: "2:m1[0]", quantity: 2 }]), () => ID_B);
     expect(changed.id).toBe(ID_B);
   });
 
   it("issues a new id when the payment method changes", () => {
     const first = resolveSaleRequest(null, fp, () => ID_A);
-    const other = createSaleFingerprint({ projectId: P, paymentMethod: "card", tipAmount: 0, items: [{ itemId: "m1", quantity: 1 }] });
+    const other = createSaleFingerprint({ projectId: P, paymentMethod: "card", tipAmount: 0, items: [{ lineKey: "2:m1[0]", quantity: 1 }] });
     expect(resolveSaleRequest(first, other, () => ID_B).id).toBe(ID_B);
   });
 

@@ -231,6 +231,61 @@ export async function fetchDeviceConfig(): Promise<DeviceConfigResult> {
 // Checkout
 // ---------------------------------------------------------------------------
 
+// Feature 18.2 — the v3 device path. completeDeviceSale (v2) below is kept so a
+// device still running an older bundle continues to work; v3 is what the
+// current runtime calls. complete_sale_v2 now refuses any product carrying
+// modifier groups, so an old bundle fails closed rather than underselling.
+export type DeviceSaleV3Request = {
+  projectId: string;
+  paymentMethod: "cash" | "card";
+  items: {
+    itemId: string;
+    quantity: number;
+    modifiers: { groupId: string; optionIds: string[] }[];
+  }[];
+  saleRequestId: string;
+};
+
+export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promise<{
+  receipt: CompletedSaleReceipt | null;
+  error: string | null;
+}> {
+  try {
+    const { data, error } = await getDeviceSupabaseClient().rpc("complete_sale_v3", {
+      p_project_id: request.projectId,
+      p_payment_method: request.paymentMethod,
+      // Still hardcoded: complete_sale_v3 rejects any nonzero tip from a device,
+      // exactly as v2 did, and the runtime has no tip-entry UI.
+      p_tip_amount: 0,
+      // Identifiers only — no name, price, tax or total has a home here.
+      p_items: request.items.map((item) => ({
+        itemId: item.itemId,
+        quantity: item.quantity,
+        modifiers: item.modifiers.map((group) => ({
+          groupId: group.groupId,
+          optionIds: group.optionIds,
+        })),
+      })),
+      p_sale_request_id: request.saleRequestId,
+    });
+
+    if (error) {
+      return { receipt: null, error: error.message };
+    }
+
+    if (!isCompletedSaleReceipt(data)) {
+      return { receipt: null, error: "The sale response could not be read." };
+    }
+
+    return { receipt: data, error: null };
+  } catch {
+    return {
+      receipt: null,
+      error: "The sale could not be completed. Check the connection and try again.",
+    };
+  }
+}
+
 export type DeviceSaleRequest = {
   projectId: string;
   paymentMethod: "cash" | "card";
@@ -287,9 +342,11 @@ export async function completeDeviceSale(request: DeviceSaleRequest): Promise<{
 }
 
 /**
- * Recognizes the message complete_sale_v2 raises when a device is no longer
+ * Recognizes the message the checkout functions raise when a device is no longer
  * authorized for the project — the same message an unknown project produces,
- * because resolve_sale_owner deliberately does not distinguish them.
+ * because resolve_sale_owner deliberately does not distinguish them. Wording is
+ * identical in v2 and v3, both of which resolve ownership through that function,
+ * so this matcher serves the live v3 path unchanged.
  *
  * Used to re-resolve pairing state after a failed sale rather than to decide
  * anything on its own: the authoritative answer always comes from a fresh

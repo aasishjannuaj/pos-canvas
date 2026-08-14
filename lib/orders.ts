@@ -80,6 +80,79 @@ export type CompleteSaleV2Request = {
   saleRequestId: string;
 };
 
+// ---------------------------------------------------------------------------
+// Feature 18.2 — complete_sale_v3.
+//
+// The v2 helper below stays exported and unchanged so a stale open tab keeps
+// working and a deployment rollback remains possible, exactly as v1 was kept
+// when D3 introduced v2.
+//
+// v3 is the path every current sale takes. It differs from v2 in one respect
+// visible here: each line may carry modifier IDENTIFIERS. There is still
+// nowhere in this shape for a client name, price, tax or total.
+// ---------------------------------------------------------------------------
+
+export type CompleteSaleV3Request = {
+  projectId: string;
+  paymentMethod: PaymentMethod;
+  tipAmount: number;
+  items: {
+    itemId: string;
+    quantity: number;
+    modifiers: { groupId: string; optionIds: string[] }[];
+  }[];
+  saleRequestId: string;
+};
+
+export async function completeSaleOrderV3({
+  projectId,
+  paymentMethod,
+  tipAmount,
+  items,
+  saleRequestId,
+}: CompleteSaleV3Request): Promise<{
+  receipt: CompletedSaleReceipt | null;
+  error: string | null;
+}> {
+  const supabase = createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { receipt: null, error: "You must be signed in to complete a sale." };
+  }
+
+  const { data, error } = await supabase.rpc("complete_sale_v3", {
+    p_project_id: projectId,
+    p_payment_method: paymentMethod,
+    p_tip_amount: tipAmount,
+    // Identifiers only. Names, prices, tax and totals are all resolved by
+    // complete_sale_v3 from the authorized config.
+    p_items: items.map((item) => ({
+      itemId: item.itemId,
+      quantity: item.quantity,
+      modifiers: item.modifiers.map((group) => ({
+        groupId: group.groupId,
+        optionIds: group.optionIds,
+      })),
+    })),
+    p_sale_request_id: saleRequestId,
+  });
+
+  if (error) {
+    return { receipt: null, error: error.message };
+  }
+
+  if (!isCompletedSaleReceipt(data)) {
+    return { receipt: null, error: "The sale response could not be read." };
+  }
+
+  return { receipt: data, error: null };
+}
+
 export async function completeSaleOrderV2({
   projectId,
   paymentMethod,

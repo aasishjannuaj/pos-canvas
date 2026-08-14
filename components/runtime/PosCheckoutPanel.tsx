@@ -16,6 +16,7 @@ import {
 } from "@/lib/nativeShell";
 import Receipt from "@/components/editor/Receipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { describeCartModifiers, getItemQuantityInCart } from "@/lib/cart";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 
 // Feature 14.3 — the shared cart/checkout/receipt UI, extracted from
@@ -179,21 +180,46 @@ export default function PosCheckoutPanel({
             {cart.map((cartItem) => {
               const menuItem = menuItems.find((item) => item.id === cartItem.itemId);
               const atStockLimit =
-                !!menuItem?.trackInventory && cartItem.quantity >= menuItem.stockQuantity;
+                // Feature 18.2 — stock is held against the PRODUCT, so two
+                // lines of the same item with different modifiers share one
+                // pool and must be counted together.
+                !!menuItem?.trackInventory &&
+                getItemQuantityInCart(cart, cartItem.itemId) >= menuItem.stockQuantity;
 
               return (
                 <div
-                  key={cartItem.itemId}
+                  key={cartItem.lineKey}
                   className="flex items-center justify-between gap-2 text-xs text-neutral-600"
                 >
                   <span className="flex-1 truncate text-neutral-900">
                     {cartItem.name}
+                    {/* Feature 18.2 — the chosen options, shown under the
+                        product. A plain line renders nothing extra, so a
+                        pre-modifier cart looks exactly as it always did. */}
+                    {cartItem.modifiers.length > 0 && (
+                      <span className="mt-0.5 flex flex-col gap-0.5">
+                        {describeCartModifiers(cartItem).map((option) => (
+                          <span
+                            key={option.id}
+                            className="flex items-baseline justify-between gap-2 text-[11px] font-normal text-neutral-500"
+                          >
+                            <span>{option.name}</span>
+                            {option.priceAdjustment > 0 && (
+                              <span className="tabular-nums">
+                                +{currencySymbol}
+                                {option.priceAdjustment.toFixed(2)}
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                   </span>
 
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() => onDecreaseQuantity(cartItem.itemId)}
+                      onClick={() => onDecreaseQuantity(cartItem.lineKey)}
                       aria-label={`Decrease ${cartItem.name} quantity`}
                       className="flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                     >
@@ -204,7 +230,7 @@ export default function PosCheckoutPanel({
                     </span>
                     <button
                       type="button"
-                      onClick={() => onIncreaseQuantity(cartItem.itemId)}
+                      onClick={() => onIncreaseQuantity(cartItem.lineKey)}
                       disabled={atStockLimit}
                       aria-label={`Increase ${cartItem.name} quantity`}
                       className={`flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 text-neutral-600 transition-colors hover:border-blue-600 hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${
@@ -222,7 +248,7 @@ export default function PosCheckoutPanel({
 
                   <button
                     type="button"
-                    onClick={() => onRemoveFromCart(cartItem.itemId)}
+                    onClick={() => onRemoveFromCart(cartItem.lineKey)}
                     aria-label={`Remove ${cartItem.name} from cart`}
                     className="text-neutral-400 transition-colors hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                   >

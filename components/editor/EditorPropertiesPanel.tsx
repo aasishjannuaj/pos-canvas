@@ -19,6 +19,11 @@ import type {
 } from "./EditorShell";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
+import ModifierGroupsEditor from "./ModifierGroupsEditor";
+// Phase 5B — deliberately NOT normalizeModifierGroups. The authoring surface
+// must never import the persistence normalizer: it deletes incomplete groups,
+// which is correct at the save/build boundary and destructive at a render one.
+import { toEditableModifierGroups } from "@/lib/modifierAuthoring";
 import {
   BUILD_PROCESSING_STARTED_MESSAGE,
   getBuildProcessingUnavailableMessage,
@@ -751,6 +756,27 @@ export default function EditorPropertiesPanel({
                       className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
                     />
                   </div>
+
+                  {/* Feature 18.2 Phase 4 — modifier authoring, underneath the
+                      existing item fields and routed through the SAME onUpdate
+                      handler they use.
+
+                      Phase 5B — this renders the RAW DRAFT via
+                      toEditableModifierGroups, never normalizeModifierGroups.
+                      Normalizing here deleted every incomplete group on its way
+                      back to the screen, which is why "Add modifier group"
+                      appeared to do nothing: the new blank group reached the
+                      draft and was then dropped from the rendered props. See
+                      that function for the full account. An absent key still
+                      reads as [], so a pre-modifier item lands on the "No
+                      modifiers" empty state with no special case here. */}
+                  <ModifierGroupsEditor
+                    groups={toEditableModifierGroups(selectedItem.modifierGroups)}
+                    currencySymbol={currencySymbol}
+                    onChange={(modifierGroups) =>
+                      onUpdate(selectedItem.id, { modifierGroups })
+                    }
+                  />
                 </div>
               ) : (
                 <div className="mt-4 flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 p-6 text-center">

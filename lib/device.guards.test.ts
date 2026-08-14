@@ -252,10 +252,43 @@ describe("PosRuntime is transport-agnostic", () => {
     expect(source).not.toMatch(/\bisOwner\b|\bisDevice\b|mode\s*===/);
   });
 
-  it("the owner host supplies the previous behavior unchanged", () => {
+  it("the owner host supplies checkout, stock refresh and the dashboard link", () => {
     const owner = code(read("components/runtime/OwnerPosRuntime.tsx"));
-    expect(owner).toContain("completeSaleOrderV2");
+    // Feature 18.2 — the owner host now calls complete_sale_v3. v2 stays
+    // exported from lib/orders.ts for a stale tab and for rollback, but no
+    // current host may reach it: v2 fails closed on modifier-bearing products,
+    // so a host still wired to it would start refusing sales the moment an
+    // owner authors a modifier group.
+    expect(owner).toContain("completeSaleOrderV3");
+    expect(owner).not.toContain("completeSaleOrderV2");
     expect(owner).toContain("getProjectConfig");
     expect(owner).toContain('href: "/dashboard"');
+  });
+
+  it("the device host calls complete_sale_v3, not v2", () => {
+    const app = code(read("components/device/DeviceApp.tsx"));
+    expect(app).toContain("completeDeviceSaleV3");
+    expect(app).not.toMatch(/completeDeviceSale\b(?!V3)/);
+  });
+
+  it("both hosts send modifier IDENTIFIERS only", () => {
+    // Feature 18.2 Phase 5A — the payload build moved out of PosRuntime into
+    // lib/saleSubmission.ts's buildSaleRequestItems, so the Builder Preview's
+    // own v3 checkout runs the identical function rather than a copy. The
+    // property asserted is unchanged: toModifierSelections strips every display
+    // name and price adjustment before the request is assembled.
+    const submission = code(read("lib/saleSubmission.ts"));
+    expect(submission).toContain("toModifierSelections(cartItem.modifiers)");
+    expect(submission).not.toMatch(/SaleSubmissionItem = \{[^}]*priceAdjustment/s);
+    expect(submission).not.toMatch(/SaleSubmissionItem = \{[^}]*groupName/s);
+
+    // And no host may assemble a payload of its own alongside it.
+    for (const file of [
+      "components/runtime/PosRuntime.tsx",
+      "components/editor/EditorShell.tsx",
+    ]) {
+      expect(code(read(file))).toContain("items: plan.items");
+      expect(code(read(file))).not.toContain("items: cart.map");
+    }
   });
 });

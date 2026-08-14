@@ -1,4 +1,5 @@
 import { CURRENCY_SYMBOLS } from "./EditorShell";
+import { describeCartModifiers } from "@/lib/cart";
 import type { CompletedOrder, ProjectConfig } from "./EditorShell";
 
 type ReceiptProps = {
@@ -103,18 +104,39 @@ export default function Receipt({ order, businessProfile, receipt }: ReceiptProp
       </div>
 
       <div className="flex flex-col gap-1.5 py-3">
-        {order.items.map((item) => (
-          <div
-            key={item.itemId}
-            className="flex items-center justify-between gap-2 text-xs text-neutral-600"
-          >
-            <span className="flex-1 truncate text-neutral-900">
-              {item.quantity} × {item.name}
-            </span>
-            <span className="font-medium text-neutral-900">
-              {currencySymbol}
-              {(item.price * item.quantity).toFixed(2)}
-            </span>
+        {order.items.map((item, index) => (
+          // Feature 18.2 — keyed by lineKey so two lines of the same product
+          // with different options stay distinct. Historical orders loaded from
+          // the database carry a lineKey rebuilt from their stored snapshot.
+          <div key={item.lineKey || `${item.itemId}-${index}`} className="text-xs text-neutral-600">
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex-1 truncate text-neutral-900">
+                {item.quantity} × {item.name}
+              </span>
+              <span className="font-medium text-neutral-900">
+                {currencySymbol}
+                {(item.price * item.quantity).toFixed(2)}
+              </span>
+            </div>
+
+            {/* Feature 18.2 — for a historical order these come from the stored
+                snapshot (see lib/orders.server.ts), so the names and prices are
+                the ones recorded at sale time, not today's menu. A plain line
+                renders nothing extra. */}
+            {describeCartModifiers(item).map((option) => (
+              <div
+                key={option.id}
+                className="flex items-center justify-between gap-2 pl-4 text-[11px] text-neutral-500"
+              >
+                <span className="flex-1 truncate">{option.name}</span>
+                {option.priceAdjustment > 0 && (
+                  <span className="tabular-nums">
+                    +{currencySymbol}
+                    {option.priceAdjustment.toFixed(2)}
+                  </span>
+                )}
+              </div>
+            ))}
           </div>
         ))}
       </div>

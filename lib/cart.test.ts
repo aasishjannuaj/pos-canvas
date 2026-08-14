@@ -4,10 +4,13 @@ import type { CartItem } from "@/lib/cart";
 import type { MenuItem, TaxSettings } from "@/lib/projectConfig";
 
 const TAXED_ITEM: CartItem = {
+  lineKey: "1:1[0]",
   itemId: "1",
   name: "Coffee",
+  basePrice: 4,
   price: 4,
   quantity: 2,
+  modifiers: [],
 };
 
 function makeTax(overrides: Partial<TaxSettings> = {}): TaxSettings {

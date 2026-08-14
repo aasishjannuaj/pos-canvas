@@ -252,6 +252,23 @@ export type ModifierValidationResult =
   | { ok: false; error: ModifierValidationError };
 
 /**
+ * Total options selected across every group of ONE line.
+ *
+ * Feature 18.2 Phase 5A — extracted so the rule has a single name. It is what
+ * MAX_SELECTED_OPTIONS_PER_LINE bounds below, and it is what the selector
+ * consults to refuse the tap that would exceed the ceiling, instead of each
+ * caller re-deriving the same sum.
+ */
+export function countSelectedOptions(
+  selections: readonly ModifierSelection[]
+): number {
+  return selections.reduce(
+    (total, selection) => total + selection.optionIds.length,
+    0
+  );
+}
+
+/**
  * Validates a submitted selection against the AUTHORIZED group definitions.
  *
  * Mirrors the SQL in complete_sale_v3 rule for rule. Client-side use is for
@@ -274,7 +291,6 @@ export function validateModifierSelections(
   }
 
   const seenGroupIds = new Set<string>();
-  let totalSelected = 0;
 
   for (const selection of selections) {
     if (seenGroupIds.has(selection.groupId)) {
@@ -321,11 +337,9 @@ export function validateModifierSelections(
     ) {
       return { ok: false, error: "max_selections_exceeded" };
     }
-
-    totalSelected += optionIds.length;
   }
 
-  if (totalSelected > MAX_SELECTED_OPTIONS_PER_LINE) {
+  if (countSelectedOptions(selections) > MAX_SELECTED_OPTIONS_PER_LINE) {
     return { ok: false, error: "too_many_options" };
   }
 
