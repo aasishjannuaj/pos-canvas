@@ -100,7 +100,7 @@ describe("resolvePairingReadiness", () => {
       throw new Error(`expected no_succeeded_build, got ${readiness.state}`);
     }
 
-    expect(readiness.message).toMatch(/build this pos/i);
+    expect(readiness.message).toMatch(/publish this configuration/i);
   });
 
   it("is ready when a succeeded build exists, and selects it automatically", () => {

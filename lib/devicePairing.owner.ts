@@ -49,11 +49,13 @@ export type PairingReadiness =
   | { state: "no_succeeded_build"; message: string }
   | { state: "ready"; buildJobId: string; buildCreatedAt: string };
 
+// Feature 22 Phase 2 — customer-facing wording only. The states, the readiness
+// rule and the Ready-configuration requirement are unchanged.
 const UNSAVED_PROJECT_MESSAGE =
-  "Save this project before pairing a device. A device is paired to a saved project and one of its finished builds.";
+  "Save this project before pairing a device. A device is paired to a saved project and one of its published configurations.";
 
 const NO_BUILD_MESSAGE =
-  "Build this POS before pairing a device. A device runs the exact menu and prices from a finished build, so there must be one to pin it to.";
+  "Publish this configuration before pairing a device. A device runs the exact menu and prices from a published configuration, so there must be one to pin it to.";
 
 export function resolvePairingReadiness(input: {
   projectId: string | null;

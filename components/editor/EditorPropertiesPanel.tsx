@@ -32,13 +32,11 @@ import {
   getBuildRequestButtonLabel,
   getBuildRequestSuccessMessage,
   getBuildStatusLabel,
-  getBuildTargetLabel,
 } from "@/lib/buildJobs";
 import type {
   BuildJobSummary,
   BuildProcessingState,
   BuildRequestStatus,
-  BuildTarget,
 } from "@/lib/buildJobs";
 
 const currencyOptions: Currency[] = ["USD", "CAD", "EUR", "GBP"];
@@ -92,12 +90,15 @@ type EditorPropertiesPanelProps = {
   exportStatus: ExportStatus;
   exportError: string | null;
   onExport: () => void;
-  // Feature 15.4 — Build Application. exportEligibility is reused as-is
+  // Feature 15.4 — the publish block. exportEligibility is reused as-is
   // (unrenamed) for this block too, exactly as it already is for Launch
-  // POS and Export POS JSON — build-request readiness is the same
-  // question asked a third time.
-  selectedBuildTarget: BuildTarget;
-  onBuildTargetChange: (target: BuildTarget) => void;
+  // POS and Export POS JSON — readiness is the same question asked a third
+  // time.
+  //
+  // Feature 22 Phase 2 — selectedBuildTarget/onBuildTargetChange are gone from
+  // this component's surface along with the platform selector they drove. The
+  // target is still chosen inside EditorShell and still sent with the request;
+  // it is simply no longer a customer-facing choice.
   buildRequestStatus: BuildRequestStatus;
   buildRequestError: string | null;
   latestBuildJob: BuildJobSummary | null;
@@ -202,7 +203,7 @@ function getBuildEligibilityMessage(
   eligibility: GeneratedPosExportEligibility
 ): string {
   if (eligibility.reason === "save-first") {
-    return "Save this project before requesting a build.";
+    return "Save this project before publishing this configuration.";
   }
 
   if (eligibility.reason === "saving") {
@@ -210,10 +211,13 @@ function getBuildEligibilityMessage(
   }
 
   if (eligibility.reason === "save-changes-first") {
-    return "Save your latest changes before requesting a build.";
+    // Feature 22 Phase 2 — the wording changed, the RULE did not. Publishing
+    // stays disabled while the editor is dirty, and the server still snapshots
+    // the saved project row, so an unsaved edit can never be published.
+    return "Save your changes before publishing this configuration.";
   }
 
-  return "Choose a target and request a build.";
+  return "Publish this saved configuration so a device can pair with it.";
 }
 
 function formatTransactionTime(createdAt: string): string {
@@ -266,8 +270,6 @@ export default function EditorPropertiesPanel({
   exportStatus,
   exportError,
   onExport,
-  selectedBuildTarget,
-  onBuildTargetChange,
   buildRequestStatus,
   buildRequestError,
   latestBuildJob,
@@ -1347,11 +1349,11 @@ export default function EditorPropertiesPanel({
                 <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                      Build Application
+                      Publish configuration
                     </p>
                     <p className="mt-1 text-xs text-neutral-500">
-                      Create a queued build request from this saved POS
-                      configuration.
+                      Publish a saved version of your business configuration so
+                      it can be paired with the POS Canvas app.
                     </p>
                   </div>
 
@@ -1363,32 +1365,19 @@ export default function EditorPropertiesPanel({
                       {getBuildEligibilityMessage(exportEligibility)}
                     </span>
 
-                    <div
-                      role="group"
-                      aria-label="Build target"
-                      className="grid grid-cols-2 gap-2"
-                    >
-                      {(["android", "desktop"] as const).map((target) => {
-                        const isSelected = selectedBuildTarget === target;
+                    {/* Feature 22 Phase 2 — the Android/Desktop target
+                        selector is gone.
 
-                        return (
-                          <button
-                            key={target}
-                            type="button"
-                            aria-pressed={isSelected}
-                            disabled={buildRequestStatus === "submitting"}
-                            onClick={() => onBuildTargetChange(target)}
-                            className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50 ${
-                              isSelected
-                                ? "border-blue-600 bg-blue-600 text-white"
-                                : "border-neutral-200 text-neutral-700 hover:border-blue-600 hover:text-blue-600"
-                            }`}
-                          >
-                            {getBuildTargetLabel(target)}
-                          </button>
-                        );
-                      })}
-                    </div>
+                        Publishing produces a json_config snapshot of this
+                        project's business configuration. It has never produced
+                        a platform binary, so asking an owner to choose a
+                        platform implied a per-project app that does not exist —
+                        and "Desktop" was selectable while nothing in the worker
+                        could ever fulfil it.
+
+                        The POS Canvas app is UNIVERSAL and downloaded
+                        separately; the request still sends the same internal
+                        target, unchanged, from EditorShell. */}
 
                     {buildRequestStatus === "error" && buildRequestError && (
                       <span className="text-xs text-red-600">
@@ -1424,13 +1413,6 @@ export default function EditorPropertiesPanel({
                       aria-live="polite"
                       className="flex flex-col gap-1.5 rounded-xl border border-neutral-200 px-4 py-3 text-xs text-neutral-600"
                     >
-                      <div className="flex items-center justify-between">
-                        <span className="text-neutral-500">Target</span>
-                        <span className="font-medium text-neutral-900">
-                          {getBuildTargetLabel(latestBuildJob.target)}
-                        </span>
-                      </div>
-
                       <div className="flex items-center justify-between">
                         <span className="text-neutral-500">Status</span>
                         <span className="font-medium text-neutral-900">

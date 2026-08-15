@@ -482,7 +482,7 @@ function stableStringify(value: unknown): string {
 }
 
 const MAX_FAILURE_MESSAGE_LENGTH = 300;
-const GENERIC_FAILURE_MESSAGE = "The build failed due to an internal error.";
+const GENERIC_FAILURE_MESSAGE = "Publishing failed due to an internal error.";
 
 // Feature 15.2 — a best-effort redaction pass, not a guarantee of complete
 // secret detection. Each pattern targets an obviously secret-shaped
@@ -551,9 +551,14 @@ export function getBuildTargetLabel(target: BuildTarget): string {
   return BUILD_TARGET_LABELS[target];
 }
 
+// Feature 22 Phase 2 — CUSTOMER-FACING labels. The keys are the persisted
+// BuildStatus enum and are deliberately unchanged; only the words an owner
+// reads are updated. "Building" implied a binary was being produced, which is
+// exactly the confusion this vocabulary exists to remove: publishing freezes a
+// business configuration, it does not compile an app.
 const BUILD_STATUS_LABELS: Record<BuildStatus, string> = {
   queued: "Queued",
-  building: "Building",
+  building: "Publishing",
   succeeded: "Ready",
   failed: "Failed",
 };
@@ -563,10 +568,10 @@ export function getBuildStatusLabel(status: BuildStatus): string {
 }
 
 const BUILD_REQUEST_BUTTON_LABELS: Record<BuildRequestStatus, string> = {
-  idle: "Request Build",
-  submitting: "Requesting…",
-  success: "Request Another Build",
-  error: "Retry Build",
+  idle: "Publish configuration",
+  submitting: "Publishing…",
+  success: "Publish again",
+  error: "Retry publishing",
 };
 
 export function getBuildRequestButtonLabel(status: BuildRequestStatus): string {
@@ -579,8 +584,8 @@ export function getBuildRequestButtonLabel(status: BuildRequestStatus): string {
 // its own separate copy table for the same distinction.
 export function getBuildRequestSuccessMessage(reusedExisting: boolean): string {
   return reusedExisting
-    ? "An existing active build request was found."
-    : "Build request queued.";
+    ? "This configuration is already being published."
+    : "Configuration queued for publishing.";
 }
 
 // Feature 17.2 — the two sentences that replace 17.1's "usually starts within
@@ -591,13 +596,13 @@ export function getBuildRequestSuccessMessage(reusedExisting: boolean): string {
 // automatically because a dispatch was accepted, which is a fact about GitHub
 // having queued a run — not a prediction about when that run reaches this job.
 export const BUILD_PROCESSING_STARTED_MESSAGE =
-  "Your build is queued and processing will start automatically.";
+  "Your configuration is queued and will publish automatically.";
 
 // Shown when the build IS safely queued but GitHub could not be told to start.
 // Pairs with the "Retry processing" button, which re-dispatches for this exact
 // build and never creates a second one.
 export const BUILD_PROCESSING_UNAVAILABLE_MESSAGE =
-  "Your build is queued, but automatic processing could not be started.";
+  "Your configuration is queued, but publishing could not start automatically.";
 
 // The same failure against a build that is already `building`. It gets its own
 // sentence rather than reusing the one above, which would tell an owner their
@@ -607,7 +612,7 @@ export const BUILD_PROCESSING_UNAVAILABLE_MESSAGE =
 // `building` until claim_next_build_job reclaims it, and only a worker run
 // performs that reclaim — which is exactly what the retry button asks for.
 export const BUILD_PROCESSING_STALLED_MESSAGE =
-  "Your build is still processing, but a worker could not be started to pick it back up.";
+  "Your configuration is still publishing, but it could not be picked back up automatically.";
 
 /**
  * The right "could not be started" sentence for the status actually on screen.

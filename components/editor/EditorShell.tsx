@@ -372,8 +372,11 @@ export default function EditorShell({
   // a pure server-side job request based on the already-saved project: it
   // never marks the project dirty, never touches save/export state, and
   // never modifies projectConfig.
-  const [selectedBuildTarget, setSelectedBuildTarget] =
-    useState<BuildTarget>("android");
+  // Feature 22 Phase 2 — a constant, not state. The customer-facing platform
+  // selector is gone (publishing produces a json_config snapshot, never a
+  // platform binary), so nothing can change this value. It is retained because
+  // requestBuildJob still sends a target and the worker contract is unchanged.
+  const selectedBuildTarget: BuildTarget = "android";
   const [buildRequestStatus, setBuildRequestStatus] =
     useState<BuildRequestStatus>("idle");
   const [buildRequestError, setBuildRequestError] = useState<string | null>(null);
@@ -1457,13 +1460,6 @@ export default function EditorShell({
     }
   }
 
-  // Feature 15.4 — changing the selected target is a pure, ephemeral UI
-  // choice, exactly like editorMode/selectedItemId elsewhere in this file:
-  // it never marks the project dirty.
-  function handleBuildTargetChange(target: BuildTarget) {
-    setSelectedBuildTarget(target);
-  }
-
   // Feature 15.4 — requests (or reuses) a queued build job for the
   // selected target. Reuses exportEligibility exactly as Launch POS does
   // (unrenamed, per the approved plan) — layering buildRequestStatus ===
@@ -1781,8 +1777,6 @@ export default function EditorShell({
           exportStatus={exportStatus}
           exportError={exportError}
           onExport={handleExport}
-          selectedBuildTarget={selectedBuildTarget}
-          onBuildTargetChange={handleBuildTargetChange}
           buildRequestStatus={buildRequestStatus}
           buildRequestError={buildRequestError}
           latestBuildJob={latestBuildJob}

@@ -13,8 +13,9 @@ const steps = [
   },
   {
     number: "03",
-    title: "Download your app",
-    description: "Export your POS and start taking orders right away.",
+    title: "Install POS Canvas",
+    description:
+      "Install the POS Canvas app on your device and pair it with your published configuration.",
   },
 ];
 

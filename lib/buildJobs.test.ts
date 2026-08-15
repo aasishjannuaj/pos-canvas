@@ -245,16 +245,16 @@ describe("sanitizeBuildFailureMessage", () => {
 
   it("produces a safe generic message for non-string input", () => {
     expect(sanitizeBuildFailureMessage(undefined)).toBe(
-      "The build failed due to an internal error."
+      "Publishing failed due to an internal error."
     );
     expect(sanitizeBuildFailureMessage(null)).toBe(
-      "The build failed due to an internal error."
+      "Publishing failed due to an internal error."
     );
     expect(sanitizeBuildFailureMessage(42)).toBe(
-      "The build failed due to an internal error."
+      "Publishing failed due to an internal error."
     );
     expect(sanitizeBuildFailureMessage({})).toBe(
-      "The build failed due to an internal error."
+      "Publishing failed due to an internal error."
     );
   });
 });
@@ -663,7 +663,7 @@ describe("getBuildTargetLabel", () => {
 describe("getBuildStatusLabel", () => {
   it("maps every approved status to its display label", () => {
     expect(getBuildStatusLabel("queued")).toBe("Queued");
-    expect(getBuildStatusLabel("building")).toBe("Building");
+    expect(getBuildStatusLabel("building")).toBe("Publishing");
     expect(getBuildStatusLabel("succeeded")).toBe("Ready");
     expect(getBuildStatusLabel("failed")).toBe("Failed");
   });
@@ -678,10 +678,10 @@ describe("getBuildStatusLabel", () => {
 
 describe("getBuildRequestButtonLabel", () => {
   it("maps every build-request status to its button label", () => {
-    expect(getBuildRequestButtonLabel("idle")).toBe("Request Build");
-    expect(getBuildRequestButtonLabel("submitting")).toBe("Requesting…");
-    expect(getBuildRequestButtonLabel("success")).toBe("Request Another Build");
-    expect(getBuildRequestButtonLabel("error")).toBe("Retry Build");
+    expect(getBuildRequestButtonLabel("idle")).toBe("Publish configuration");
+    expect(getBuildRequestButtonLabel("submitting")).toBe("Publishing…");
+    expect(getBuildRequestButtonLabel("success")).toBe("Publish again");
+    expect(getBuildRequestButtonLabel("error")).toBe("Retry publishing");
   });
 
   it("covers every BuildRequestStatus value with no fallthrough", () => {
@@ -701,12 +701,14 @@ describe("getBuildRequestButtonLabel", () => {
 
 describe("getBuildRequestSuccessMessage", () => {
   it("returns the new-job message when reusedExisting is false", () => {
-    expect(getBuildRequestSuccessMessage(false)).toBe("Build request queued.");
+    expect(getBuildRequestSuccessMessage(false)).toBe(
+      "Configuration queued for publishing."
+    );
   });
 
   it("returns the reused-job message when reusedExisting is true", () => {
     expect(getBuildRequestSuccessMessage(true)).toBe(
-      "An existing active build request was found."
+      "This configuration is already being published."
     );
   });
 });

@@ -207,7 +207,7 @@ export default function DeviceManagementPanel({
           </h2>
           <p className="mt-1 text-sm leading-relaxed text-neutral-500">
             Pair a POS device to take payments on this project. Each device runs
-            the menu and prices from the build it was paired against.
+            the menu and prices from the configuration it was paired against.
           </p>
         </header>
 
@@ -216,7 +216,7 @@ export default function DeviceManagementPanel({
             <h3 className="text-sm font-semibold text-neutral-900">
               {readiness.state === "unsaved_project"
                 ? "Save this project first"
-                : "Build this POS first"}
+                : "Publish this configuration first"}
             </h3>
             <p className="mt-2 text-sm leading-relaxed text-neutral-500">
               {readiness.message}
@@ -228,7 +228,7 @@ export default function DeviceManagementPanel({
                 onClick={onGoToBuild}
                 className="mt-4 rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900"
               >
-                Go to Build
+                Go to Publish
               </button>
             )}
           </section>

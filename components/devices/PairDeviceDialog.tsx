@@ -31,11 +31,11 @@ export default function PairDeviceDialog({
 
       <p className="mt-2 text-sm leading-relaxed text-neutral-500">
         This creates a one-time code for a POS device. The device will be pinned
-        to your latest finished build from{" "}
+        to your latest published configuration from{" "}
         <span className="font-medium text-neutral-700">
           {formatDeviceDate(buildCreatedAt)}
         </span>{" "}
-        and will charge exactly the prices in that build.
+        and will charge exactly the prices in that configuration.
       </p>
 
       {errorMessage !== null && (

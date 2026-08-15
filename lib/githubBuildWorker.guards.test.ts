@@ -290,14 +290,14 @@ describe("the queued build copy no longer promises a start time", () => {
 
   it("says processing starts automatically", () => {
     expect(copy).toContain(
-      "Your build is queued and processing will start automatically."
+      "Your configuration is queued and will publish automatically."
     );
     expect(panelCode).toContain("BUILD_PROCESSING_STARTED_MESSAGE");
   });
 
   it("has distinct copy for a build that was queued but not started", () => {
     expect(copy).toContain(
-      "Your build is queued, but automatic processing could not be started."
+      "Your configuration is queued, but publishing could not start automatically."
     );
     expect(panelCode).toContain("getBuildProcessingUnavailableMessage");
   });
