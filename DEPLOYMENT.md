@@ -456,15 +456,67 @@ no repo bloat, and no coupling to Vercel deploys. It contains no secret.
 > **universal**: one binary for every customer, containing no project id, no
 > configuration and no branding. Do not conflate the two.
 
-Owner flow: sign in → download the universal APK → Android warns about
-installing from an unknown source → install → open → pair with a code from the
-editor's **Devices** section.
+Owner flow: sign in → **Dashboard** → *POS Canvas for Android* card → download the
+universal APK → allow installation from the browser/files app → install → open →
+pair with a code from the project's **Devices** section.
 
-`lib/androidRelease.ts` holds the release metadata contract (`versionName`,
-`versionCode`, `downloadUrl`, `checksum`, `fileSizeBytes`, `releasedAt`).
-`CURRENT_ANDROID_RELEASE` is `null` until a real signed APK exists; fill it in by
-hand, in a normal reviewable commit, once the binary is built, verified and
-uploaded. Creating the GitHub Release is manual — not automated in this feature.
+The download card lives on the **account dashboard**, not inside a project. That
+placement is the invariant, not a layout preference: a card sitting beside a
+project's `json_config` artifact would imply the binary was generated for that
+project. `components/dashboard/androidDownload.guards.test.ts` asserts the card
+takes no project id, reads no build artifact, and renders no project-specific
+copy.
+
+### Publishing a release
+
+After building and verifying the APK (§4a):
+
+1. **Create a GitHub Release** on `aasishjannuaj/pos-canvas` with a new tag.
+2. **Upload the APK** as a release asset, named `POS-Canvas-v<version>.apk`.
+3. **Record the four facts** — do not transcribe them from memory:
+   ```bash
+   # URL, size and timestamp, straight from the API
+   curl -sS "https://api.github.com/repos/aasishjannuaj/pos-canvas/releases/tags/<tag>" \
+     | grep -E '"browser_download_url"|"size"|"published_at"'
+
+   # Checksum, from the actual published bytes
+   curl -sSL -o /tmp/check.apk "<browser_download_url>"
+   shasum -a 256 /tmp/check.apk
+   ```
+4. **Update `CURRENT_ANDROID_RELEASE`** in `lib/androidRelease.ts` with those
+   verified values, and update the pinned assertions in
+   `lib/androidRelease.test.ts`.
+5. **Commit and deploy the web app.** The card reads a module constant, so the
+   new version only appears to owners after a deploy.
+
+> **Verify the tag from the API; do not assume it.** The first publication of
+> v1.0.0 was tagged `v.1.0.0` — with a stray dot — and the conventional URL
+> returned 404 until it was re-tagged. It is now **`v1.0.0`**, serving a
+> byte-identical APK (same sha-256, same signer certificate), and the old URL
+> returns 404. Tags are `v<major>.<minor>.<patch>`, no dot after the `v`.
+>
+> A stale git tag named `v.1.0.0` may still exist in the repository's tag list
+> even though its *release* is gone. Only the release and its asset URL matter
+> for distribution; delete the leftover tag if you want the list tidy.
+
+### Publishing an UPDATE
+
+A new APK release requires all of the following:
+
+| Requirement | Why |
+|---|---|
+| **Increment `versionCode`** | Android refuses to install a lower or equal code over an installed one. |
+| **Update `versionName`** | The user-facing label; keep it semver `x.y.z`. |
+| **Sign with the SAME key** | A different certificate is a different app — no in-place upgrade, and every till loses its pairing. |
+| **New GitHub tag + asset** | Release assets are immutable; never replace the file on an existing tag. |
+| **New checksum, size, timestamp, URL** | All four change; re-verify all four. |
+
+`CURRENT_ANDROID_RELEASE` may be set back to `null` at any time — the card then
+renders "Android release is not available yet." instead of a broken link. That
+safe state is asserted by a guard and must be preserved.
+
+There is deliberately **no auto-update mechanism**: owners re-download and
+install over the existing app.
 
 ## 5. Deployment order
 

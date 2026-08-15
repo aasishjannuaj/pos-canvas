@@ -46,17 +46,50 @@ export type AndroidRelease = {
 /**
  * The current published release, or null when none exists yet.
  *
- * NULL IS THE HONEST VALUE RIGHT NOW, and this is deliberate. Feature 20
- * establishes the release CONFIGURATION; no keystore exists yet, so no signed
- * APK exists, so there is no download URL, no checksum, no file size and no
- * release date. Inventing plausible-looking values would produce a Downloads
- * link that 404s and a checksum that can never match — worse than an honest
- * "no release yet", which a caller can render as such.
+ * Feature 21 — populated with the first real signed release. Every value below
+ * was VERIFIED against the published artifact rather than transcribed:
  *
- * Populated by hand, in a normal reviewable commit, once the first signed APK
- * has been built, verified and uploaded to GitHub Releases.
+ *   - the GitHub Releases API was queried for the actual tag and asset;
+ *   - the APK was downloaded and its sha-256 computed locally (it matches both
+ *     the approved checksum and GitHub's own recorded digest);
+ *   - fileSizeBytes is the byte count of that downloaded file;
+ *   - releasedAt is the release's published_at from the API;
+ *   - aapt2 confirmed package com.poscanvas.app, versionCode 1,
+ *     versionName 1.0.0, minSdkVersion 24;
+ *   - apksigner confirmed the signer certificate sha-256
+ *     7e32ec72c659dfacdab880d7fbe68991cf6104d11434f15d0c516bb9c6525b1b.
+ *
+ * TAG HISTORY, recorded because it cost a round of verification. The release was
+ * first published as `v.1.0.0` — with a stray dot — and has since been re-tagged
+ * to the conventional `v1.0.0`. Both URLs were checked against the API: the old
+ * one now returns 404 and the new one serves a byte-identical APK (same
+ * sha-256, same signer certificate). Future releases use `v<major>.<minor>.<patch>`
+ * with no dot after the v.
+ *
+ * WHEN NO RELEASE EXISTS this must be null rather than a plausible-looking
+ * placeholder: a fabricated URL would 404 and a fabricated checksum could never
+ * match, which is worse than an honest "not available yet" that callers render
+ * as such. Every consumer must handle null.
  */
-export const CURRENT_ANDROID_RELEASE: AndroidRelease | null = null;
+export const CURRENT_ANDROID_RELEASE: AndroidRelease | null = {
+  versionName: "1.0.0",
+  versionCode: 1,
+  downloadUrl:
+    "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.0.0/POS-Canvas-v1.0.0.apk",
+  checksum: "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125",
+  fileSizeBytes: 3169762,
+  releasedAt: "2026-08-14T23:52:46Z",
+};
+
+/**
+ * The minimum Android version the published APK actually supports.
+ *
+ * Read from the APK's own minSdkVersion (24), not chosen for marketing. API 24
+ * is Android 7.0 "Nougat". Nothing else is claimed: the app requests only
+ * INTERNET and has no hardware requirement to advertise.
+ */
+export const ANDROID_MIN_SDK = 24;
+export const ANDROID_MIN_VERSION_LABEL = "Android 7.0 or newer";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SEMVER = /^\d+\.\d+\.\d+$/;

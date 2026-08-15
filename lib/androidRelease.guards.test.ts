@@ -104,6 +104,13 @@ describe("application identity is com.poscanvas.app everywhere", () => {
       if (!existsSync(absolute) || statSync(absolute).isDirectory()) return false;
       if (/\.(jar|png|jpg|webp|ico)$/.test(file)) return false;
 
+      // Test files are excluded because a guard asserting the ABSENCE of the
+      // old id must necessarily name it. This file itself is the case in
+      // point: it began failing the moment it became tracked, on its own
+      // OLD_APP_ID constant. The property being protected is that no SHIPPING
+      // source references the provisional package.
+      if (/\.test\.tsx?$/.test(file)) return false;
+
       const source = readFileSync(absolute, "utf-8");
       const executable = /\.(xml|html)$/.test(file) ? xml(source) : code(source);
 
@@ -504,15 +511,39 @@ describe("the release metadata contract", () => {
     }
   });
 
-  it("reports no release until a real signed APK exists", () => {
-    // Inventing a plausible URL and checksum would produce a 404 download and a
-    // checksum that can never match.
-    expect(source).toContain("export const CURRENT_ANDROID_RELEASE: AndroidRelease | null = null");
+  it("keeps the nullable contract, so 'no release' stays representable", () => {
+    // Feature 20 asserted this constant WAS null, which was correct only while
+    // no signed APK existed. Feature 21 published v1.0.0 and that premise
+    // expired. What endures is the TYPE: consumers must always handle null, so
+    // a future gap between releases renders an honest unavailable state rather
+    // than a broken or fabricated link.
+    expect(source).toContain("CURRENT_ANDROID_RELEASE: AndroidRelease | null");
   });
 
-  it("fabricates no download URL, checksum, size or date", () => {
-    expect(source).not.toMatch(/https:\/\/github\.com\/[^\s"']*\.apk/);
-    expect(source).not.toMatch(/[0-9a-f]{64}/);
+  it("declares a release only with VERIFIED values, never fabricated ones", () => {
+    // The anti-fabrication property moved rather than disappeared. Every field
+    // is now pinned to a value checked against the published artifact — the
+    // GitHub API for the URL, size and timestamp; a local sha-256 of the
+    // downloaded bytes for the checksum — and lib/androidRelease.test.ts
+    // asserts each one exactly. A drive-by edit to any of them fails there.
+    const behavioural = read("lib/androidRelease.test.ts");
+
+    expect(behavioural).toContain("carries the approved checksum, byte for byte");
+    expect(behavioural).toContain("records the real published file size");
+    expect(behavioural).toContain("records the real GitHub publish timestamp");
+    expect(behavioural).toContain("targets the VERIFIED tag");
+  });
+
+  it("any declared download URL is https and points at GitHub Releases", () => {
+    const urls = [...source.matchAll(/downloadUrl:\s*\n?\s*"([^"]+)"/g)].map((m) => m[1]);
+
+    for (const url of urls) {
+      const parsed = new URL(url);
+      expect(parsed.protocol).toBe("https:");
+      expect(parsed.hostname).toBe("github.com");
+      expect(parsed.pathname).toContain("/releases/download/");
+      expect(parsed.pathname.endsWith(".apk")).toBe(true);
+    }
   });
 });
 
