@@ -4,6 +4,7 @@ import Templates from "@/components/landing/Templates";
 import BusinessTypes from "@/components/landing/BusinessTypes";
 import Features from "@/components/landing/Features";
 import HowItWorks from "@/components/landing/HowItWorks";
+import PlatformAvailability from "@/components/landing/PlatformAvailability";
 import CTASection from "@/components/landing/CTASection";
 import Footer from "@/components/landing/Footer";
 
@@ -16,6 +17,7 @@ export default function Home() {
       <BusinessTypes />
       <Features />
       <HowItWorks />
+      <PlatformAvailability />
       <CTASection />
       <Footer />
     </main>

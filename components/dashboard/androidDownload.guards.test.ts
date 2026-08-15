@@ -33,6 +33,12 @@ function code(source: string): string {
 }
 
 const CARD = "components/dashboard/AndroidAppCard.tsx";
+// Feature 22 Phase 3 — the release lookup and the link itself moved out of the
+// card into a shared model and row, so the landing page, the dashboard and the
+// editor all render one universal app from one source. The properties this file
+// protects are unchanged; only their location is.
+const MODEL = "lib/platformDownloads.ts";
+const ROW = "components/platform/PlatformDownloadRow.tsx";
 const PAGE = "app/dashboard/page.tsx";
 const METADATA = "lib/androidRelease.ts";
 
@@ -72,13 +78,17 @@ describe("the APK is universal, not project-specific", () => {
   });
 
   it("reads its URL only from the shared release constant", () => {
-    // One constant, one URL, every owner. The download link cannot be
-    // assembled from anything project-derived.
-    expect(card).toContain("CURRENT_ANDROID_RELEASE");
-    expect(card).toContain("release.downloadUrl");
-    // No hand-built URL anywhere in the component.
-    expect(card).not.toMatch(/href="https?:\/\//);
-    expect(card).not.toMatch(/\.apk["'`]/);
+    // One constant, one URL, every owner. The card now asks the shared model
+    // rather than reading the release itself, and the model is the only place
+    // CURRENT_ANDROID_RELEASE is named.
+    expect(card).toContain("getPlatformDownloads");
+    expect(code(read(MODEL))).toContain("CURRENT_ANDROID_RELEASE");
+    expect(code(read(ROW))).toContain("download.release.downloadUrl");
+    // No hand-built URL anywhere in the card or the row.
+    for (const source of [card, code(read(ROW))]) {
+      expect(source).not.toMatch(/href="https?:\/\//);
+      expect(source).not.toMatch(/\.apk["'`]/);
+    }
   });
 
   it("uses no project-specific language in its copy", () => {
@@ -96,7 +106,7 @@ describe("the APK is universal, not project-specific", () => {
     }
 
     // And the positive statement is present.
-    expect(card).toContain("Universal app");
+    expect(card).toContain("universal POS Canvas app");
   });
 
   it("lives at account level, not inside a project route", () => {
@@ -137,15 +147,19 @@ describe("the download is external, direct, and safe", () => {
   });
 
   it("opens the external link with safe rel attributes", () => {
-    expect(card).toContain('target="_blank"');
-    expect(card).toContain('rel="noopener noreferrer"');
+    // The anchor lives in the shared row now, so every surface inherits it.
+    const row = code(read(ROW));
+    expect(row).toContain('target="_blank"');
+    expect(row).toContain('rel="noopener noreferrer"');
   });
 
   it("does not proxy the binary through this app", () => {
     // No route handler, no server action, no fetch of the APK bytes. The
     // browser talks to GitHub directly.
-    for (const banned of ["fetch(", "route.ts", "NextResponse", "arrayBuffer"]) {
-      expect(card).not.toContain(banned);
+    for (const source of [card, code(read(ROW))]) {
+      for (const banned of ["fetch(", "route.ts", "NextResponse", "arrayBuffer"]) {
+        expect(source).not.toContain(banned);
+      }
     }
   });
 
@@ -171,19 +185,24 @@ describe("the download is external, direct, and safe", () => {
 });
 
 describe("the unavailable state stays safe", () => {
-  const card = code(read(CARD));
-
+  // Phase 3 — both assertions now live in the shared model and row rather than
+  // in the card, so no card source is read in this block.
   it("handles a null release explicitly", () => {
     // Preserved even though v1.0.0 exists: a future gap must never render a
-    // broken link or a fabricated one.
-    expect(card).toContain("release === null");
-    expect(card).toContain("Android release is not available yet.");
+    // broken link or a fabricated one. The null branch moved into the model,
+    // which resolves it to an `unavailable` variant carrying no release.
+    const model = code(read(MODEL));
+    expect(model).toContain("release === null");
+    expect(model).toContain('status: "unavailable"');
   });
 
   it("renders the download only when a release exists", () => {
-    // The link sits in the non-null branch, after the null check.
-    expect(card.indexOf("release === null")).toBeLessThan(
-      card.indexOf("release.downloadUrl")
+    // isDownloadable is the only path to an href, and it is true solely for
+    // the `available` variant.
+    const row = code(read(ROW));
+    expect(row).toContain("isDownloadable(download) ? (");
+    expect(row.indexOf("isDownloadable(download) ? (")).toBeLessThan(
+      row.indexOf("download.release.downloadUrl")
     );
   });
 });
@@ -213,10 +232,11 @@ describe("scope stays where it was locked", () => {
 
   it("states only the device requirement the APK declares", () => {
     // minSdkVersion 24 was read from the published binary. No invented
-    // hardware requirement.
-    expect(card).toContain("ANDROID_MIN_VERSION_LABEL");
+    // hardware requirement. The label now reaches the UI via the model.
+    expect(code(read(MODEL))).toContain("ANDROID_MIN_VERSION_LABEL");
     for (const invented of ["camera", "Bluetooth", "NFC", "printer", "RAM", "GB"]) {
       expect(card).not.toContain(invented);
+      expect(code(read(ROW))).not.toContain(invented);
     }
   });
 
@@ -231,12 +251,14 @@ describe("the owner-facing copy is present and correct", () => {
   const card = read(CARD);
 
   it("shows the version", () => {
-    expect(card).toContain("release.versionName");
-    expect(card).toContain("Version {release.versionName}");
+    const row = read(ROW);
+    expect(row).toContain("download.release.versionName");
+    expect(row).toContain("Version {download.release.versionName}");
   });
 
   it("offers the download action", () => {
-    expect(card).toContain("Download Android APK");
+    // Phase 3 wording: "Download Android App" — the app, not the file format.
+    expect(read(ROW)).toContain("Download {download.label} App");
   });
 
   it("states the Android version requirement", () => {
@@ -245,16 +267,21 @@ describe("the owner-facing copy is present and correct", () => {
 
   it("gives pairing guidance without creating a pairing code", () => {
     expect(card).toContain("pairing code");
-    expect(card).toContain("Build your latest configuration first");
+    expect(card).toContain("Publish your latest configuration first");
     // Downloading must never mint a token.
     expect(code(card)).not.toContain("requestDevicePairingToken");
     expect(code(card)).not.toContain("create_device_pairing_token");
   });
 
   it("keeps the two concepts distinct for the owner", () => {
-    // Project Build freezes a business configuration; the Android app is the
+    // Publishing freezes a business configuration; the POS Canvas app is the
     // universal application. The copy must not blur them.
-    expect(card).toContain("pair it");
-    expect(card).toContain("after pairing");
+    //
+    // Whitespace-normalised: this copy wraps across JSX lines, so a raw
+    // substring match would depend on where the formatter chose to break.
+    const copy = card.replace(/\s+/g, " ");
+
+    expect(copy).toContain("pair it with a published configuration");
+    expect(copy).toContain("Publish your latest configuration first");
   });
 });

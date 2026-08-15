@@ -263,12 +263,18 @@ describe("the configuration download stays distinct from the app download", () =
     expect(code(read(PANEL))).toContain("Download configuration");
   });
 
-  it("the app download says 'Download Android APK' and lives elsewhere", () => {
-    const card = code(read("components/dashboard/AndroidAppCard.tsx"));
-    expect(card).toContain("Download Android APK");
-    // The two must never appear on the same surface.
-    expect(code(read(PANEL))).not.toContain("Download Android");
-    expect(card).not.toContain("Download configuration");
+  it("the app download says 'Download Android App' and lives elsewhere", () => {
+    // Feature 22 Phase 3 — the label moved into the shared PlatformDownloadRow
+    // and reads "Download Android App": the app, not the file format.
+    const row = code(read("components/platform/PlatformDownloadRow.tsx"));
+    expect(row).toContain("Download {download.label} App");
+
+    // The two downloads must never appear on the same surface: one is this
+    // project's json_config, the other is the universal binary.
+    const publish = code(read(PANEL));
+    expect(publish).not.toContain("PlatformDownloadRow");
+    expect(publish).not.toContain("getPlatformDownloads");
+    expect(row).not.toContain("Download configuration");
   });
 
   it("the universal app metadata is still uncoupled from build jobs", () => {

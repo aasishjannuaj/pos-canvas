@@ -26,6 +26,7 @@ import { useCallback, useEffect, useState } from "react";
 import PairDeviceDialog from "@/components/devices/PairDeviceDialog";
 import PairedDeviceList from "@/components/devices/PairedDeviceList";
 import PairingCodeCard from "@/components/devices/PairingCodeCard";
+import RunYourPosPanel from "@/components/devices/RunYourPosPanel";
 import RevokeDeviceDialog from "@/components/devices/RevokeDeviceDialog";
 import { listProjectBuildJobs } from "@/lib/buildJobs.actions";
 import type { BuildJobSummary } from "@/lib/buildJobs";
@@ -210,6 +211,12 @@ export default function DeviceManagementPanel({
             the menu and prices from the configuration it was paired against.
           </p>
         </header>
+
+        {/* Feature 22 Phase 3 — where the universal app is discovered. Placed
+            above the pairing controls because installing it is step 3 of the
+            same sequence, and deliberately NOT beside the Publish section's
+            "Download configuration", which is this project's json_config. */}
+        <RunYourPosPanel readiness={readiness} />
 
         {readiness.state !== "ready" ? (
           <section className="rounded-xl border border-neutral-200 bg-white p-6">
