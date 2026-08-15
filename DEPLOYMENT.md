@@ -87,18 +87,41 @@ have them.
 
 **Authentication → URL Configuration**
 
+These are exact values, not examples. Password recovery does not work without
+them.
+
 | Setting | Value |
 |---|---|
-| Site URL | your production URL, e.g. `https://your-app.vercel.app` |
-| Redirect URLs | the production URL, plus `http://localhost:3000` for local work, plus a preview pattern if you use preview deployments |
+| **Site URL** | `https://pos-canvas.vercel.app` |
+| **Redirect URLs** | `https://pos-canvas.vercel.app/auth/callback`<br>`http://localhost:3000/auth/callback` |
 
-This matters because `signUp()` does not pass an `emailRedirectTo` — confirmation
-links fall back to the Site URL. Left at `localhost:3000`, every production
-sign-up emails a dead link.
+- **Site URL is the canonical production origin.** It is the fallback any auth
+  email uses when no explicit redirect is supplied, so it must be the real
+  production host — never a preview deployment and never `localhost`.
+- **`http://localhost:3000/auth/callback` is an allow-list entry only.** It lets
+  a developer exercise recovery against `npm run dev`. It must never be the Site
+  URL, or production emails would point at a machine nobody else can reach.
+- **Password recovery depends on the callback URL being allow-listed.** The
+  reset email is sent with `redirectTo` pointing at `/auth/callback`; Supabase
+  refuses to redirect anywhere its own list does not contain, so a missing entry
+  makes every reset link fail. The app enforces the same two origins
+  independently in `lib/siteOrigin.ts` — two lists, both of which must permit
+  the value.
+- Adding a preview-deployment origin here would let production reset emails be
+  aimed at a preview build. Treat any addition as a security decision.
 
 **Authentication → Providers → Email**
 
-Decide whether **"Confirm email"** is on:
+**Current MVP decision: "Confirm email" is OFF.**
+
+With it off, `signUp()` returns a live session and the owner lands on the
+dashboard immediately — the normal production path. The signup page still checks
+for that session and, if one is ever unexpectedly absent (for example because
+this setting was switched on), shows "Check your email to finish creating your
+account" rather than navigating to a page the owner has no session for. That is
+a defensive branch, not the expected flow.
+
+If you turn confirmation on, re-read that behaviour first:
 
 - **On** — closer to production, but requires the Site URL to be correct first.
 - **Off** — simplest for an initial hosted test; sign-in works immediately. This
