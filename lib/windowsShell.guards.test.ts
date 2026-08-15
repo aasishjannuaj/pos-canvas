@@ -496,18 +496,13 @@ describe("Electron never enters the web application", () => {
 describe("Feature 23.1 stops where it was scoped to stop", () => {
   const main = code(read(MAIN));
 
-  it("adds no 23.2 navigation or permission policy", () => {
-    for (const later of [
-      "will-navigate",
-      "setWindowOpenHandler",
-      "setPermissionRequestHandler",
-      "will-download",
-      "certificate-error",
-      "requestSingleInstanceLock",
-    ]) {
-      expect(`main.mjs: ${main}`).not.toContain(later);
-    }
-  });
+  // The 23.1 fence that asserted navigation, window-open, permission, download
+  // and single-instance controls were ABSENT was removed when Feature 23.2 added
+  // them deliberately. Their presence is now asserted positively in
+  // lib/windowsShellSecurity.guards.test.ts, which is where the security posture
+  // belongs. `certificate-error` is the one member of that old list that must
+  // stay absent forever, and it moved to the same file as a TLS guard rather
+  // than remaining here as a phase fence.
 
   it("adds no 23.3 device identity", () => {
     expect(main).not.toContain("DevicePlatform");

@@ -1,10 +1,26 @@
 // Feature 23.1 — the smallest preload that lets the local fallback page ask for
 // another attempt.
+// Feature 23.2 — that bridge is now invisible to the hosted page.
 //
-// WHY A PRELOAD EXISTS AT ALL IN THIS PHASE: a sandboxed, context-isolated
-// renderer has no way to reach the main process without one, and the fallback
-// page's Retry button is in scope for 23.1. This is the mechanism Electron
-// provides for exactly that, used at its minimum size.
+// WHY A PRELOAD EXISTS AT ALL: a sandboxed, context-isolated renderer has no way
+// to reach the main process without one, and the fallback page's Retry button
+// needs exactly that. This is the mechanism Electron provides, used at its
+// minimum size.
+//
+// WHY THE PROTOCOL GATE: webPreferences are per-WINDOW, not per-page, so this
+// script runs for every document the window loads — including
+// https://pos-canvas.vercel.app. In 23.1 that meant the hosted page could see
+// `posCanvasShell`. It could do nothing harmful with it (the main process
+// already ignored retries from non-local frames, and a page can reload itself
+// anyway), but a bridge visible where it has no purpose is surface for no
+// reason. Gating on the document's own scheme removes it: after this,
+// `window.posCanvasShell` is undefined on the hosted page, and the only document
+// that can see it is the local fallback loaded by the main process itself.
+//
+// TWO INDEPENDENT BARRIERS, deliberately. This gate decides what the page can
+// SEE; the main process's sender check decides what it will ACT ON. Either alone
+// would be sufficient today, which is the point — a mistake in one does not
+// become an exploitable path.
 //
 // WHAT CROSSES THIS BRIDGE: nothing. `retry()` takes no arguments and returns
 // nothing. The destination URL is never sent here and never read from here — it
@@ -29,9 +45,16 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- sandboxed Electron preloads must be CommonJS
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("posCanvasShell", {
-  /** Ask the shell to try the runtime URL again. Carries no destination. */
-  retry: () => {
-    ipcRenderer.send("pos-canvas-shell:retry");
-  },
-});
+// The local fallback page is the only document the main process ever loads from
+// disk, so this is precisely "am I the offline page" without needing to know its
+// path or compare a filename.
+const isLocalFallbackPage = window.location.protocol === "file:";
+
+if (isLocalFallbackPage) {
+  contextBridge.exposeInMainWorld("posCanvasShell", {
+    /** Ask the shell to try the runtime URL again. Carries no destination. */
+    retry: () => {
+      ipcRenderer.send("pos-canvas-shell:retry");
+    },
+  });
+}

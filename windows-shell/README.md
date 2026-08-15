@@ -96,6 +96,41 @@ directions.
 Electron is pinned to an **exact** version — no `^`, no `~`. A range would let
 the Chromium version under a payments surface change silently.
 
+## Security posture (Feature 23.2)
+
+Everything is denied unless this shell allows it. A till displays one origin and
+asks the operating system for nothing.
+
+| Control | Behaviour |
+|---|---|
+| **Single instance** | A second launch quits itself and focuses/un-minimises the existing window. Not tidiness: two renderers on one profile means two Supabase clients racing over the same refresh token, which is the exact race `lib/supabase/deviceClient.ts` caches its client to avoid. |
+| **Navigation** | `will-navigate` **and** `will-redirect` are checked against an origin allow-list. Release allows only `https://pos-canvas.vercel.app`. Development additionally allows the resolved dev origin. Refused: other hosts, lookalikes, subdomains, cleartext, embedded credentials, `javascript:`, `data:`, `file:`, custom schemes, malformed URLs. |
+| **New windows** | `setWindowOpenHandler` denies **everything**, trusted URLs included. Nothing on `/device` opens a window, and there is no `shell.openExternal` anywhere — a shell that will open an arbitrary URL is a phishing primitive. |
+| **Permissions** | Both the request handler and the check handler deny unconditionally. Camera, microphone, geolocation, notifications, MIDI, clipboard-read, sensors: all refused. |
+| **Downloads** | `will-download` cancels everything. Configuration download belongs to the **owner web editor**, behind owner auth, on a surface this shell never loads. |
+| **DevTools** | `devTools: !isRelease`, plus F12 / Ctrl+Shift+I / Cmd+Opt+I intercepted in release. Available in development. |
+| **TLS** | Untouched, deliberately. There is **no** `certificate-error` handler: Electron's default is to reject, and the only reason to add one would be to override that. |
+| **webPreferences** | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, `webviewTag: false`, `webSecurity` at its secure default. |
+
+The navigation decision lives in `navigationPolicy.mjs` as pure, Electron-free
+functions, so every sharp edge — lookalike hosts, userinfo prefixes, scheme
+swaps — is exercised by the root test suite under plain Node.
+
+**The main process may still load `offline.html`.** `loadURL`/`loadFile` do not
+emit `will-navigate`, so blocking `file://` for the page costs the fallback
+nothing and required no exception in the allow-list. Verified live.
+
+### Renderer-visible surface
+
+On `https://pos-canvas.vercel.app`, the page sees **nothing**:
+`window.posCanvasShell`, `window.require`, `window.process`, `window.module` and
+`window.ipcRenderer` are all `undefined`.
+
+The retry bridge is exposed only when the document's own scheme is `file:` — i.e.
+only on the local fallback page. Two independent barriers guard it: the preload
+gate decides what the page can *see*, and the main process's sender check decides
+what it will *act on*. `retry()` takes no arguments, so no destination can cross.
+
 ## Offline behaviour
 
 `offline.html` is shown when the runtime URL cannot be reached. It is a message
@@ -108,6 +143,76 @@ Retry carries **no destination**. The page signals intent through a
 zero-argument channel and the main process re-loads the URL it already resolved,
 so development and release both retry the correct target with no URL injected
 into the page — and no page can point the shell anywhere.
+
+## Pairing persistence
+
+The paired device session is **one localStorage entry** —
+`pos-canvas-device-auth`, on the runtime origin, written by supabase-js with
+`persistSession: true` (`lib/supabase/deviceClient.ts`). No cookie, no IndexedDB.
+The pinned configuration is deliberately **never** stored; it is re-fetched on
+every cold start so a revoked device stops working immediately.
+
+So the shell's only job is to not get in the way: it uses the default persistent
+session (no `fromPartition`, no ephemeral profile), clears no storage, and never
+relocates or deletes the user-data directory.
+
+### Verifying it locally
+
+```bash
+npm run start:production
+```
+
+1. Pair the shell with a code from your project's **Devices** section.
+2. Confirm the POS loads with your business's menu.
+3. Quit the app properly — **Cmd+Q**, or the app's Quit menu item.
+4. Relaunch with the same command.
+5. It should return to the paired POS **without** asking for a code, and re-fetch
+   its configuration from the backend.
+
+**Quit properly for this test.** Force-killing the process is not the same thing
+— see below.
+
+### Verified on macOS (Feature 23.2)
+
+* Pair → **Cmd+Q** → relaunch: returns to the paired POS **without** asking for
+  another code, and re-fetches its configuration. Confirmed manually.
+* Graceful quit flushes localStorage to disk before exiting.
+
+### Open question: abrupt termination
+
+Also observed on macOS, and **not resolved**:
+
+* Force-kill (`SIGTERM`) → relaunch: **intermittent**. The session survived in
+  one trial and was **lost** in another — the shell came back as a brand-new
+  anonymous user on the "Set up this till" screen, i.e. unpaired.
+
+Leading hypothesis, **not proven**: Chromium flushes localStorage lazily and
+supabase-js rotates the refresh token on each refresh. If a rotation is still
+unflushed when the process dies, the stale token left on disk is rejected on the
+next launch and the client falls back to a fresh anonymous sign-in.
+
+**For a till this matters, because a power cut is a force-kill.** A device that
+loses its session cannot return to its `paired_devices` row; the owner has to
+revoke it and pair again.
+
+This is a property of the storage layer, not of this shell's code — nothing on
+the Electron side fixes it alone — so it does not block 23.2. It is carried
+forward as a **hard validation gate for Feature 23.5**:
+
+> **23.5 HARD VALIDATION ITEM — abrupt termination on real Windows x64**
+>
+> 1. Pair the installed Windows app.
+> 2. Verify an operational POS (menu renders, a sale completes).
+> 3. Abruptly terminate the process / simulate power loss — not a clean quit.
+> 4. Restart the app.
+> 5. Confirm the pairing survives and the POS is operational without a new code.
+>
+> **Repeat multiple times** — the macOS behaviour was intermittent, so a single
+> pass proves nothing.
+>
+> **If pairing loss reproduces on real Windows, the public Windows release
+> stops** until a mitigation is designed and validated. Shipping a till that can
+> silently unpair after a power cut is not acceptable.
 
 ## Not implemented yet
 
