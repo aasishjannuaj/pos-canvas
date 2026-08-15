@@ -214,15 +214,101 @@ forward as a **hard validation gate for Feature 23.5**:
 > stops** until a mitigation is designed and validated. Shipping a till that can
 > silently unpair after a power cut is not acceptable.
 
+## Building the Windows installer (Feature 23.4)
+
+**The authoritative build path is GitHub Actions, not your Mac.**
+
+### Running a build
+
+1. GitHub → **Actions** → **Windows app** → **Run workflow** → branch `main` → **Run workflow**.
+2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.0.0`**.
+3. It contains two files:
+   - `POS-Canvas-Windows-v1.0.0.exe`
+   - `POS-Canvas-Windows-v1.0.0.exe.sha256`
+
+### Verifying the download
+
+```bash
+shasum -a 256 -c POS-Canvas-Windows-v1.0.0.exe.sha256
+```
+
+The checksum file uses the standard two-column format, so `sha256sum -c` works on
+Linux and `Get-FileHash` on Windows produces the same value.
+
+### What gets built
+
+| | |
+|---|---|
+| Target | NSIS `.exe` only — no MSI, no portable, no ARM64 |
+| Architecture | **x64 only** |
+| Installer | Assisted (`oneClick: false`), **per-user** (`perMachine: false`), no administrator rights |
+| User data | **Never deleted on uninstall** (`deleteAppDataOnUninstall: false`) |
+| Shortcuts | Start Menu + Desktop, named "POS Canvas" |
+| Signing | **None** — see below |
+| Icon | Electron's default — see below |
+
+### Minimum Windows version
+
+**Windows 10 or later, x64.** This is Electron 43.4.0's own stated support, read
+from the installed package's README: *"Windows (Windows 10 and up)"*. Support for
+Windows 7/8/8.1 was removed in Electron 23. The package documentation does not
+narrow this to a specific Windows 10 build number, so neither does this project —
+verify again if the Electron major version changes.
+
+### Building locally on a Mac (optional)
+
+```bash
+npm run build:windows
+```
+
+electron-builder can cross-build the NSIS installer from macOS, and it currently
+does. **Treat that as a convenience, never as the release gate** — it is not the
+path electron-builder's maintainers test, and Authenticode signing (23.6) cannot
+happen there at all. Output lands in `windows-shell/dist/`, which is gitignored.
+
+### This build is UNSIGNED
+
+There is no code signing in this phase: no certificate, no `.pfx`, no signing
+secrets, and no configuration referencing any. Verified on the produced binary —
+its PE certificate table is empty.
+
+Consequences, stated plainly:
+
+* Windows SmartScreen will warn on it, and under Smart App Control or enterprise
+  policy it may be **blocked outright**.
+* It is therefore suitable for **our own engineering and private testing only**.
+* It is **not** the public customer distribution plan.
+
+Signing is a **Feature 23.6** decision, together with publishing a GitHub Release
+and switching Windows off "Coming Soon".
+
+### Branding is not final
+
+electron-builder reports *"default Electron icon is used"*, which is deliberate.
+**Final Windows icon, installer branding, splash screen and company branding are
+Feature 24 work, before any public release.** Nothing in this phase should be
+treated as final artwork, and no placeholder company branding was invented.
+
+### Still to come
+
+* **23.5** — install and validate on real Windows x64, including the abrupt-
+  termination and upgrade-persistence gates.
+* **23.6** — signing, GitHub Release, release metadata, and switching Windows
+  from Coming Soon to a real download.
+
+Windows remains **Coming Soon** everywhere in the product until all of that is
+done. No public download URL exists.
+
 ## Not implemented yet
 
-| Belongs to | Not in this phase |
+| Belongs to | Status |
 |---|---|
-| 23.2 | navigation lockdown, permission handler, window-open policy, download blocking, certificate handling, single-instance lock, production DevTools lockdown |
-| 23.3 | desktop identity signal, `DevicePlatform` `"windows"` |
-| 23.4 | electron-builder, NSIS installer, GitHub Actions Windows build |
-| 23.5 | real-Windows validation, upgrade/pairing-persistence gate |
-| 23.6 | code signing, GitHub release, switching Windows off Coming Soon |
+| 23.2 | **Done** — navigation lockdown, permission handler, window-open policy, download blocking, single-instance lock, production DevTools lockdown |
+| 23.3 | **Done** — identity signal, `DevicePlatform` `"windows"` |
+| 23.4 | **Done** — electron-builder, NSIS installer, GitHub Actions Windows build |
+| 23.5 | Not started — real-Windows validation, upgrade/pairing-persistence gate |
+| 23.6 | Not started — code signing, GitHub Release, switching Windows off Coming Soon |
+| 24 | Not started — final icon, installer branding, splash, company branding |
 
 The four structural `webPreferences` (`contextIsolation`, `nodeIntegration`,
 `sandbox`, `webviewTag`) are present from the first commit rather than being

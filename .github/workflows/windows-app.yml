@@ -1,0 +1,134 @@
+# Feature 23.4 — the authoritative build path for the universal Windows app.
+#
+# WHY A WINDOWS RUNNER AND NOT A MAC. electron-builder can sometimes emit an
+# NSIS installer from macOS, but it is not the path its maintainers test, and
+# Authenticode signing (Feature 23.6) cannot happen there at all. A release
+# artifact that only one developer's laptop can reproduce is not a release
+# process. This workflow is the gate; a local cross-build is a convenience.
+#
+# WHAT THIS PRODUCES: one unsigned NSIS installer,
+# POS-Canvas-Windows-v<version>.exe, plus its SHA-256, uploaded as workflow
+# artifacts. It does NOT create a GitHub Release, does NOT sign anything, and
+# does NOT make Windows downloadable anywhere in the product — Windows stays
+# "Coming Soon" until Feature 23.6, after Feature 23.5 has validated the
+# installer on real Windows x64.
+#
+# THE BINARY IS UNIVERSAL. Nothing project-, customer- or build-specific enters
+# it: the shell contains one hardcoded origin and no configuration at all. There
+# is deliberately no input to this workflow that could vary the output per
+# customer, because a per-customer Windows binary is the thing this product's
+# architecture exists to avoid.
+#
+# NO SECRETS ARE REQUIRED OR REFERENCED. The shell is a static wrapper with no
+# Supabase credentials, so unlike the build worker this job needs no environment
+# at all. That is worth preserving: a build that needs no secret cannot leak one.
+
+name: Windows app
+
+on:
+  # Manual only, for now. A tag trigger is deliberately deferred until the
+  # artifact has been validated on real Windows hardware (Feature 23.5) — an
+  # automatic build of an unvalidated installer would invite treating it as
+  # releasable.
+  workflow_dispatch:
+
+# Least privilege. This job reads the repository and uploads workflow artifacts;
+# it never writes to the repository and never creates a Release. Artifact upload
+# does not require `contents: write`.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-app
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build unsigned Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: windows-shell
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: windows-shell/package-lock.json
+
+      # The shell is a separate npm project; installing at the repository root
+      # would pull the web app's dependency tree for no reason and would not
+      # provide electron-builder.
+      - name: Install shell dependencies
+        run: npm ci
+
+      - name: Show toolchain versions
+        run: |
+          node --version
+          npm --version
+          npx --no-install electron-builder --version
+
+      # Fails loudly if the Electron binary did not materialise. `npm ci` has
+      # been observed to defer Electron's postinstall download, and a build that
+      # silently packages nothing is worse than one that stops here.
+      - name: Verify the Electron binary is present
+        run: node -e "const p=require('electron');const fs=require('fs');if(typeof p!=='string'||!fs.existsSync(p)){throw new Error('Electron binary missing: '+p)}console.log('electron binary ok:',p)"
+
+      - name: Build the NSIS installer
+        run: npm run build:windows
+
+      # ------------------------------------------------------------------
+      # Verification. The filename is part of the contract — the product's
+      # release metadata (Feature 23.6) will reference it — so an unexpected
+      # name fails the build rather than being renamed afterwards.
+      # ------------------------------------------------------------------
+      - name: Verify the installer and record its checksum
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $name = "POS-Canvas-Windows-v$version.exe"
+          $path = Join-Path "dist" $name
+
+          if (-not (Test-Path $path)) {
+            Write-Host "Expected installer not found: $path"
+            Write-Host "dist contains:"
+            Get-ChildItem dist | ForEach-Object { Write-Host "  $($_.Name)" }
+            exit 1
+          }
+
+          $size = (Get-Item $path).Length
+          Write-Host "installer: $name"
+          Write-Host "size: $size bytes"
+
+          # An NSIS installer wrapping Electron is tens of megabytes. Anything
+          # trivially small means the build produced a stub.
+          if ($size -lt 40MB) {
+            Write-Host "Installer is implausibly small ($size bytes)."
+            exit 1
+          }
+
+          $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+          Write-Host "sha256: $hash"
+
+          # Same two-column format as `shasum -a 256`, so the file verifies with
+          # the standard tools on any platform.
+          "$hash  $name" | Out-File -FilePath "$path.sha256" -Encoding ascii -NoNewline
+
+      - name: Upload the installer and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: pos-canvas-windows-v1.0.0
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            windows-shell/dist/POS-Canvas-Windows-v*.exe
+            windows-shell/dist/POS-Canvas-Windows-v*.exe.sha256

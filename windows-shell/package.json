@@ -7,9 +7,46 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
-    "start:production": "POS_CANVAS_DESKTOP_RELEASE=1 electron ."
+    "start:production": "POS_CANVAS_DESKTOP_RELEASE=1 electron .",
+    "build:windows": "electron-builder --win --x64 --publish never"
   },
   "devDependencies": {
-    "electron": "43.4.0"
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.poscanvas.app",
+    "productName": "POS Canvas",
+    "copyright": "POS Canvas",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.mjs",
+      "preload.js",
+      "serverUrl.mjs",
+      "navigationPolicy.mjs",
+      "offline.html",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "POS-Canvas-Windows-v${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "POS Canvas"
+    }
   }
 }

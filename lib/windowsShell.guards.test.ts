@@ -45,7 +45,6 @@ function code(source: string): string {
     .replace(/^\s*\/\/.*$/gm, "");
 }
 
-const SHELL_DIR = "windows-shell";
 const SHELL_PACKAGE = "windows-shell/package.json";
 const SHELL_LOCK = "windows-shell/package-lock.json";
 const SERVER_URL = "windows-shell/serverUrl.mjs";
@@ -239,9 +238,17 @@ describe("the shell is universal, not per customer", () => {
         "buildJob",
         "build_jobs",
         "buildJobId",
-        "artifact",
-        "GeneratedPosConfig",
+        // Feature 23.4 — the bare substring "artifact" was too broad. It was
+        // meant to catch the shell consuming a PROJECT's build artifact, but it
+        // also matches electron-builder's own `artifactName`, which is how the
+        // installer filename is configured and has nothing to do with
+        // build_jobs. The project-specific names are banned precisely instead;
+        // the invariant is unchanged, only the wording of the test.
+        "build_artifacts",
+        "buildArtifact",
+        "downloadBuildArtifact",
         "config_snapshot",
+        "GeneratedPosConfig",
         "businessName",
         "menuItems",
       ]) {
@@ -358,7 +365,10 @@ describe("the main process carries the locked security defaults", () => {
   });
 
   it("loads the runtime URL through one resolved value", () => {
-    expect(main).toContain("readDesktopServerUrl()");
+    // Feature 23.4 threads app.isPackaged in; the resolution is still a single
+    // call whose result is the only destination this process ever loads.
+    expect(main).toContain("readDesktopServerUrl(process.env, {");
+    expect(main).toContain("isPackaged: app.isPackaged,");
     expect(main).toContain("window.loadURL(resolvedServer.url)");
     // No second, divergent source of the destination.
     expect(main).not.toMatch(/loadURL\(["'`]http/);
@@ -482,15 +492,30 @@ describe("Electron never enters the web application", () => {
     );
   });
 
-  it("no packaging tooling was added in this phase", () => {
-    // electron-builder, NSIS configuration and the installer belong to 23.4.
-    const shellPackage = read(SHELL_PACKAGE);
+  it("packaging tooling stays inside the shell project", () => {
+    // Feature 23.4 added electron-builder here deliberately. The 23.1 fence that
+    // asserted its ABSENCE is gone; what survives is the property that actually
+    // matters and always did — packaging tooling belongs to the shell's own npm
+    // project and must never reach the web app. lib/windowsInstaller.guards.test.ts
+    // asserts the configuration itself.
+    const shellPackage = JSON.parse(read(SHELL_PACKAGE)) as {
+      devDependencies: Record<string, string>;
+    };
 
-    expect(shellPackage).not.toContain("electron-builder");
-    expect(shellPackage).not.toContain("electron-forge");
-    expect(shellPackage).not.toContain("nsis");
-    expect(existsSync(join(repoRoot, SHELL_DIR, "electron-builder.yml"))).toBe(false);
-    expect(existsSync(join(repoRoot, SHELL_DIR, "build"))).toBe(false);
+    expect(shellPackage.devDependencies["electron-builder"]).toBeDefined();
+    expect(shellPackage.devDependencies["electron-forge"]).toBeUndefined();
+
+    const rootPackage = JSON.parse(read("package.json")) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+
+    for (const name of Object.keys({
+      ...rootPackage.dependencies,
+      ...rootPackage.devDependencies,
+    })) {
+      expect(name).not.toMatch(/^electron-builder$|^app-builder-lib$/);
+    }
   });
 
   it("the shell's node_modules cannot be committed", () => {
@@ -536,10 +561,10 @@ describe("Feature 23.1 stops where it was scoped to stop", () => {
     expect(model).not.toContain("getWindowsDownload");
   });
 
-  it("adds no GitHub Actions workflow", () => {
-    expect(existsSync(join(repoRoot, ".github/workflows/windows-app.yml"))).toBe(false);
-    expect(existsSync(join(repoRoot, ".github/workflows/windows.yml"))).toBe(false);
-  });
+  // The 23.1 fence asserting no Windows workflow existed was removed when
+  // Feature 23.4 added .github/workflows/windows-app.yml deliberately. That
+  // workflow's properties — windows-latest, contents: read, no signing, no
+  // Release — are asserted in lib/windowsInstaller.guards.test.ts.
 
   it("leaves the Android shell untouched", () => {
     const android = code(read("android-shell/serverUrl.mjs"));

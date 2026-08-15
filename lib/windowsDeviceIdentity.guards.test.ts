@@ -317,13 +317,14 @@ describe("Feature 23.3 stops where it was scoped to stop", () => {
     expect(model).not.toContain("getWindowsDownload");
   });
 
-  it("adds no installer, CI, release metadata, or signing work", () => {
+  it("adds no release metadata or signing work", () => {
+    // Feature 23.4 added the installer and its workflow deliberately; those are
+    // asserted in lib/windowsInstaller.guards.test.ts. What 23.3 still fences
+    // out is everything downstream of a built installer.
     expect(existsSync(join(repoRoot, "lib/windowsRelease.ts"))).toBe(false);
-    expect(existsSync(join(repoRoot, ".github/workflows/windows-app.yml"))).toBe(false);
-    expect(existsSync(join(repoRoot, "windows-shell/electron-builder.yml"))).toBe(false);
 
     const shellPackage = read("windows-shell/package.json");
-    for (const banned of ["electron-builder", "electron-forge", "nsis", "sign"]) {
+    for (const banned of ["certificateFile", "certificatePassword", "signtool"]) {
       expect(`package.json: ${shellPackage}`).not.toContain(banned);
     }
   });

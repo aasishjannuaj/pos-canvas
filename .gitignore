@@ -8,6 +8,11 @@
 # cover its node_modules, and an unignored Electron install is ~300 MB of
 # binaries (measured: 309 MB). Its package-lock.json IS tracked, deliberately.
 /windows-shell/node_modules
+# Feature 23.4 — electron-builder output. Every build writes an installer here
+# (~80 MB) plus unpacked application trees. The authoritative installer comes
+# from the windows-latest GitHub Actions job and is downloaded as a workflow
+# artifact, never committed.
+/windows-shell/dist
 /.pnp
 .pnp.*
 .yarn/*

@@ -64,20 +64,41 @@ const DEVICE_PATH_PREFIX = "/device";
 /**
  * True when this run is a release build.
  *
- * An explicit opt-in flag rather than NODE_ENV, for the reason Android records:
- * NODE_ENV is frequently unset or inherited from an unrelated context, so
- * treating it as a release signal would make the production URL depend on
- * ambient state. Exactly "1" is required — a stray empty string, "true", or
- * "false" all read as development, which fails safe.
+ * TWO INDEPENDENT WAYS TO BE A RELEASE, and the packaged one is decisive.
  *
- * The `@param` tag is load-bearing, not decoration: without it TypeScript infers
- * `env` from the default value as ProcessEnv, and every caller that passes a
- * plain object — which is the entire point of injecting the environment — fails
- * type checking.
+ * 1. `isPackaged` — Electron's own answer to "am I running from an installed
+ *    application rather than from a checkout". Feature 23.4 made this the
+ *    primary signal, because an installed customer app CANNOT be asked to set
+ *    an environment variable. A packaged build is a release, full stop.
+ * 2. The environment flag — retained for `npm run start:production`, so a
+ *    developer can exercise the real production URL from an unpackaged
+ *    checkout on a Mac.
+ *
+ * THE ORDER MATTERS AND THE OR IS DELIBERATE. `isPackaged` short-circuits, so a
+ * packaged app cannot be pushed back into development mode by any environment
+ * value — absent, empty, "0", or hostile. The failure this prevents is the one
+ * that would matter most: an installed till silently reading a dev URL because a
+ * variable was missing. Missing is the normal state on a customer's machine.
+ *
+ * The environment flag still requires exactly "1", for the reason Android
+ * records: NODE_ENV is frequently unset or inherited from an unrelated context,
+ * so treating ambient state as a release signal would make the production URL
+ * depend on it. A stray empty string, "true", or "false" all read as
+ * development, which fails safe in an UNPACKAGED build only.
+ *
+ * The `@param` tags are load-bearing, not decoration: without them TypeScript
+ * infers `env` from the default value as ProcessEnv, and every caller that
+ * passes a plain object — which is the entire point of injecting the
+ * environment — fails type checking.
  *
  * @param {Record<string, string | undefined>} [env]
+ * @param {{ isPackaged?: boolean }} [options]
  */
-export function isDesktopReleaseBuild(env = process.env) {
+export function isDesktopReleaseBuild(env = process.env, options = {}) {
+  if (options.isPackaged === true) {
+    return true;
+  }
+
   return env[DESKTOP_RELEASE_ENV_VAR] === "1";
 }
 
@@ -152,13 +173,18 @@ function assertProductionUrl(url) {
  * Returns the resolved url, its hostname, whether this is a release, and which
  * of the three sources decided it.
  *
+ * `options.isPackaged` is threaded through rather than read here, so this module
+ * stays free of any Electron import and the whole contract remains testable
+ * under plain Node. main.mjs supplies `app.isPackaged`.
+ *
  * @param {Record<string, string | undefined>} [env]
+ * @param {{ isPackaged?: boolean }} [options]
  */
-export function readDesktopServerUrl(env = process.env) {
+export function readDesktopServerUrl(env = process.env, options = {}) {
   // -------------------------------------------------------------------------
   // Release: the environment variable is not consulted at all.
   // -------------------------------------------------------------------------
-  if (isDesktopReleaseBuild(env)) {
+  if (isDesktopReleaseBuild(env, options)) {
     const parsed = assertProductionUrl(PRODUCTION_DESKTOP_SERVER_URL);
 
     return {

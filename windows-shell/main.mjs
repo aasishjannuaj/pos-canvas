@@ -289,7 +289,16 @@ if (hasSingleInstanceLock) {
   app.whenReady().then(() => {
     // Resolved after ready so a configuration error surfaces through a normal
     // startup failure rather than during module evaluation.
-    resolvedServer = readDesktopServerUrl();
+    //
+    // Feature 23.4 — app.isPackaged is what makes an INSTALLED app a release
+    // build. A customer cannot be asked to set an environment variable, and a
+    // missing variable is the normal state on their machine, so the packaged
+    // flag decides and no environment value can override it. An unpackaged
+    // checkout still honours POS_CANVAS_DESKTOP_RELEASE for `npm run
+    // start:production`.
+    resolvedServer = readDesktopServerUrl(process.env, {
+      isPackaged: app.isPackaged,
+    });
     navigationPolicy = createNavigationPolicy({
       runtimeUrl: resolvedServer.url,
       isRelease: resolvedServer.isRelease,

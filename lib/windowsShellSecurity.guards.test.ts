@@ -18,7 +18,7 @@
 // operating system for NOTHING. Every control below is deny-by-default, because
 // the alternative — allow, then enumerate the bad cases — has to be re-audited
 // every time the hosted page changes.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -611,12 +611,25 @@ describe("Feature 23.2 stops where it was scoped to stop", () => {
     expect(model).not.toContain("getWindowsDownload");
   });
 
-  it("adds no packaging, CI, release, or signing work", () => {
+  it("adds no release or signing work", () => {
+    // Feature 23.4 added electron-builder and the NSIS target deliberately, so
+    // the packaging half of this fence is gone. Release metadata and signing
+    // remain out of scope until 23.6, and the shell must still carry no
+    // certificate configuration of any kind.
     const shellPackage = read("windows-shell/package.json");
 
-    for (const banned of ["electron-builder", "electron-forge", "nsis", "sign"]) {
+    for (const banned of [
+      "certificateFile",
+      "certificatePassword",
+      "certificateSubjectName",
+      "signingHashAlgorithms",
+      "signtool",
+      "azureSignOptions",
+    ]) {
       expect(`package.json: ${shellPackage}`).not.toContain(banned);
     }
+
+    expect(existsSync(join(repoRoot, "lib/windowsRelease.ts"))).toBe(false);
   });
 
   it("leaves the root dependency tree untouched", () => {
