@@ -12,12 +12,15 @@ export default function TrendingTemplates() {
           Trending Templates
         </h2>
 
-        <button
-          type="button"
+        {/* Feature 22 Phase 4 — this was a <button> with no onClick and no
+            href. The destination it implied already exists, so it is now the
+            link it always looked like. */}
+        <Link
+          href="/templates"
           className="text-sm font-medium text-neutral-600 transition-colors hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
         >
-          View all
-        </button>
+          View all templates
+        </Link>
       </div>
 
       <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-6">

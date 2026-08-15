@@ -1,22 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import AuthCard from "@/components/auth/AuthCard";
 import AuthInput from "@/components/auth/AuthInput";
 import AuthButton from "@/components/auth/AuthButton";
 import AuthFooter from "@/components/auth/AuthFooter";
 import { signIn } from "@/lib/supabase/auth";
 import { getAuthErrorMessage } from "@/lib/authErrors";
+import { LOGIN_REASON_PARAM, getLoginNotice } from "@/lib/sessionNotice";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Feature 22 Phase 4 — set only when a protected route bounced this visitor
+  // here. The URL carries an opaque code and nothing else: the sentence itself
+  // lives in lib/sessionNotice.ts, and an unrecognised code renders nothing, so
+  // no link can put text of its own choosing on this page.
+  const notice = getLoginNotice(searchParams.get(LOGIN_REASON_PARAM));
 
   // Feature 22 Phase 1 — a real <form> with onSubmit, replacing a button with
   // an onClick handler. Pressing Enter in either field now signs in, which is
@@ -37,8 +45,8 @@ export default function LoginPage() {
     setIsLoading(false);
 
     if (signInError) {
-      // Mapped, never rendered raw: Supabase's own strings vary by version and
-      // occasionally carry provider internals. See lib/authErrors.ts.
+      // Mapped, never rendered raw: the provider's own strings vary by version
+      // and occasionally carry internals. See lib/authErrors.ts.
       setError(getAuthErrorMessage(signInError, "sign_in"));
       return;
     }
@@ -58,6 +66,17 @@ export default function LoginPage() {
         />
       }
     >
+      {/* Dropped once the owner has a fresher answer on screen: a sign-in
+          failure is about this attempt, and the expired session is history. */}
+      {notice && !error && (
+        <p
+          role="status"
+          className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+        >
+          {notice}
+        </p>
+      )}
+
       <form onSubmit={handleSubmit} className="flex flex-col gap-5" noValidate>
         <AuthInput
           label="Email"
@@ -99,5 +118,21 @@ export default function LoginPage() {
         )}
       </form>
     </AuthCard>
+  );
+}
+
+// useSearchParams requires a Suspense boundary during prerendering — the same
+// pattern the recovery request page already uses.
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <AuthCard title="Welcome back" subtitle="Sign in to keep building your POS.">
+          <p className="text-sm text-neutral-500">Loading…</p>
+        </AuthCard>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }

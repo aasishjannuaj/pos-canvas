@@ -1339,13 +1339,19 @@ export default function EditorPropertiesPanel({
                   </button>
                 </div>
 
-                {/* Feature 15.4 — Build Application. Purely presentational:
-                    this component never calls a Server Action, generates a
-                    request key, or touches build_jobs itself — it only
-                    reads the props EditorShell already computed and calls
-                    onBuildTargetChange/onRequestBuild/onRefreshBuildStatus.
-                    Reuses exportEligibility exactly as Launch POS/Export
-                    POS JSON already do. */}
+                {/* Feature 15.4, renamed in Feature 22 Phase 2 — Publish
+                    configuration. Purely presentational: this component never
+                    calls a Server Action, generates a request key, or touches
+                    build_jobs itself — it only reads the props EditorShell
+                    already computed and calls onRequestBuild/
+                    onRefreshBuildStatus. Reuses exportEligibility exactly as
+                    Launch POS/Export POS JSON already do.
+
+                    The internal names are deliberate and unchanged: the table
+                    is still build_jobs and the props are still onRequestBuild/
+                    onRefreshBuildStatus. What an owner reads is "publish a
+                    configuration"; what the code is called is a separate
+                    question, answered in lib/publishTerminology.guards.test.ts. */}
                 <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">

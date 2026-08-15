@@ -39,6 +39,7 @@ import {
 } from "./onboarding/useOnboardingProgress";
 import type { OnboardingStepId } from "./onboarding/useOnboardingProgress";
 import {
+  CONFIGURATION_DOWNLOAD_FAILED_MESSAGE,
   createGeneratedPosConfig,
   createGeneratedPosConfigFilename,
   createRuntimeUrl,
@@ -1450,13 +1451,18 @@ export default function EditorShell({
 
       setExportStatus("success");
       setExportError(null);
-    } catch (error) {
+    } catch {
+      // Feature 22 Phase 4 — the exception is deliberately not bound. It used
+      // to be rendered verbatim, and the fix is not "render it more carefully"
+      // but "have nothing to render": with no binding there is no path from a
+      // caught throw to this component's output at all. Only the fixed message
+      // below can reach the screen.
+      //
+      // Nothing else in this handler changes — the same eligibility check, the
+      // same generation call, the same filename, the same download, and the
+      // same exportStatus/exportError state. Only the text of the failure.
       setExportStatus("error");
-      setExportError(
-        error instanceof Error
-          ? error.message
-          : "Something went wrong while exporting."
-      );
+      setExportError(CONFIGURATION_DOWNLOAD_FAILED_MESSAGE);
     }
   }
 

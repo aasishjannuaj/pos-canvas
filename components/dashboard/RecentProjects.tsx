@@ -1,9 +1,15 @@
 import Link from "next/link";
 import type { SavedProject } from "@/lib/projects";
 import { getTemplateById } from "@/data/templates";
+import {
+  CREATE_PROJECT_LABEL,
+  CREATE_PROJECT_PATH,
+  type DashboardProjectsState,
+} from "@/lib/dashboardState";
 
 type RecentProjectsProps = {
   projects: SavedProject[];
+  state: DashboardProjectsState;
 };
 
 const THUMBNAIL_COLORS = ["bg-blue-100", "bg-amber-100", "bg-emerald-100", "bg-rose-100"];
@@ -30,36 +36,52 @@ function formatUpdatedAt(updatedAt: string): string {
   });
 }
 
-export default function RecentProjects({ projects }: RecentProjectsProps) {
-  const visibleProjects = projects.slice(0, 4);
-
+export default function RecentProjects({ projects, state }: RecentProjectsProps) {
   return (
     <section>
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6">
         <h2 className="text-xl font-semibold tracking-tight text-neutral-900">
-          Recent Projects
+          Your Projects
         </h2>
-
-        <button
-          type="button"
-          className="text-sm font-medium text-neutral-600 transition-colors hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-        >
-          View all
-        </button>
       </div>
 
-      {visibleProjects.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-neutral-200 bg-white p-10 text-center">
+      {/* Feature 22 Phase 4 — three states, and only three. The "unavailable"
+          branch exists so a failed load is never dressed up as a new account:
+          the empty state below invites someone to create their first project,
+          which is the wrong thing to say to an owner whose ten projects simply
+          did not load. No provider error is shown either way. */}
+      {state === "unavailable" ? (
+        <div className="rounded-2xl border border-neutral-200 bg-white p-10 text-center">
           <p className="text-sm font-medium text-neutral-900">
-            No saved projects yet.
+            We couldn&apos;t load your projects.
           </p>
-          <p className="text-sm text-neutral-500">
-            Choose a template to create your first POS.
+          <p className="mt-1 text-sm text-neutral-500">
+            Refresh the page to try again. Nothing has been lost.
           </p>
         </div>
+      ) : state === "empty" ? (
+        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-neutral-200 bg-white p-10 text-center">
+          <p className="text-sm font-medium text-neutral-900">No projects yet.</p>
+
+          <p className="max-w-md text-sm text-neutral-500">
+            Start from a template — you can change every item, price and layout
+            afterwards.
+          </p>
+
+          <Link
+            href={CREATE_PROJECT_PATH}
+            className="mt-1 rounded-full bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+          >
+            {CREATE_PROJECT_LABEL}
+          </Link>
+        </div>
       ) : (
+        // Feature 22 Phase 4 — every project is listed, not the first four.
+        // This section used to slice to 4 behind a "View all" button that had
+        // no destination; removing the dead button without removing the slice
+        // would have stranded a fifth project with no way to reach it.
         <div className="grid grid-cols-2 gap-5 md:grid-cols-4">
-          {visibleProjects.map((project, index) => (
+          {projects.map((project, index) => (
             <Link
               key={project.id}
               href={`/editor/project-${project.id}`}

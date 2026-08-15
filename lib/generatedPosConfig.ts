@@ -371,6 +371,24 @@ export function createGeneratedPosConfigFilename(
   return `pos-canvas-${slug}-v${schemaVersion}.json`;
 }
 
+/**
+ * Feature 22 Phase 4 — the one thing an owner is told when the configuration
+ * download fails.
+ *
+ * That path previously rendered the caught exception's own `message`. Nothing
+ * in it is a message anyone wrote for a customer: the throw could come from
+ * config generation, from JSON serialisation, or from the browser's own
+ * download machinery, and its text is whatever the runtime happened to say —
+ * a property name, a quota error, an internal state description. A string
+ * nobody has read is a string nobody has checked for leakage, which is the same
+ * rule lib/authErrors.ts applies to provider errors.
+ *
+ * The download is a purely local operation, so there is no partial state to
+ * explain and no remedy other than trying again. It says exactly that.
+ */
+export const CONFIGURATION_DOWNLOAD_FAILED_MESSAGE =
+  "Something went wrong while downloading the configuration. Please try again.";
+
 // Feature 14.3 — the exact three PosLayout values this app currently
 // resolves layouts to (lib/posLayout.ts). An explicit allow-list, not a
 // bare `typeof value === "string"` check — a malformed or arbitrary layout

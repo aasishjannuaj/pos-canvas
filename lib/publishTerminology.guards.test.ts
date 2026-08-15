@@ -74,6 +74,17 @@ describe("customer-facing copy uses the publish vocabulary", () => {
     expect(panel).not.toContain("Build Application");
   });
 
+  it("no comment in the editor still calls it 'Build Application'", () => {
+    // Feature 22 Phase 4 — deliberately reads the RAW source, comments and all.
+    // The assertion above strips them, so the section's own comment went on
+    // calling it "Build Application" for two phases after the rename. A comment
+    // is not customer-facing, but it is the next developer's description of
+    // what this block is, and a stale one invites the old wording back.
+    for (const file of [PANEL, SHELL, DEVICES]) {
+      expect(`${file}: ${read(file)}`).not.toContain("Build Application");
+    }
+  });
+
   it("the supporting copy explains what publishing actually does", () => {
     expect(read(PANEL)).toContain(
       "Publish a saved version of your business configuration so"
