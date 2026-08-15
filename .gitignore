@@ -2,6 +2,12 @@
 
 # dependencies
 /node_modules
+# Feature 23.1 — the Windows shell is a SEPARATE npm project (windows-shell/
+# has its own package.json and package-lock.json, so Electron never enters the
+# web app's dependency tree). The rule above is root-anchored and would not
+# cover its node_modules, and an unignored Electron install is ~300 MB of
+# binaries (measured: 309 MB). Its package-lock.json IS tracked, deliberately.
+/windows-shell/node_modules
 /.pnp
 .pnp.*
 .yarn/*
