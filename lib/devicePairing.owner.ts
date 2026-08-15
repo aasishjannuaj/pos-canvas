@@ -149,7 +149,16 @@ export function formatDevicePlatform(platform: string | null): string {
     return "Unknown platform";
   }
 
-  const known: Record<string, string> = { android: "Android", web: "Web" };
+  // Feature 23.3 — windows added alongside the existing two. The fallback is
+  // unchanged and deliberate: an unrecognised non-empty value is shown as-is
+  // rather than mapped to "Unknown platform", so a device paired by a newer
+  // client than this dashboard still reads sensibly instead of disappearing
+  // into a generic label.
+  const known: Record<string, string> = {
+    android: "Android",
+    windows: "Windows",
+    web: "Web",
+  };
 
   return known[platform.toLowerCase()] ?? platform;
 }

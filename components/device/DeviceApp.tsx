@@ -35,6 +35,7 @@ import {
 } from "@/lib/deviceSession";
 import type { DeviceState } from "@/lib/deviceSession";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
+import { isWindowsShell } from "@/lib/windowsShell";
 import type { PosRuntimeCompleteSale } from "@/lib/posRuntimeHost";
 
 const RESET_NOTE =
@@ -115,10 +116,15 @@ export default function DeviceApp() {
     const result = await redeemDevicePairingCode({
       code,
       // D4c freezes device_name and platform at insert and there is no rename
-      // RPC, so redemption is the ONLY chance to record them. The platform
-      // comes from Capacitor's own isNativePlatform() via lib/nativeShell.ts —
-      // never from user-agent sniffing — and fails closed to "web".
-      identity: resolveDeviceIdentity(isCapacitorNativeShell()),
+      // RPC, so redemption is the ONLY chance to record them. Both signals come
+      // from the shells' own bridges — Capacitor's isNativePlatform() and the
+      // Electron preload's identity object — never from user-agent sniffing,
+      // and each fails closed. Android takes priority over the desktop signal;
+      // neither present means "web", exactly as before.
+      identity: resolveDeviceIdentity({
+        isNativeShell: isCapacitorNativeShell(),
+        isWindowsShell: isWindowsShell(),
+      }),
     });
 
     if (result.ok) {

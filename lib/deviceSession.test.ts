@@ -14,6 +14,7 @@ import {
   toDeviceDisplayConfig,
 } from "@/lib/deviceSession";
 import { detectNativeShell } from "@/lib/nativeShell";
+import { detectWindowsShell } from "@/lib/windowsShell";
 import type { DevicePairing } from "@/lib/deviceSession";
 import { DEVICE_AUTH_STORAGE_KEY } from "@/lib/supabase/deviceClient";
 import { GENERATED_POS_CONFIG_SCHEMA_VERSION } from "@/lib/generatedPosConfig";
@@ -286,32 +287,58 @@ describe("toDeviceDisplayConfig", () => {
   });
 });
 
+/** Feature 23.3 — the four shell combinations, named once. */
+const ANDROID_SHELL = { isNativeShell: true, isWindowsShell: false };
+const WINDOWS_SHELL = { isNativeShell: false, isWindowsShell: true };
+const BROWSER = { isNativeShell: false, isWindowsShell: false };
+const BOTH_SIGNALS = { isNativeShell: true, isWindowsShell: true };
+
 describe("resolveDeviceIdentity", () => {
   it("names a native-shell device 'POS Device' on platform 'android'", () => {
-    expect(resolveDeviceIdentity(true)).toEqual({
+    expect(resolveDeviceIdentity(ANDROID_SHELL)).toEqual({
       deviceName: "POS Device",
       platform: "android",
     });
   });
 
+  it("names a Windows shell device 'POS Device' on platform 'windows'", () => {
+    expect(resolveDeviceIdentity(WINDOWS_SHELL)).toEqual({
+      deviceName: "POS Device",
+      platform: "windows",
+    });
+  });
+
   it("names a browser device 'POS Device' on platform 'web'", () => {
-    expect(resolveDeviceIdentity(false)).toEqual({
+    expect(resolveDeviceIdentity(BROWSER)).toEqual({
       deviceName: "POS Device",
       platform: "web",
     });
   });
 
+  it("lets Android win when both signals are present", () => {
+    // The native bridge is produced by Capacitor itself and nothing else can
+    // fake it, so it is the more trustworthy of the two. An unexpected
+    // window.posCanvasDesktop inside the Android WebView must not be able to
+    // relabel a real Android till as Windows — and platform is frozen at insert,
+    // so a wrong answer here could never be corrected.
+    expect(resolveDeviceIdentity(BOTH_SIGNALS).platform).toBe("android");
+  });
+
   it("satisfies the paired_devices CHECK constraints", () => {
     // paired_devices_device_name_check / _platform_check reject a value that
     // is present but blank after btrim.
-    for (const identity of [resolveDeviceIdentity(true), resolveDeviceIdentity(false)]) {
+    for (const identity of [
+      resolveDeviceIdentity(ANDROID_SHELL),
+      resolveDeviceIdentity(WINDOWS_SHELL),
+      resolveDeviceIdentity(BROWSER),
+    ]) {
       expect(identity.deviceName.trim()).not.toBe("");
       expect(identity.platform.trim()).not.toBe("");
     }
   });
 
   it("carries no owner, hardware or session identifier", () => {
-    const identity = resolveDeviceIdentity(true);
+    const identity = resolveDeviceIdentity(ANDROID_SHELL);
 
     // The shape itself is the guarantee: exactly two fields, both fixed
     // product vocabulary. There is nowhere to put an auth_user_id, a serial,
@@ -325,22 +352,35 @@ describe("resolveDeviceIdentity", () => {
     }
 
     expect(["POS Device"]).toContain(identity.deviceName);
-    expect(["android", "web"]).toContain(identity.platform);
+    expect(["android", "windows", "web"]).toContain(identity.platform);
   });
 
   it("is stable — the same input always yields the same identity", () => {
     // device_name and platform are frozen by D4c at insert, so a value that
     // varied between calls could never be corrected afterwards.
-    expect(resolveDeviceIdentity(true)).toEqual(resolveDeviceIdentity(true));
-    expect(resolveDeviceIdentity(false)).toEqual(resolveDeviceIdentity(false));
+    for (const signals of [ANDROID_SHELL, WINDOWS_SHELL, BROWSER]) {
+      expect(resolveDeviceIdentity(signals)).toEqual(resolveDeviceIdentity(signals));
+    }
+  });
+
+  it("resolves every combination to a known platform", () => {
+    // Total by construction: four inputs, three valid outputs, no undefined.
+    for (const isNativeShell of [true, false]) {
+      for (const isWindowsShell of [true, false]) {
+        const { platform } = resolveDeviceIdentity({ isNativeShell, isWindowsShell });
+        expect(["android", "windows", "web"]).toContain(platform);
+      }
+    }
   });
 });
 
 describe("native-shell detection feeding the identity", () => {
   it("maps Capacitor's own isNativePlatform() to the android platform", () => {
     expect(
-      resolveDeviceIdentity(detectNativeShell({ isNativePlatform: () => true }))
-        .platform
+      resolveDeviceIdentity({
+        isNativeShell: detectNativeShell({ isNativePlatform: () => true }),
+        isWindowsShell: false,
+      }).platform
     ).toBe("android");
   });
 
@@ -358,7 +398,46 @@ describe("native-shell detection feeding the identity", () => {
     ];
 
     for (const capacitor of nonNative) {
-      expect(resolveDeviceIdentity(detectNativeShell(capacitor)).platform).toBe("web");
+      expect(
+        resolveDeviceIdentity({
+          isNativeShell: detectNativeShell(capacitor),
+          isWindowsShell: false,
+        }).platform
+      ).toBe("web");
+    }
+  });
+});
+
+describe("Windows shell detection feeding the identity", () => {
+  it("maps the Electron identity bridge to the windows platform", () => {
+    expect(
+      resolveDeviceIdentity({
+        isNativeShell: false,
+        isWindowsShell: detectWindowsShell({ isWindowsShell: true }),
+      }).platform
+    ).toBe("windows");
+  });
+
+  it("falls back to web for a browser or a malformed bridge", () => {
+    const notTheShell: unknown[] = [
+      undefined,
+      null,
+      {},
+      "yes",
+      1,
+      { isWindowsShell: false },
+      { isWindowsShell: "true" },
+      { isWindowsShell: 1 },
+      { windows: true },
+    ];
+
+    for (const bridge of notTheShell) {
+      expect(
+        resolveDeviceIdentity({
+          isNativeShell: false,
+          isWindowsShell: detectWindowsShell(bridge),
+        }).platform
+      ).toBe("web");
     }
   });
 });

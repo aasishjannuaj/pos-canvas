@@ -193,10 +193,16 @@ describe("pairing errors stay collapsed", () => {
     expect(rpc).not.toContain("p_platform: null");
   });
 
-  it("the device app derives its platform from the existing native-shell helper", () => {
+  it("the device app derives its platform from the shells' own bridges", () => {
+    // Feature 23.3 widened this from one signal to two. Both still come from a
+    // shell's own bridge — never from a user agent — and the Android signal is
+    // passed first because resolveDeviceIdentity gives it priority.
     const app = code(read("components/device/DeviceApp.tsx"));
-    expect(app).toContain("resolveDeviceIdentity(isCapacitorNativeShell())");
+
+    expect(app).toContain("isNativeShell: isCapacitorNativeShell()");
+    expect(app).toContain("isWindowsShell: isWindowsShell()");
     expect(app).toContain('from "@/lib/nativeShell"');
+    expect(app).toContain('from "@/lib/windowsShell"');
   });
 
   it("introduces no user-agent sniffing anywhere in device code", () => {

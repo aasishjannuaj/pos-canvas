@@ -51,10 +51,43 @@ const { contextBridge, ipcRenderer } = require("electron");
 const isLocalFallbackPage = window.location.protocol === "file:";
 
 if (isLocalFallbackPage) {
+  // The fallback page gets the retry bridge and NOTHING else. It never pairs, so
+  // it has no use for the identity signal.
   contextBridge.exposeInMainWorld("posCanvasShell", {
     /** Ask the shell to try the runtime URL again. Carries no destination. */
     retry: () => {
       ipcRenderer.send("pos-canvas-shell:retry");
     },
   });
+} else {
+  // Feature 23.3 — the hosted page gets the identity signal and NOTHING else.
+  //
+  // TWO SEPARATE GLOBALS, NOT ONE SHARED OBJECT. `posCanvasShell` is a
+  // capability (it does something); `posCanvasDesktop` is a fact (it says what
+  // this is). Merging them would produce one grab-bag object that grows a method
+  // at a time, and every addition would silently reach both documents. Keeping
+  // them apart means the hosted page cannot reach a main-process action at all,
+  // and the fallback page cannot claim an identity it has no use for.
+  //
+  // WHAT THIS DELIBERATELY IS NOT: it carries no app version, no userData path,
+  // no OS build, no machine or hardware identifier, and no function. It is one
+  // boolean, and there is structurally nowhere to put anything else.
+  //
+  // WHY THE VALUE IS A CONSTANT `true` RATHER THAN `process.platform === "win32"`:
+  // this asserts "you are running inside the POS Canvas desktop shell", not
+  // "this kernel is Windows" — exactly as lib/nativeShell.ts asserts "you are
+  // inside the Capacitor shell" and the web app maps that to `android` because
+  // the Capacitor project is Android-only. This shell is a Windows product;
+  // macOS and Linux builds are explicit non-goals. The practical consequence,
+  // stated so it is never a surprise: a development run on a Mac also reports
+  // the desktop shell, and pairs as `windows`. That is what makes the Windows
+  // pairing path testable before any Windows hardware exists.
+  //
+  // Frozen so the page cannot mutate the object it was handed. contextBridge
+  // already copies values across the isolation boundary, so this is belt and
+  // braces rather than the primary protection.
+  contextBridge.exposeInMainWorld(
+    "posCanvasDesktop",
+    Object.freeze({ isWindowsShell: true })
+  );
 }

@@ -181,7 +181,11 @@ describe("device row presentation", () => {
 
   it("labels the platforms 16.4A actually records", () => {
     expect(formatDevicePlatform("android")).toBe("Android");
+    expect(formatDevicePlatform("windows")).toBe("Windows");
     expect(formatDevicePlatform("web")).toBe("Web");
+    // Case-insensitive, as the existing mapping already was.
+    expect(formatDevicePlatform("Windows")).toBe("Windows");
+    expect(formatDevicePlatform("WINDOWS")).toBe("Windows");
     expect(formatDevicePlatform(null)).toBe("Unknown platform");
     expect(formatDevicePlatform("  ")).toBe("Unknown platform");
     // An unrecognized value is shown as-is rather than hidden.

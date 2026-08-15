@@ -451,8 +451,10 @@ describe("the bridge is invisible to the hosted page", () => {
     expect(exposure).toBeGreaterThan(gate);
   });
 
-  it("still exposes exactly one key, carrying nothing", () => {
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(1);
+  it("still exposes the retry key alone, carrying nothing", () => {
+    // Feature 23.3 added a SECOND exposure, but on the other branch: the hosted
+    // page gets identity, the fallback gets retry, and the two never meet.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(2);
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
     expect(preload).toContain('ipcRenderer.send("pos-canvas-shell:retry")');
     // No second argument means no destination can cross.
@@ -466,9 +468,37 @@ describe("the bridge is invisible to the hosted page", () => {
     expect(preload).not.toContain("process.env");
   });
 
-  it("adds no desktop identity signal — that is Feature 23.3", () => {
-    for (const premature of ["platform", "isDesktop", "DevicePlatform"]) {
-      expect(`preload: ${preload}`).not.toContain(premature);
+  it("the identity bridge reaches the hosted page and the retry bridge does not", () => {
+    // Feature 23.3. The security property from 23.2 is unchanged in substance:
+    // the hosted page still cannot reach a main-process action. It now receives
+    // one immutable fact instead of nothing at all.
+    const retryBranch = preload.slice(
+      preload.indexOf("if (isLocalFallbackPage) {"),
+      preload.indexOf("} else {")
+    );
+    const identityBranch = preload.slice(preload.indexOf("} else {"));
+
+    expect(retryBranch).toContain('exposeInMainWorld("posCanvasShell"');
+    expect(retryBranch).not.toContain("posCanvasDesktop");
+
+    expect(identityBranch).toContain("posCanvasDesktop");
+    expect(identityBranch).not.toContain("ipcRenderer");
+    expect(identityBranch).not.toContain("posCanvasShell");
+  });
+
+  it("the identity bridge carries one boolean and no function", () => {
+    expect(preload).toContain("Object.freeze({ isWindowsShell: true })");
+    // No version, no path, no OS detail, no callable.
+    for (const banned of [
+      "getVersion",
+      "getPath",
+      "userData",
+      "process.platform",
+      "process.env",
+      "os.",
+      "hostname",
+    ]) {
+      expect(`preload: ${preload}`).not.toContain(banned);
     }
   });
 });
@@ -566,9 +596,10 @@ describe("the device session's storage is left alone", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 23.2 stops where it was scoped to stop", () => {
-  it("adds no 23.3 device identity", () => {
+  it("keeps the platform model out of the main process", () => {
+    // Feature 23.3 widened the union; the main process still knows nothing of it.
     expect(code(read("lib/deviceSession.ts"))).toContain(
-      'export type DevicePlatform = "android" | "web"'
+      'export type DevicePlatform = "android" | "windows" | "web"'
     );
     expect(code(read(MAIN))).not.toContain("DevicePlatform");
   });

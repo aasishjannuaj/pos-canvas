@@ -278,7 +278,7 @@ export function toDeviceDisplayConfig(
 /** The one name every paired till is created with. */
 export const DEVICE_NAME = "POS Device";
 
-export type DevicePlatform = "android" | "web";
+export type DevicePlatform = "android" | "windows" | "web";
 
 export type DeviceIdentity = {
   deviceName: string;
@@ -286,20 +286,50 @@ export type DeviceIdentity = {
 };
 
 /**
+ * Which shells the caller detected. Feature 23.3 widened this from a single
+ * boolean.
+ *
+ * A NAMED OBJECT RATHER THAN TWO POSITIONAL BOOLEANS, on purpose. D4c freezes
+ * paired_devices.platform at insert and provides no writer afterwards, so a
+ * transposed pair of arguments would permanently mislabel every till it touched
+ * with no way to correct it. `resolveDeviceIdentity(a, b)` makes that a typo;
+ * this shape makes it impossible.
+ */
+export type DeviceShellSignals = {
+  /** Capacitor's own isNativePlatform() — see lib/nativeShell.ts. */
+  isNativeShell: boolean;
+  /** The Electron preload's identity bridge — see lib/windowsShell.ts. */
+  isWindowsShell: boolean;
+};
+
+/**
  * Builds the identity sent to redeem_device_pairing_token.
  *
- * Pure: the caller supplies the already-detected native-shell boolean (from
- * lib/nativeShell.ts's isCapacitorNativeShell), so this stays testable under
- * plain Node with no DOM and no Capacitor global.
+ * Pure: the caller supplies the already-detected booleans, so this stays
+ * testable under plain Node with no DOM, no Capacitor global and no Electron.
+ *
+ * PRIORITY IS EXPLICIT, AND ANDROID WINS. A device inside the Capacitor shell is
+ * an Android till, full stop — that is established by Capacitor's own native
+ * bridge, which nothing else can produce. The desktop signal is only consulted
+ * when the native one is absent, so an unexpected or spoofed
+ * `window.posCanvasDesktop` inside the Android WebView cannot relabel a real
+ * Android till as Windows. Neither signal present means `web`, exactly as
+ * before.
  *
  * "android" is correct for the only native shell that exists today; the
  * Capacitor project is Android-only (there is no ios/ directory), so a native
- * platform cannot currently be anything else.
+ * platform cannot currently be anything else. "windows" is likewise the only
+ * desktop platform this product ships — macOS and Linux builds are explicit
+ * non-goals of Feature 23.
  */
-export function resolveDeviceIdentity(isNativeShell: boolean): DeviceIdentity {
+export function resolveDeviceIdentity(signals: DeviceShellSignals): DeviceIdentity {
   return {
     deviceName: DEVICE_NAME,
-    platform: isNativeShell ? "android" : "web",
+    platform: signals.isNativeShell
+      ? "android"
+      : signals.isWindowsShell
+        ? "windows"
+        : "web",
   };
 }
 

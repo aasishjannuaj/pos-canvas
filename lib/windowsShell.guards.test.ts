@@ -368,10 +368,14 @@ describe("the main process carries the locked security defaults", () => {
 describe("the preload is minimal and carries no payload", () => {
   const preload = code(read(PRELOAD));
 
-  it("exposes exactly one bridge key", () => {
+  it("exposes exactly two bridge keys, one per document kind", () => {
+    // Feature 23.3 added the identity bridge. Two exposures, never more, and
+    // they are mutually exclusive: the retry capability for the local fallback,
+    // the identity fact for the hosted page. Neither document sees both.
     const exposures = preload.match(/exposeInMainWorld\(/g) ?? [];
-    expect(exposures).toHaveLength(1);
+    expect(exposures).toHaveLength(2);
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
+    expect(preload).toContain('exposeInMainWorld(\n    "posCanvasDesktop"');
   });
 
   it("sends a channel with no arguments", () => {
@@ -387,8 +391,13 @@ describe("the preload is minimal and carries no payload", () => {
     expect(preload).not.toContain("process.env");
   });
 
-  it("adds no desktop identity signal — that is Feature 23.3", () => {
-    for (const premature of ["platform", "isDesktop", "windows", "DevicePlatform"]) {
+  it("still exposes no device-platform vocabulary of its own", () => {
+    // Feature 23.3 added the identity bridge, so "no identity signal at all" is
+    // no longer the rule. What survives is the boundary that mattered: the
+    // preload states a FACT about the shell and never reaches into the web app's
+    // platform model. The mapping from that fact to a DevicePlatform value lives
+    // in lib/deviceSession.ts, where it is reviewable and testable.
+    for (const premature of ["DevicePlatform", "resolveDeviceIdentity", "paired_devices"]) {
       expect(`preload: ${preload}`).not.toContain(premature);
     }
   });
@@ -504,10 +513,13 @@ describe("Feature 23.1 stops where it was scoped to stop", () => {
   // stay absent forever, and it moved to the same file as a TLS guard rather
   // than remaining here as a phase fence.
 
-  it("adds no 23.3 device identity", () => {
+  it("keeps the platform model out of the main process", () => {
+    // Feature 23.3 added `windows` to the union. The main process still knows
+    // nothing about it: the shell states a fact, the web app decides what that
+    // fact means.
     expect(main).not.toContain("DevicePlatform");
     expect(code(read("lib/deviceSession.ts"))).toContain(
-      'export type DevicePlatform = "android" | "web"'
+      'export type DevicePlatform = "android" | "windows" | "web"'
     );
   });
 
