@@ -349,9 +349,133 @@ describe("the packaged binary is universal", () => {
 // The workflow
 // ---------------------------------------------------------------------------
 
+/**
+ * Finds YAML mapping values that are plain (unquoted) scalars containing ": ".
+ *
+ * THIS EXISTS BECAUSE THE GUARDS BELOW WERE NOT ENOUGH. Every text assertion in
+ * this file passed on a workflow GitHub refused to load: the first version of
+ * the Electron-binary step put its command in a PLAIN scalar containing
+ * `Error('Electron binary missing: '+p)`. A plain YAML scalar may not contain a
+ * colon followed by a space — that is the mapping key/value indicator — so the
+ * parser tried to start a new mapping entry mid-value and rejected the file.
+ * `toContain` cannot see that; only structure can.
+ *
+ * Deliberately dependency-free. js-yaml is present in this repository only as a
+ * transitive dependency of ESLint, so a guard built on it would break the day
+ * ESLint reorganised its own tree — for a reason having nothing to do with
+ * workflows. This detects the one defect class that actually bit us, across
+ * every workflow file, with no dependency at all.
+ *
+ * It is NOT a full YAML validator, and does not claim to be.
+ */
+function findPlainScalarsWithColonSpace(source: string): string[] {
+  const lines = source.split("\n");
+  const offenders: string[] = [];
+
+  let insideBlockScalar = false;
+  let blockIndent = 0;
+
+  lines.forEach((line, index) => {
+    const indent = line.search(/\S/);
+
+    if (insideBlockScalar) {
+      // Blank lines and anything indented under the block header are content.
+      if (line.trim() === "" || indent >= blockIndent) return;
+      insideBlockScalar = false;
+    }
+
+    const match = line.match(/^(\s*)(-\s+)?([A-Za-z_][\w-]*):\s*(.*)$/);
+    if (match === null) return;
+
+    const [, leading, dash, key, value] = match;
+
+    // `run: |`, `run: >`, and their strip/keep variants begin a block scalar,
+    // where a colon-space is ordinary text.
+    if (/^[|>][-+]?\d*$/.test(value)) {
+      insideBlockScalar = true;
+      blockIndent = leading.length + (dash ? dash.length : 0) + 1;
+      return;
+    }
+
+    if (value === "") return;
+
+    const isQuoted = /^"[^"]*"$/.test(value) || /^'[^']*'$/.test(value);
+    if (isQuoted) return;
+
+    if (value.includes(": ")) {
+      offenders.push(`line ${index + 1}: ${key}: ${value.slice(0, 80)}`);
+    }
+  });
+
+  return offenders;
+}
+
+describe("every workflow file is structurally loadable", () => {
+  // Both workflows, because this defect class is not specific to Windows.
+  for (const file of [WORKFLOW, ".github/workflows/build-worker.yml"]) {
+    it(`${file} has no plain scalar containing a colon-space`, () => {
+      expect(findPlainScalarsWithColonSpace(read(file))).toEqual([]);
+    });
+  }
+
+  it("the detector actually catches the defect it was written for", () => {
+    // The exact line GitHub rejected, reproduced. A guard that cannot fail is
+    // not a guard.
+    const broken = [
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - name: Verify",
+      "        run: node -e \"throw new Error('Electron binary missing: '+p)\"",
+    ].join("\n");
+
+    expect(findPlainScalarsWithColonSpace(broken)).toHaveLength(1);
+
+    // And the block-scalar form — the fix — is accepted.
+    const fixed = [
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - name: Verify",
+      "        run: |",
+      "          node -e \"throw new Error('Electron binary missing: '+p)\"",
+    ].join("\n");
+
+    expect(findPlainScalarsWithColonSpace(fixed)).toEqual([]);
+  });
+
+  it("does not false-positive on quoted scalars or block content", () => {
+    const fine = [
+      'name: Windows app',
+      'on:',
+      '  workflow_dispatch:',
+      'jobs:',
+      '  build:',
+      '    runs-on: windows-latest',
+      '    steps:',
+      '      - name: Set up Node',
+      '        uses: actions/setup-node@v4',
+      '        with:',
+      '          node-version: "24"',
+      '      - name: Multi line',
+      '        run: |',
+      '          echo "not found: $path"',
+      '          Write-Host "dist contains:"',
+    ].join("\n");
+
+    expect(findPlainScalarsWithColonSpace(fine)).toEqual([]);
+  });
+});
+
 describe("the Windows build workflow", () => {
   it("exists at the expected path", () => {
     expect(existsSync(join(repoRoot, WORKFLOW))).toBe(true);
+  });
+
+  it("runs the Electron binary check from a block scalar", () => {
+    // The specific regression: this command contains a colon-space and must
+    // therefore never be a plain scalar again.
+    expect(workflow).toContain("      - name: Verify the Electron binary is present\n        run: |\n");
   });
 
   it("runs on windows-latest", () => {

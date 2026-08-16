@@ -80,8 +80,14 @@ jobs:
       # Fails loudly if the Electron binary did not materialise. `npm ci` has
       # been observed to defer Electron's postinstall download, and a build that
       # silently packages nothing is worse than one that stops here.
+      # The command lives in a literal block scalar, not a plain one. A plain
+      # YAML scalar may not contain ": " (colon-space) — that sequence is the
+      # mapping key/value indicator, so `Error('Electron binary missing: '+p)`
+      # made the parser try to start a new mapping entry mid-value. Inside a
+      # block scalar the same text is just data.
       - name: Verify the Electron binary is present
-        run: node -e "const p=require('electron');const fs=require('fs');if(typeof p!=='string'||!fs.existsSync(p)){throw new Error('Electron binary missing: '+p)}console.log('electron binary ok:',p)"
+        run: |
+          node -e "const p=require('electron');const fs=require('fs');if(typeof p!=='string'||!fs.existsSync(p)){throw new Error('Electron binary missing: '+p)}console.log('electron binary ok:',p)"
 
       - name: Build the NSIS installer
         run: npm run build:windows
