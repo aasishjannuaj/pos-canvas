@@ -26,6 +26,7 @@ import type { LogoUploadStatus } from "./BrandingLogoField";
 // must never import the persistence normalizer: it deletes incomplete groups,
 // which is correct at the save/build boundary and destructive at a render one.
 import { toEditableModifierGroups } from "@/lib/modifierAuthoring";
+import { getAppInformation } from "@/lib/appInformation";
 import {
   BUILD_PROCESSING_STARTED_MESSAGE,
   getBuildProcessingUnavailableMessage,
@@ -1542,10 +1543,68 @@ export default function EditorPropertiesPanel({
                   )}
                 </div>
               </div>
+
+              {/* Feature 24.1 — About POS Canvas.
+                  Placed at the end of the existing Settings section rather than
+                  in a new surface: this is reference information an owner looks
+                  for once, not something to give its own navigation entry.
+                  Everything it shows is composed from the shared brand module
+                  and the published release metadata, so it cannot drift from
+                  what the download surfaces say. */}
+              <AboutPosCanvas />
             </div>
           )}
         </>
       )}
     </aside>
+  );
+}
+
+/**
+ * Feature 24.1 — the About panel.
+ *
+ * Deliberately free of technical internals. It names no dependency, no hosting
+ * provider and no application id: all true, none of them useful to a shop owner,
+ * and every one of them a detail this product's copy rules keep off customer
+ * surfaces. The one status it does show is a platform's pre-release state,
+ * because that genuinely changes what to expect when installing it.
+ *
+ * The legal company name is intentionally omitted while BRAND.legalCompanyName
+ * is null — no entity has been established, and a display name in a legal
+ * position would be a claim this product cannot support.
+ */
+function AboutPosCanvas() {
+  const info = getAppInformation();
+
+  return (
+    <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
+      <p className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+        About {info.productName}
+      </p>
+
+      <p className="text-xs leading-relaxed text-neutral-500">{info.summary}</p>
+
+      <dl className="flex flex-col gap-1.5">
+        {info.platforms.map((platform) => (
+          <div key={platform.label} className="flex items-baseline justify-between gap-3">
+            <dt className="text-xs text-neutral-500">{platform.label}</dt>
+            <dd className="text-right text-xs text-neutral-700">
+              {platform.versionName === null ? (
+                <span className="text-neutral-400">Not available yet</span>
+              ) : (
+                <>
+                  Version {platform.versionName}
+                  {platform.isPrerelease && (
+                    <span className="ml-1 text-amber-700">· Pre-release</span>
+                  )}
+                </>
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <p className="text-xs text-neutral-400">{info.companyDisplayName}</p>
+    </div>
   );
 }

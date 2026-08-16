@@ -96,6 +96,52 @@ of each migration (grants, policies, guard clauses, function posture) and parse
 every migration with the real PostgreSQL parser (`libpg-query`). They verify that
 migrations *say* what they must; they do not execute them.
 
+## Brand and app identity (Feature 24.1)
+
+One declaration, in `lib/brand.ts`, that both app shells and the website are
+checked against. Before this the same strings were typed into five unrelated
+files that nothing connected.
+
+| | |
+|---|---|
+| Product name | **POS Canvas** |
+| Short name | **POS Canvas** |
+| Company display name | **POS Canvas** |
+| Application id | **com.poscanvas.app** |
+| Legal company name | **Not yet defined — deferred** |
+| Support email / marketing URL | None exist; `null` rather than invented |
+
+**There is no approved legal entity.** `legalCompanyName` is `null` on purpose:
+a display name in a legal position would be a false claim about who is
+responsible for the software, and it is the field a code-signing certificate
+subject, a privacy policy and terms of service would all have to agree with.
+Anything needing it must state the requirement and stop.
+
+### Platform branding is not customer branding
+
+| | |
+|---|---|
+| **Platform** (`lib/brand.ts`) | The POS Canvas product: website, Android launcher, Windows app, splash, About. One identity for everyone. |
+| **Customer** (`ProjectConfig.branding`) | A business's own accent colour and logo, frozen into a published `GeneratedPosConfig` and shown inside their till. Different per project. |
+
+Guards in `lib/brand.guards.test.ts` assert both directions: the published
+configuration gains no platform-brand field, and the customer logo pipeline
+never imports the brand module.
+
+### Status
+
+- **24.1 — complete.** Identity centralised; website metadata fixed (it was
+  still `Create Next App`); About panel added to the editor's Settings section;
+  asset contract documented in `assets/brand/README.md`.
+- **Final artwork is not chosen.** Android, Windows and the favicon all still
+  carry their toolchains' default marks.
+- **24.2** will implement the Android icon, adaptive icon and splash.
+- **24.3** will implement the Windows icon, splash and installer branding.
+
+The owner must supply and approve the master assets listed in
+`assets/brand/README.md` before either can start. Nothing was generated,
+downloaded or improvised in their place.
+
 ## Architecture notes
 
 - **Authorization is enforced in the database.** Every table has Row Level

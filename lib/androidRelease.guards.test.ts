@@ -586,8 +586,17 @@ describe("earlier device/checkout/branding paths are unchanged", () => {
 
     const webSources = ["lib", "components", "app"].flatMap(walk);
 
+    // Feature 24.1 — lib/brand.ts joined the allow-list, deliberately. The
+    // application id is the platform's IDENTITY, shared by both shells, and
+    // centralising it is precisely what that module exists for: the Android and
+    // Windows configs are now checked against one declaration instead of being
+    // trusted to agree. That is a different category from APK release
+    // engineering, which is what this guard was written to keep out and still
+    // does — the list is two files, not "anywhere".
+    const permitted = ["lib/androidRelease.ts", "lib/brand.ts"];
+
     const offenders = webSources.filter(
-      (file) => file !== "lib/androidRelease.ts" && code(read(file)).includes("poscanvas.app")
+      (file) => !permitted.includes(file) && code(read(file)).includes("poscanvas.app")
     );
 
     expect(offenders).toEqual([]);
