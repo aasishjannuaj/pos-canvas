@@ -591,17 +591,26 @@ describe("Feature 23.4 stops where it was scoped to stop", () => {
     }
   });
 
-  it("adds no Windows release metadata", () => {
-    expect(existsSync(join(repoRoot, "lib/windowsRelease.ts"))).toBe(false);
-    expect(code(read("lib/platformDownloads.ts"))).not.toContain("windowsRelease");
+  it("Windows release metadata lives in exactly one module", () => {
+    // Feature 23.6 published the Windows pre-release, so "no release metadata"
+    // is no longer the rule. What survives is the substantive current state:
+    // the release exists, it is marked pre-release, and it is the ONLY Windows
+    // release metadata in the repository.
+    expect(code(read("lib/windowsRelease.ts"))).toContain(
+      "export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {"
+    );
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
   });
 
-  it("leaves Windows as Coming Soon in the product", () => {
+  it("Windows is a published pre-release download", () => {
     const model = code(read("lib/platformDownloads.ts"));
 
-    expect(model).toContain("export const WINDOWS_DOWNLOAD: ComingSoonPlatformDownload");
-    expect(model).toContain('status: "coming_soon"');
-    expect(model).not.toContain("getWindowsDownload");
+    // Feature 23.6 — Windows is now a real download. The invariant that
+    // survives: it is served by the shared model from one release object, and
+    // it is labelled as an unsigned pre-release.
+    expect(model).toContain("export function getWindowsDownload(");
+    expect(model).toContain('status: "available"');
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
     // No installer URL has been published, so none may appear anywhere.
     expect(model).not.toContain(".exe");
   });

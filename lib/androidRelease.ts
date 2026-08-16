@@ -15,6 +15,12 @@
 //
 // Dependency-free (no React, no Supabase, no node builtins), so the same
 // validation runs in a server component, in the browser, and under Vitest.
+//
+// Feature 23.6 — the fields Android shares with every other platform now live in
+// lib/platformRelease.ts, so the download row can render a Windows release
+// through the same contract. Nothing about Android's own values changed.
+import { isPlatformRelease } from "@/lib/platformRelease";
+import type { PlatformRelease } from "@/lib/platformRelease";
 
 /**
  * A published Android release.
@@ -23,24 +29,16 @@
  * state: a release either exists and all of this is knowable, or it does not
  * exist yet and the value is null (see CURRENT_ANDROID_RELEASE).
  */
-export type AndroidRelease = {
-  /** User-facing, e.g. "1.0.0". Matches versionName in android/app/build.gradle. */
-  versionName: string;
+export type AndroidRelease = PlatformRelease & {
   /**
    * Strictly increasing integer. Matches versionCode in build.gradle.
    *
    * Android refuses to install an APK whose versionCode is lower than the
    * installed one, so this is what actually orders releases — versionName is
-   * only a label.
+   * only a label. Windows has no equivalent, which is why this field stays here
+   * rather than in the shared PlatformRelease base.
    */
   versionCode: number;
-  /** The GitHub Release asset URL for the signed APK. */
-  downloadUrl: string;
-  /** Lowercase sha-256 hex of the APK file, matching build_artifacts.checksum. */
-  checksum: string;
-  fileSizeBytes: number;
-  /** ISO 8601. */
-  releasedAt: string;
 };
 
 /**
@@ -91,9 +89,6 @@ export const CURRENT_ANDROID_RELEASE: AndroidRelease | null = {
 export const ANDROID_MIN_SDK = 24;
 export const ANDROID_MIN_VERSION_LABEL = "Android 7.0 or newer";
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
-const SEMVER = /^\d+\.\d+\.\d+$/;
-
 /**
  * Structural guard for a release record.
  *
@@ -102,53 +97,22 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
  * worse than showing nothing.
  */
 export function isAndroidRelease(value: unknown): value is AndroidRelease {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  // Feature 23.6 — the shared fields are checked by lib/platformRelease.ts, so
+  // Android and Windows cannot drift apart on what "a valid release" means.
+  // Everything Android-specific stays here.
+  if (!isPlatformRelease(value)) {
     return false;
   }
 
-  const release = value as Record<string, unknown>;
+  const release = value as unknown as Record<string, unknown>;
 
   return (
-    typeof release.versionName === "string" &&
-    SEMVER.test(release.versionName) &&
     typeof release.versionCode === "number" &&
     Number.isInteger(release.versionCode) &&
-    release.versionCode > 0 &&
-    typeof release.downloadUrl === "string" &&
-    isHttpsUrl(release.downloadUrl) &&
-    typeof release.checksum === "string" &&
-    SHA256_HEX.test(release.checksum) &&
-    typeof release.fileSizeBytes === "number" &&
-    Number.isInteger(release.fileSizeBytes) &&
-    release.fileSizeBytes > 0 &&
-    typeof release.releasedAt === "string" &&
-    !Number.isNaN(new Date(release.releasedAt).getTime())
+    release.versionCode > 0
   );
 }
 
-/** A download must be https: an APK served over cleartext is trivially swapped. */
-function isHttpsUrl(value: string): boolean {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Formats a byte count for a download button, e.g. "4.2 MB".
- *
- * Presentation only — fileSizeBytes stays the authority, and the checksum is
- * what actually verifies a download.
- */
-export function formatReleaseSize(fileSizeBytes: number): string {
-  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
-    return "";
-  }
-
-  const megabytes = fileSizeBytes / (1024 * 1024);
-
-  return megabytes >= 1
-    ? `${megabytes.toFixed(1)} MB`
-    : `${Math.max(1, Math.round(fileSizeBytes / 1024))} KB`;
-}
+// Feature 23.6 — re-exported from the shared module so every existing importer
+// keeps working and there is still exactly one implementation.
+export { formatReleaseSize } from "@/lib/platformRelease";

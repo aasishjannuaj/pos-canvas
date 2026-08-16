@@ -1,8 +1,17 @@
 # POS Canvas — Windows shell
 
-The universal POS Canvas application for Windows. **Feature 23.1: the shell
-foundation only.** There is no installer, no packaging and no Windows release
-yet — Windows is still **Coming Soon** on every customer-facing surface.
+The universal POS Canvas application for Windows.
+
+**Feature 23 is COMPLETE.** The shell is built, hardened, packaged as an NSIS
+installer by CI, validated on real Windows x64, published as
+[`windows-v1.0.0`](https://github.com/aasishjannuaj/pos-canvas/releases/tag/windows-v1.0.0),
+and offered as a download on the landing page, the dashboard and the editor's
+Devices panel.
+
+> **Windows distribution is currently an UNSIGNED PRE-RELEASE / DEVELOPMENT
+> DISTRIBUTION.** POS Canvas is not publicly launched. **Windows code signing is
+> mandatory before public launch** — deferred by owner decision, not cancelled.
+> Feature 24 also remains before the final MVP/public release.
 
 ## Architecture
 
@@ -289,6 +298,158 @@ electron-builder reports *"default Electron icon is used"*, which is deliberate.
 Feature 24 work, before any public release.** Nothing in this phase should be
 treated as final artwork, and no placeholder company branding was invented.
 
+## Real Windows validation (Feature 23.5)
+
+Performed by the owner on real Windows x64 hardware. **Owner-reported results**
+— recorded here because they gate the release, not because this repository
+observed them:
+
+| Check | Result |
+|---|---|
+| Installation | passed |
+| Launch | passed |
+| Pairing | passed |
+| Owner Devices UI shows **Windows** | passed |
+| Correct configuration loaded | passed |
+| Logo / menu / modifiers | passed |
+| Sale | passed |
+| Receipt and print behaviour | passed |
+| Normal restart preserves pairing | passed |
+| **Windows reboot** preserves pairing | passed |
+| Network loss and recovery | passed |
+| Revocation | passed |
+| **Repeated abrupt Task Manager termination preserves pairing** | passed |
+
+That last row closes the hard gate carried since Feature 23.2, where macOS showed
+intermittent session loss on `SIGTERM`. It did **not** reproduce on real Windows
+across repeated abrupt terminations, so the stop-ship condition is cleared.
+
+## Publishing a Windows release (Feature 23.6)
+
+### Owner-approved pre-release policy
+
+POS Canvas is **not publicly launched**. For the current development stage the
+owner has approved distributing the **unsigned** Windows installer, on these
+terms:
+
+* the installer is published as a **PRE-RELEASE / DEVELOPMENT BUILD**
+* it is labelled **unsigned** wherever it is offered
+* nothing claims it is signed, verified, or trusted
+* **code signing remains REQUIRED before the true public launch** — it is
+  deferred, *not* cancelled
+
+Before public launch: complete signing, replace the unsigned artifact and its
+checksum with the signed ones, update the release wording, and configure Azure
+Artifact Signing (or another approved provider). Signing is **not optional** for
+public launch.
+
+### What Windows users will see
+
+Windows will show a **SmartScreen / "Unknown publisher"** warning on an unsigned
+installer, and enterprise policy or Smart App Control may block it. That is
+expected for a pre-release build and is what signing later fixes.
+
+**Do not advise anyone to disable Windows Security**, and do not do so yourself.
+The correct route on a machine you control is *More info → Run anyway*.
+
+### Release naming
+
+| | |
+|---|---|
+| Tag | `windows-v1.0.0` — **never** Android's `v1.0.0`; the two have independent cadence |
+| Title | POS Canvas Windows v1.0.0 |
+| State | **Pre-release** |
+| Installer asset | `POS-Canvas-Windows-v1.0.0.exe` |
+| Checksum asset | `POS-Canvas-Windows-v1.0.0.exe.sha256` |
+
+`isWindowsRelease()` enforces the tag and filename: a release object missing the
+`windows-v` tag, or whose filename version disagrees with `versionName`, is
+rejected rather than rendered.
+
+### The verified artifact
+
+Only the **CI-produced** installer may be published — never a local macOS
+cross-build. Verified from the downloaded GitHub Actions artifact:
+
+```
+sha-256   03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d
+bytes     99637338
+signature none (PE certificate table empty)
+```
+
+The macOS cross-build is a different 99,637,032-byte file. The sizes differing is
+how "did this come from CI?" stays checkable.
+
+### The published release — verified 2026-08-16
+
+```
+tag          windows-v1.0.0        (GitHub pre-release, draft=false)
+title        POS Canvas Windows v1.0.0
+published_at 2026-08-16T15:24:22Z
+installer    POS-Canvas-Windows-v1.0.0.exe
+sha-256      03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d
+bytes        99637338
+signature    none — PE certificate table empty
+```
+
+Verified against the **published** bytes, not the build log: the API's reported
+size matched, the downloaded installer verified against its own published
+`.sha256` (`shasum -c` → OK), an independent hash matched, and the bytes are
+identical to the CI artifact and different from the macOS cross-build.
+
+### Publishing a future release
+
+1. Run the **Windows app** workflow; download the artifact.
+2. Sign the installer (once signing exists), then hash the **signed** bytes.
+3. Create the GitHub Release under `windows-v<version>` and upload both assets.
+4. Read the real `browser_download_url` and `published_at` from the Releases API
+   — **do not assume the URL.** Android's first release was tagged `v.1.0.0` with
+   a stray dot and the conventional URL 404'd until it was re-tagged.
+5. Download the published asset and verify its sha-256 locally.
+6. Update `CURRENT_WINDOWS_RELEASE` with those verified values.
+7. Deploy. All three surfaces change together, because they read one model.
+
+### Release naming, once unblocked
+
+| | |
+|---|---|
+| Tag | `windows-v1.0.0` — **never** Android's `v1.0.0`; the two have independent cadence |
+| Installer asset | `POS-Canvas-Windows-v1.0.0.exe` |
+| Checksum asset | `POS-Canvas-Windows-v1.0.0.exe.sha256` |
+
+`isWindowsRelease()` enforces both: a release object whose URL is missing the
+`windows-v` tag, or whose filename version disagrees with `versionName`, is
+rejected rather than rendered.
+
+### The procedure, when signing is available
+
+1. Run the **Windows app** workflow; it builds the installer.
+2. Sign the installer, then compute the SHA-256 **of the signed bytes** — signing
+   changes the file, so a checksum taken before it is worthless.
+3. Verify the Authenticode signature and the publisher identity.
+4. Create the GitHub Release under `windows-v<version>` and upload both assets.
+5. **Download the published asset** and verify its checksum locally. Do not
+   transcribe values from a build log — this is how the Android release was
+   verified in Feature 21.
+6. Populate `CURRENT_WINDOWS_RELEASE` with those verified values.
+7. Deploy the web app. Windows becomes downloadable on the landing page, the
+   dashboard and the editor's Devices panel simultaneously, because all three
+   read the same shared model.
+
+### Updates
+
+Manual, exactly like Android: owners download the new installer and run it over
+the existing one. There is no auto-updater. NSIS is configured with
+`deleteAppDataOnUninstall: false` so the paired session in `%APPDATA%\POS Canvas`
+survives an upgrade — validated on real Windows in Feature 23.5.
+
+### The binary stays universal
+
+One installer for every customer. No project id, no build id, no business
+identity and no configuration enters it — verified in Feature 23.4 against the
+packaged `app.asar`, and asserted again by the release guards. A till becomes a
+specific business's till through pairing at runtime.
+
 ### Still to come
 
 * **23.5** — install and validate on real Windows x64, including the abrupt-
@@ -306,9 +467,9 @@ done. No public download URL exists.
 | 23.2 | **Done** — navigation lockdown, permission handler, window-open policy, download blocking, single-instance lock, production DevTools lockdown |
 | 23.3 | **Done** — identity signal, `DevicePlatform` `"windows"` |
 | 23.4 | **Done** — electron-builder, NSIS installer, GitHub Actions Windows build |
-| 23.5 | Not started — real-Windows validation, upgrade/pairing-persistence gate |
-| 23.6 | Not started — code signing, GitHub Release, switching Windows off Coming Soon |
-| 24 | Not started — final icon, installer branding, splash, company branding |
+| 23.5 | **Done** — real-Windows validation, upgrade/pairing-persistence gate |
+| 23.6 | **COMPLETE** — release metadata, shared platform model, pre-release UX, published `windows-v1.0.0`, Windows download live. Signing deferred to public launch by owner decision. |
+| 24 | Not started — final logo, Android/Windows icons, splash screens, installer branding, company information screen, offline capability, cached startup, offline sales/sync, publish progress |
 
 The four structural `webPreferences` (`contextIsolation`, `nodeIntegration`,
 `sandbox`, `webviewTag`) are present from the first commit rather than being

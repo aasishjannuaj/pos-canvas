@@ -1,4 +1,5 @@
 import { formatReleaseSize } from "@/lib/androidRelease";
+import { PRERELEASE_BADGE_LABEL } from "@/lib/platformRelease";
 import { isDownloadable } from "@/lib/platformDownloads";
 import type { PlatformDownload } from "@/lib/platformDownloads";
 
@@ -58,6 +59,18 @@ export default function PlatformDownloadRow({
             Version {download.release.versionName} ·{" "}
             {formatReleaseSize(download.release.fileSizeBytes)} ·{" "}
             {download.requirement}
+          </span>
+        )}
+
+        {/* Feature 23.6 — the pre-release qualifier, read from the release
+            itself so all three surfaces say the same thing without any of them
+            hardcoding it. Absent on a stable release, so Android is unaffected.
+            Rendered as text rather than a coloured warning: it is a fact about
+            the build, not an error, and an alarming treatment would discourage
+            the very testing this build exists for. */}
+        {isDownloadable(download) && download.release.isPrerelease === true && (
+          <span className="text-xs font-medium text-amber-700">
+            {PRERELEASE_BADGE_LABEL}
           </span>
         )}
       </div>

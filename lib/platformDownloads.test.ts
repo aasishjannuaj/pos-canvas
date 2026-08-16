@@ -6,12 +6,13 @@
 // would slip past the compiler.
 import { describe, expect, it } from "vitest";
 import {
-  WINDOWS_DOWNLOAD,
+  getWindowsDownload,
   getAndroidDownload,
   getPlatformDownloads,
   isDownloadable,
 } from "@/lib/platformDownloads";
 import { CURRENT_ANDROID_RELEASE } from "@/lib/androidRelease";
+import { CURRENT_WINDOWS_RELEASE } from "@/lib/windowsRelease";
 import type { AndroidRelease } from "@/lib/androidRelease";
 
 const FAKE_RELEASE: AndroidRelease = {
@@ -71,16 +72,19 @@ describe("Android availability derives from the release metadata", () => {
   });
 });
 
-describe("Windows is coming soon and cannot carry a download", () => {
-  it("is always coming_soon in this feature", () => {
-    expect(WINDOWS_DOWNLOAD.status).toBe("coming_soon");
-    expect(WINDOWS_DOWNLOAD.platform).toBe("windows");
+describe("Windows carries a download only when a real release exists", () => {
+  // Feature 23.6 replaced the hardcoded coming-soon constant with
+  // getWindowsDownload(release). The invariant it protected is unchanged and is
+  // now asserted against the null branch: no release, no URL, nowhere to put one.
+  const comingSoon = getWindowsDownload(null);
+
+  it("is coming_soon while no release is published", () => {
+    expect(comingSoon.status).toBe("coming_soon");
+    expect(comingSoon.platform).toBe("windows");
   });
 
   it("has NO url, href or release field of any kind", () => {
-    // The central invariant. Windows ships in Feature 23; until then there is
-    // nothing to download and nowhere to put a link.
-    const keys = Object.keys(WINDOWS_DOWNLOAD);
+    const keys = Object.keys(comingSoon);
 
     expect(keys).toEqual(["platform", "status", "label", "description"]);
     for (const banned of ["release", "downloadUrl", "url", "href", "checksum"]) {
@@ -90,7 +94,7 @@ describe("Windows is coming soon and cannot carry a download", () => {
 
   it("carries no URL-shaped value in any field", () => {
     // Belt and braces: not merely "no url key", but no url anywhere.
-    const serialized = JSON.stringify(WINDOWS_DOWNLOAD);
+    const serialized = JSON.stringify(comingSoon);
 
     expect(serialized).not.toContain("http");
     expect(serialized).not.toContain(".exe");
@@ -98,12 +102,61 @@ describe("Windows is coming soon and cannot carry a download", () => {
     expect(serialized).not.toContain("github");
   });
 
-  it("is never downloadable", () => {
-    expect(isDownloadable(WINDOWS_DOWNLOAD)).toBe(false);
+  it("is never downloadable while null", () => {
+    expect(isDownloadable(comingSoon)).toBe(false);
   });
 
   it("describes the same universal app, not a different product", () => {
-    expect(WINDOWS_DOWNLOAD.description).toBe("POS Canvas for Windows");
+    expect(comingSoon.description).toBe("POS Canvas for Windows");
+  });
+
+  it("is available today, from the published pre-release", () => {
+    // The live default. Feature 23.6 published windows-v1.0.0, so every surface
+    // now renders a real download — and it is labelled as an unsigned
+    // pre-release, because it is one.
+    const live = getWindowsDownload();
+
+    expect(live.status).toBe("available");
+    expect(CURRENT_WINDOWS_RELEASE).not.toBeNull();
+    expect(isDownloadable(live) && live.release.isPrerelease).toBe(true);
+  });
+
+  it("becomes a real download when a verified release is supplied", () => {
+    const release = {
+      versionName: "1.0.0",
+      downloadUrl:
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.0.0/POS-Canvas-Windows-v1.0.0.exe",
+      checksum: "a".repeat(64),
+      fileSizeBytes: 99637032,
+      releasedAt: "2026-08-15T20:00:00Z",
+    };
+
+    const download = getWindowsDownload(release);
+
+    expect(download.status).toBe("available");
+    expect(isDownloadable(download)).toBe(true);
+    expect(isDownloadable(download) && download.release.downloadUrl).toBe(
+      release.downloadUrl
+    );
+    expect(isDownloadable(download) && download.requirement).toBe(
+      "Windows 10 or newer \u00b7 x64"
+    );
+  });
+
+  it("restates no version or URL of its own", () => {
+    // Everything renderable comes from the release object, so a surface can
+    // never disagree with the published artifact.
+    const release = {
+      versionName: "2.5.1",
+      downloadUrl:
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v2.5.1/POS-Canvas-Windows-v2.5.1.exe",
+      checksum: "b".repeat(64),
+      fileSizeBytes: 1234,
+      releasedAt: "2026-09-01T00:00:00Z",
+    };
+
+    const download = getWindowsDownload(release);
+    expect(isDownloadable(download) && download.release).toBe(release);
   });
 });
 
@@ -115,15 +168,22 @@ describe("the platform list", () => {
     ]);
   });
 
-  it("shows Windows as coming soon even when Android is unavailable", () => {
+  it("keeps the two platforms independent", () => {
+    // Android unavailable must not affect Windows, and vice versa: they are
+    // separate binaries on separate release lines.
     const [android, windows] = getPlatformDownloads(null);
 
     expect(android.status).toBe("unavailable");
-    expect(windows.status).toBe("coming_soon");
+    expect(windows.status).toBe("available");
+
+    const [android2, windows2] = getPlatformDownloads(CURRENT_ANDROID_RELEASE, null);
+
+    expect(android2.status).toBe("available");
+    expect(windows2.status).toBe("coming_soon");
   });
 
-  it("contains exactly one downloadable platform today", () => {
-    expect(getPlatformDownloads().filter(isDownloadable)).toHaveLength(1);
+  it("both platforms are downloadable today", () => {
+    expect(getPlatformDownloads().filter(isDownloadable)).toHaveLength(2);
   });
 });
 

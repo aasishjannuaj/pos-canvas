@@ -310,18 +310,28 @@ describe("each document kind gets exactly one bridge", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 23.3 stops where it was scoped to stop", () => {
-  it("leaves Windows as coming_soon", () => {
+  it("Windows is a published pre-release download", () => {
     const model = code(read("lib/platformDownloads.ts"));
-    expect(model).toContain("export const WINDOWS_DOWNLOAD: ComingSoonPlatformDownload");
-    expect(model).toContain('status: "coming_soon"');
-    expect(model).not.toContain("getWindowsDownload");
+    // Feature 23.6 — Windows is now a real download. The invariant that
+    // survives: it is served by the shared model from one release object, and
+    // it is labelled as an unsigned pre-release.
+    expect(model).toContain("export function getWindowsDownload(");
+    expect(model).toContain('status: "available"');
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
   });
 
-  it("adds no release metadata or signing work", () => {
+  it("adds no signing work", () => {
     // Feature 23.4 added the installer and its workflow deliberately; those are
     // asserted in lib/windowsInstaller.guards.test.ts. What 23.3 still fences
     // out is everything downstream of a built installer.
-    expect(existsSync(join(repoRoot, "lib/windowsRelease.ts"))).toBe(false);
+    // Feature 23.6 published the Windows pre-release, so "no release metadata"
+    // is no longer the rule. What survives is the substantive current state:
+    // the release exists, it is marked pre-release, and it is the ONLY Windows
+    // release metadata in the repository.
+    expect(code(read("lib/windowsRelease.ts"))).toContain(
+      "export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {"
+    );
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
 
     const shellPackage = read("windows-shell/package.json");
     for (const banned of ["certificateFile", "certificatePassword", "signtool"]) {

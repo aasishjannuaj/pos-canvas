@@ -18,6 +18,12 @@
 // unit-testable and identical on the server and in the browser.
 import { CURRENT_ANDROID_RELEASE, ANDROID_MIN_VERSION_LABEL } from "@/lib/androidRelease";
 import type { AndroidRelease } from "@/lib/androidRelease";
+import {
+  CURRENT_WINDOWS_RELEASE,
+  WINDOWS_MIN_VERSION_LABEL,
+} from "@/lib/windowsRelease";
+import type { WindowsRelease } from "@/lib/windowsRelease";
+import type { PlatformRelease } from "@/lib/platformRelease";
 
 export type PlatformId = "android" | "windows";
 
@@ -35,7 +41,17 @@ export type AvailablePlatformDownload = {
   description: string;
   /** Extra reassurance under the button, e.g. the minimum OS version. */
   requirement: string;
-  release: AndroidRelease;
+  /**
+   * Feature 23.6 — the SHARED release shape, not Android's.
+   *
+   * Widened from `AndroidRelease` so a Windows release can be represented at
+   * all. It is deliberately the base type rather than a union: every consumer
+   * renders version, size and URL identically, so a union here would push a
+   * narrowing decision into the download row for no benefit. A platform that
+   * one day needs its own field adds it to its own release type, and this stays
+   * the intersection everyone can rely on.
+   */
+  release: PlatformRelease;
 };
 
 /**
@@ -104,18 +120,42 @@ export function getAndroidDownload(
 }
 
 /**
- * Windows — announced, not built.
+ * Windows, derived entirely from the published release metadata.
  *
- * A plain constant rather than a function: there is no input that could change
- * the answer while Feature 23 is outstanding, and a function would invite a
- * future parameter that made it conditional.
+ * Feature 23.6 replaced the hardcoded coming-soon constant with a function, now
+ * that a Windows release can actually exist. The version and download URL are
+ * never restated here — they come from CURRENT_WINDOWS_RELEASE.
+ *
+ * WHY NULL STILL MEANS `coming_soon` RATHER THAN `unavailable`. The two null
+ * states say different things to an owner: "unavailable" means the app exists
+ * but cannot be fetched right now (Android between releases), while "coming
+ * soon" means it has not shipped yet. Windows has never shipped a public
+ * release, so coming_soon is the truthful one — and it keeps every surface
+ * rendering exactly as it does today until a verified, signed release is
+ * populated. Once Windows HAS shipped, a later null should be revisited as
+ * `unavailable`, because by then "coming soon" would be the lie.
  */
-export const WINDOWS_DOWNLOAD: ComingSoonPlatformDownload = {
-  platform: "windows",
-  status: "coming_soon",
-  label: WINDOWS_LABEL,
-  description: "POS Canvas for Windows",
-};
+export function getWindowsDownload(
+  release: WindowsRelease | null = CURRENT_WINDOWS_RELEASE
+): AvailablePlatformDownload | ComingSoonPlatformDownload {
+  if (release === null) {
+    return {
+      platform: "windows",
+      status: "coming_soon",
+      label: WINDOWS_LABEL,
+      description: "POS Canvas for Windows",
+    };
+  }
+
+  return {
+    platform: "windows",
+    status: "available",
+    label: WINDOWS_LABEL,
+    description: "POS Canvas for Windows",
+    requirement: WINDOWS_MIN_VERSION_LABEL,
+    release,
+  };
+}
 
 /**
  * Every platform, in the order the UI shows them.
@@ -123,9 +163,10 @@ export const WINDOWS_DOWNLOAD: ComingSoonPlatformDownload = {
  * Android first because it is the one an owner can act on today.
  */
 export function getPlatformDownloads(
-  release: AndroidRelease | null = CURRENT_ANDROID_RELEASE
+  release: AndroidRelease | null = CURRENT_ANDROID_RELEASE,
+  windowsRelease: WindowsRelease | null = CURRENT_WINDOWS_RELEASE
 ): PlatformDownload[] {
-  return [getAndroidDownload(release), WINDOWS_DOWNLOAD];
+  return [getAndroidDownload(release), getWindowsDownload(windowsRelease)];
 }
 
 /**

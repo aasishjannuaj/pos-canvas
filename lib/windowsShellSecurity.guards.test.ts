@@ -18,7 +18,7 @@
 // operating system for NOTHING. Every control below is deny-by-default, because
 // the alternative — allow, then enumerate the bad cases — has to be re-audited
 // every time the hosted page changes.
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -604,14 +604,17 @@ describe("Feature 23.2 stops where it was scoped to stop", () => {
     expect(code(read(MAIN))).not.toContain("DevicePlatform");
   });
 
-  it("leaves Windows as coming_soon", () => {
+  it("Windows is a published pre-release download", () => {
     const model = code(read("lib/platformDownloads.ts"));
-    expect(model).toContain("export const WINDOWS_DOWNLOAD: ComingSoonPlatformDownload");
-    expect(model).toContain('status: "coming_soon"');
-    expect(model).not.toContain("getWindowsDownload");
+    // Feature 23.6 — Windows is now a real download. The invariant that
+    // survives: it is served by the shared model from one release object, and
+    // it is labelled as an unsigned pre-release.
+    expect(model).toContain("export function getWindowsDownload(");
+    expect(model).toContain('status: "available"');
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
   });
 
-  it("adds no release or signing work", () => {
+  it("adds no signing work", () => {
     // Feature 23.4 added electron-builder and the NSIS target deliberately, so
     // the packaging half of this fence is gone. Release metadata and signing
     // remain out of scope until 23.6, and the shell must still carry no
@@ -629,7 +632,14 @@ describe("Feature 23.2 stops where it was scoped to stop", () => {
       expect(`package.json: ${shellPackage}`).not.toContain(banned);
     }
 
-    expect(existsSync(join(repoRoot, "lib/windowsRelease.ts"))).toBe(false);
+    // Feature 23.6 published the Windows pre-release, so "no release metadata"
+    // is no longer the rule. What survives is the substantive current state:
+    // the release exists, it is marked pre-release, and it is the ONLY Windows
+    // release metadata in the repository.
+    expect(code(read("lib/windowsRelease.ts"))).toContain(
+      "export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {"
+    );
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
   });
 
   it("leaves the root dependency tree untouched", () => {
