@@ -1,0 +1,1056 @@
+# Offline architecture — design (Feature 24.4)
+
+**Status: DESIGN ONLY. Nothing here is implemented.** Feature 24.4 produced this
+document and nothing else: no offline runtime, no local queue, no IndexedDB
+wrapper, no migration, no RPC change. Implementation is Feature 24.5, phased in
+§20.
+
+Scope: the two universal shells — Android (Capacitor WebView) and Windows
+(Electron) — both of which load the same hosted `/device` runtime over the
+network. Everything below is derived from the code as it exists at Feature 24.3,
+and every claim about current behaviour cites the file that establishes it.
+
+---
+
+## 1. Current architecture — what actually happens today
+
+### 1.1 Cold start
+
+`components/device/DeviceApp.tsx` resolves device state in a fixed order:
+
+```
+getDeviceSession()            lib/device.rpc.ts:62   local read, then possible token refresh
+  └─ if no session
+     signInDeviceAnonymously() lib/device.rpc.ts:82   NETWORK — anonymous auth
+fetchDevicePairingState()      lib/device.rpc.ts:128  NETWORK — rpc get_device_pairing_state
+fetchDeviceConfig()            lib/device.rpc.ts:216  NETWORK — rpc get_device_config
+  └─ returns build_jobs.config_snapshot (immutable, status='succeeded')
+PosRuntime renders
+```
+
+The Supabase session is persisted by supabase-js into `localStorage` under
+`pos-canvas-device-auth` with `persistSession: true`, `autoRefreshToken: true`
+(`lib/supabase/deviceClient.ts`). That is the **only** thing currently surviving
+a restart. Pairing state and configuration are re-fetched from the network on
+every cold start and held in React state only.
+
+### 1.2 Checkout
+
+`complete_sale_v3(p_project_id, p_payment_method, p_tip_amount, p_items, p_sale_request_id)`
+— `supabase/migrations/20260810120000_modifier_contract_and_complete_sale_v3.sql:765`.
+
+The client sends **identifiers and quantities only**. It sends no prices. The
+function, in order:
+
+| § | Step | Notes |
+|---|---|---|
+| 2 | `resolve_sale_owner` | establishes the acting owner |
+| 3 | `SELECT … FOR UPDATE` on `projects` | single serialization point per project |
+| 3 | device branch | `paired_devices … revoked_at is null`, reads `build_job_id` |
+| 4 | tip | devices may not tip; any non-zero tip is rejected |
+| 5 | canonical preimage + `sha256` | header `posc.sale.v2`, keyed on item **and** modifier selection |
+| 6 | **idempotency lookup** | by `(project_id, sale_request_id)`, before counter/insert/inventory |
+| 7 | pricing source | owner → live `projects.config`; **device → `build_jobs.config_snapshot`** |
+| 8 | per-line pricing from that source, **stock from the LIVE locked config** | |
+| 10 | order number from `project_order_counters` | transactional, gap-free, prefix from the pinned source |
+| 11 | atomic write | order, items, inventory, audit rows |
+| 12 | one payload construction path | replay and new sale return identical shapes |
+
+### 1.3 Facts that shape every decision below
+
+1. **Idempotency already exists and is durable.** `orders.sale_request_id` +
+   `orders.sale_request_hash`, with a partial unique index on
+   `(project_id, sale_request_id) WHERE sale_request_id IS NOT NULL`
+   (`20260803240000_order_counter_and_idempotency_scaffold.sql`). A replay with
+   the same id **and** hash returns the stored order; the same id with a
+   different hash raises `Sale request ID was already used for a different
+   order`. The payload is rebuilt from the stored order, so a replay succeeds
+   even if the item was since renamed, repriced, removed or sold out.
+
+2. **A device is already priced from an immutable snapshot**, not from live
+   config (§7 of the function). The owner publishing a new config does **not**
+   change what a paired device charges. This is the pre-existing mechanism that
+   makes offline pricing safe with no new server trust.
+
+3. **The device has never known live stock.** `toDeviceDisplayConfig`
+   (`lib/deviceSession.ts:248`) forces `trackInventory: false` and
+   `stockQuantity: 0` on the display copy, and `DeviceApp` passes
+   `refreshStock={null}` (`components/device/DeviceApp.tsx:258`). Inventory is
+   enforced *only* inside the sale transaction and rejects hard with
+   `Insufficient inventory for %`.
+
+4. **Receipt numbers are server-allocated.** `project_order_counters` under the
+   project row lock. The client has no way to produce one and never has.
+
+5. **`orders.created_at` defaults to `now()`** — server time at insert. There is
+   **no** `occurred_at` column (`20260803201200_capture_operational_schema.sql:123`).
+
+6. **Revocation is checked on every call, including replays**, and deliberately
+   *before* the idempotency lookup.
+
+7. **Payment is a label, not a transaction.** `PaymentMethod = "cash" | "card"`
+   (`lib/cart.ts:59`), constrained in SQL to the same two values. There is no
+   gateway, no acquirer, no PAN, no CVV anywhere in the repository.
+
+8. **The idempotency key is in-memory only.** `SaleRequestState`
+   (`lib/saleRequest.ts`) lives in React state. `SALE_UNCONFIRMED_MESSAGE`
+   already tells the operator to press Pay again — but a crash or reload between
+   submit and response loses the key, and the retry then generates a *new* id.
+   This is an existing duplicate-sale hole that offline work must close.
+
+### 1.4 What currently requires the network
+
+| Operation | Needs network | Why |
+|---|---|---|
+| Anonymous device sign-in | **Yes** | Supabase auth |
+| Access-token refresh | **Yes** | ~1h JWT lifetime |
+| `get_device_pairing_state` | **Yes** | authoritative pairing + revocation |
+| `get_device_config` | **Yes** | pinned snapshot fetch |
+| Rendering the menu | No, once config is in memory | pure render from the snapshot |
+| Cart, modifiers, display totals | No | `lib/cart.ts`, `lib/modifiers.ts` are pure |
+| **Completing a sale** | **Yes** | `complete_sale_v3` is the sole authority |
+| Receipt number | **Yes** | server counter |
+| Inventory decrement | **Yes** | server, live config |
+| Pairing a new device | **Yes** | code redemption |
+| Owner editing / publishing | **Yes** | owner surface, not the till |
+
+Everything in the till that is *not* the sale itself is already offline-capable
+in principle. The network dependency is concentrated in three places: **startup
+resolution, the sale, and revocation.**
+
+---
+
+## 2. Offline capability matrix
+
+Derived from §1, not assumed.
+
+### SAFE OFFLINE
+
+| Capability | Why it is safe |
+|---|---|
+| Reopen the POS from a cached pinned snapshot | the snapshot is immutable and already the pricing authority |
+| Browse menu, categories, layouts | pure render |
+| Add/remove items, choose modifiers | `lib/cart.ts` + `lib/modifiers.ts` are pure and already run client-side |
+| Display subtotal / tax / total | computed from the pinned snapshot; the server recomputes identically from the same snapshot |
+| Choose Cash or Card **as a label** | no authorization happens today, online or offline |
+| Create a local sale intent with a durable idempotency key | key generation is `crypto.randomUUID()`, already client-side |
+| Print a **provisional** receipt | see §9 — it must not carry a fake order number |
+
+### ONLINE ONLY
+
+| Capability | Why |
+|---|---|
+| Pairing a new device | redemption is a server transaction; there is nothing to cache |
+| Unpair / re-pair | same |
+| Adopting a newer published config | requires an authoritative fetch |
+| Final receipt number | server counter, §9 |
+| Authoritative inventory decrement | server, live config |
+| Confirming a sale is recorded | by definition |
+| Owner reports, dashboard, editor, publishing | owner surfaces, not the till |
+| Confirming the device is still authorized | §14 |
+
+### DISALLOWED WHILE OFFLINE
+
+| Capability | Why |
+|---|---|
+| Tips on a device | already rejected server-side for devices (§4 of the function); allowing an offline tip would queue a sale guaranteed to fail |
+| Refunds / voids / discounts | no server contract exists for any of them; offline is not the place to invent one |
+| Any owner action | the till has no owner credentials, by design |
+| Editing the cached config | it is a snapshot, not a document |
+| A **first** sale on a device that has never successfully synced | there is no verified pairing to rely on |
+
+---
+
+## 3. Local config cache
+
+### 3.1 What is cached
+
+One record per paired device, written **only** after a successful authoritative
+`get_device_config`:
+
+```
+PinnedConfigCache {
+  cacheSchemaVersion   number     // this cache's own shape, independent of the config's
+  configSchemaVersion  number     // from build_jobs.config_schema_version
+  deviceAuthUserId     string     // binds the cache to the auth identity that fetched it
+  projectId            string
+  buildJobId           string     // the pinned build — the cache key that matters
+  configSnapshot       object     // verbatim GeneratedPosConfig, never edited
+  integrity            string     // SHA-256 of the canonical serialization of configSnapshot
+  fetchedAt            string     // ISO, server-observed if available
+  lastVerifiedAt       string     // last successful authoritative contact (§5)
+}
+```
+
+### 3.2 Rules
+
+- **Immutable.** Written whole, replaced whole. No field is ever edited in
+  place. Any code path that mutates `configSnapshot` is a bug.
+- **Integrity-checked on read.** Recompute the SHA-256 and compare. A mismatch
+  discards the cache and forces online startup — a corrupted snapshot must never
+  price a sale.
+- **Bound to identity.** If `deviceAuthUserId` does not match the current
+  Supabase user, or `projectId`/`buildJobId` disagree with the last known
+  pairing, the cache is discarded. This is what prevents customer-to-customer
+  leakage on a re-paired device.
+- **Replaced only by an authoritative fetch**, never by anything local.
+- **Cleared on unpair, on re-pair, and on confirmed revocation.** `resetDeviceSession()`
+  (`lib/device.rpc.ts:107`) is the existing choke point and must clear it too.
+- **Schema-versioned twice** — once for the cache envelope, once for the config
+  contract. `GENERATED_POS_CONFIG_SCHEMA_VERSION` is already an exact-match
+  check (`lib/generatedPosConfig.ts:426`); an unknown version discards the
+  cache rather than guessing.
+
+### 3.3 Storage technology
+
+| Option | Verdict |
+|---|---|
+| `localStorage` | **No** for the queue. Synchronous, string-only, ~5 MB, and no transactions — a crash mid-write can leave a torn record. Already in use for the auth session; leave that alone. |
+| **IndexedDB** | **Yes.** Transactional, structured, asynchronous, quota in the hundreds of MB, and the only web storage with atomic multi-record writes — which the queue requires. |
+| Cache Storage | **No.** It is a keyed store of HTTP `Response` objects for asset caching. Modelling a sale queue in it means hand-rolling serialization with no transactions. |
+| Platform-native (SQLite via a Capacitor plugin / Electron main-process file) | **No.** It would mean two implementations, a native bridge on each shell, and a break in the universal-binary invariant — the shells deliberately contain no product logic. |
+
+**Decision: IndexedDB for both the config cache and the sale queue, in the
+hosted web app, with no platform adapter.** See §17.
+
+---
+
+## 4. Offline device auth
+
+### 4.1 The problem
+
+Three separate things are conflated in "is this device allowed":
+
+1. **Authentication** — a valid Supabase session. Stored in `localStorage`;
+   supabase-js returns it offline even with an expired access token, but cannot
+   refresh without network.
+2. **Pairing** — a row in `paired_devices`. Only knowable from the server.
+3. **Authorization to sell** — pairing *and* `revoked_at is null`. Only knowable
+   from the server.
+
+Offline, we can verify (1) locally and must rely on a cached assertion of (2)
+and (3).
+
+### 4.2 Design
+
+Cache a **last known good pairing** record alongside the config cache, written
+only on a successful `get_device_pairing_state`:
+
+```
+PairingAssertion {
+  deviceAuthUserId, projectId, buildJobId,
+  deviceName, platform,
+  lastVerifiedAt     // the moment the server last said "paired, not revoked"
+}
+```
+
+Cold start becomes:
+
+```
+session = getDeviceSession()            // local
+if (!session)                  -> online-only path (unchanged)
+try  authoritative resolve (network)    // unchanged happy path
+catch network failure:
+   assertion = readPairingAssertion()
+   if (!assertion)                        -> existing offline error screen
+   if (assertion.userId !== session.user) -> existing offline error screen
+   if (leaseExpired(assertion))           -> "reconnect required" screen
+   config = readConfigCache()             // integrity-checked
+   if (!config)                           -> "reconnect required" screen
+   open POS in OFFLINE mode
+```
+
+Note the guard order: **a device that has never successfully paired online can
+never enter offline mode**, because no assertion exists.
+
+### 4.3 The lease
+
+An offline device cannot learn it was revoked. The only lever is a bound on how
+long a cached assertion stays usable.
+
+The tradeoff, stated honestly:
+
+- **No lease:** a stolen or revoked till keeps taking cash indefinitely as long
+  as it stays off the network. There is no upper bound on unrecorded takings.
+- **Short lease (hours):** a real outage — a cut line, a rural shop with a flaky
+  connection over a weekend — bricks the till during trading. This is a worse
+  and far more likely failure than theft.
+
+What bounds the damage regardless of the number: an offline till can only
+*record* sales. It holds no owner credentials, can read nothing beyond its own
+pinned menu, and every offline sale is reconciled against `revoked_at` at sync
+(§14).
+
+**APPROVED (owner, Feature 24.4 review): a 7-day lease from `lastVerifiedAt`,
+refreshed on every successful authoritative contact.** Seven days covers a long
+holiday weekend plus a slow repair, which is the realistic worst case for a shop
+that wants to keep trading; it bounds a stolen device to one week of unrecorded
+cash. The operator sees "Last verified {date}" whenever the device is offline, so
+the lease never expires as a surprise.
+
+24.5 must read this from **one named constant**, so revisiting the number later
+is a one-line change rather than a redesign.
+
+---
+
+## 5. Sale identity and idempotency
+
+**Reuse the existing contract unchanged.** No new idempotency mechanism is
+needed, and inventing one would fragment a rule that is currently enforced in
+exactly one place.
+
+- The key is `sale_request_id`, a v4 UUID from `crypto.randomUUID()`
+  (`lib/saleRequest.ts:createSaleRequestId`), already collision-resistant and
+  already client-generated.
+- The **only** change required is *when* and *where* it is persisted.
+
+### 5.1 The rule
+
+> A sale's `sale_request_id` is generated **once**, written to IndexedDB in the
+> same transaction that enqueues the sale, and **never regenerated** — not on
+> retry, not after a crash, not after a relaunch, not after a reload.
+
+This closes the existing in-memory hole described in §1.3(8): today a crash
+between submit and response loses the key and a retry creates a second order.
+
+### 5.2 Why the server needs no change here
+
+`complete_sale_v3` already:
+
+- returns the stored order for a replay with the same id and hash;
+- rejects the same id carrying *different* items with a clear error;
+- performs the lookup **before** counter allocation, insert, inventory mutation
+  and audit rows, so a replay has no side effects;
+- rebuilds the payload from the stored order, so a replay succeeds even if the
+  item has since been repriced or sold out.
+
+An offline sale is, from the server's point of view, an ordinary `complete_sale_v3`
+call that happens to arrive late. That is the whole point of designing it this
+way.
+
+### 5.3 Hash stability
+
+The canonical preimage (§5 of the function) covers project, payment method, tip
+and the sorted item/modifier lines. A queued sale must therefore be **frozen**:
+once enqueued, its cart is immutable. Editing a queued sale is not "editing" —
+it is voiding one sale and creating another, with a new id. The UI must not
+offer an edit affordance on a queued sale.
+
+---
+
+## 6. Queued sale data model
+
+```
+QueuedSale {
+  // identity — immutable after enqueue
+  saleRequestId        string   // UUID v4, the idempotency key
+  localId              string   // IndexedDB key; may equal saleRequestId
+  enqueuedAt           string   // ISO, device clock — see the warning below
+
+  // authorization context, so a stale queue cannot be replayed elsewhere
+  deviceAuthUserId     string
+  projectId            string
+  buildJobId           string   // the pinned build the prices came from
+  configSchemaVersion  number
+
+  // the request, exactly as it will cross the wire
+  paymentMethod        "cash" | "card"
+  tipAmount            0        // devices may not tip; stored to keep the shape honest
+  items: [{ itemId, quantity, modifiers: [{ groupId, optionIds[] }] }]
+
+  // DISPLAY ONLY — never sent as authoritative, never used to price
+  displayedSubtotal    string
+  displayedTax         string
+  displayedTotal       string
+  displayedLines       [{ itemId, name, unitPrice, quantity, lineTotal, modifiers }]
+
+  // provisional receipt
+  provisionalRef       string   // see §9 — NOT an order number
+
+  // sync state
+  status               "pending" | "syncing" | "synced" | "needs_attention" | "permanent_failure"
+  attemptCount         number
+  lastAttemptAt        string | null
+  nextAttemptAfter     string | null
+  lastError            { code, message } | null
+
+  // filled in on success
+  serverOrderId        string | null
+  serverOrderNumber    string | null
+  serverCreatedAt      string | null
+}
+```
+
+**The displayed totals are evidence, not input.** They exist so the operator and
+the owner can see what the customer was actually shown, and so a mismatch
+against the server's recomputation can be *detected and surfaced*. They are never
+sent as prices. `complete_sale_v3` accepts identifiers and quantities only, and
+that must not change — it is the property that makes a client-side queue safe to
+trust at all.
+
+### 6.1 Time — two timestamps, both preserved
+
+**APPROVED (owner, Feature 24.4 review): keep BOTH times, always.**
+
+| Field | Meaning | Source | Trust |
+|---|---|---|---|
+| `occurred_at` | when the device says the sale happened | device clock, **server-validated** | conditional |
+| `created_at` | when the server actually recorded it | `now()` at insert | absolute |
+
+Neither replaces the other, and neither is derivable from the other. `created_at`
+answers "when did this enter the books" and is already correct today.
+`occurred_at` answers "when did the customer pay", which is the question every
+daily-takings, shift and reconciliation report is really asking — and which is
+currently unanswerable for a sale that syncs hours late.
+
+**A device clock is untrusted input.** `enqueuedAt` comes from an unsynchronized
+clock and may be wrong by hours, or by years on a device whose battery died. The
+server therefore validates rather than accepts:
+
+| Device-reported time | Server behaviour |
+|---|---|
+| within a small skew allowance of `now()` | accept as `occurred_at` |
+| earlier than `created_at` but after the device was paired | accept — this is the normal late-sync case |
+| in the future beyond the skew allowance | **do not silently trust**; record the sale, leave `occurred_at` null, flag for reconciliation |
+| before the device was paired | same — impossible by construction, so the clock is wrong |
+| absent, unparseable, or non-finite | same |
+
+**An unresolvable clock never destroys the sale.** The money is real regardless of
+what the device thinks the time is. The sale is recorded with a null
+`occurred_at`, marked `needs_attention` for the owner, and reported as "recorded,
+sale time could not be verified" — which is the truthful statement. Rejecting it
+would trade a real financial record for a metadata problem.
+
+Ordering within one device's queue still uses `enqueuedAt`, because relative
+order on a single device is reliable even when the absolute clock is not.
+
+---
+
+## 7. Price authority
+
+### The scenario
+
+1. Device pins build B and caches its snapshot.
+2. Device goes offline; sells at build-B prices.
+3. Owner publishes build C with new prices.
+4. Device reconnects and syncs.
+
+### Decision
+
+**Price against the device's pinned build snapshot — which is what the server
+already does, with no change.**
+
+`complete_sale_v3` §7 resolves a device's pricing source as
+`build_jobs.config_snapshot WHERE id = <the device's build_job_id> AND status='succeeded'`.
+`build_jobs` rows are immutability-guarded
+(`20260803260000_build_jobs_immutability_guard.sql`,
+`20260803270000_artifact_and_device_immutability.sql`). So the snapshot that
+priced the sale offline is byte-identical to the snapshot the server prices it
+from at sync — **even if that sync happens weeks later and three configs have
+been published since.**
+
+This satisfies both halves of the requirement at once:
+
+- **What the customer saw is what is recorded.** The device rendered build B and
+  the server recomputes from build B.
+- **Tampering is impossible.** The client never sends a price. Rewriting
+  `displayedTotal` in IndexedDB with a hex editor changes what a *report* shows
+  as the disputed display value; it changes nothing about what the customer is
+  charged, because the server does not read it.
+
+### Server validation still needed
+
+The one thing the server cannot currently do is *notice* a disagreement. §13
+proposes sending the displayed totals as an advisory field so the server can
+record a mismatch flag. That is a reconciliation aid, never an input to pricing.
+
+Note the pinning consequence, which is correct but must be stated: a device that
+stays offline across a price rise sells at the old price. That is the same
+behaviour as a device that stays *online* on an old pinned build, which is
+existing, intended behaviour (§15).
+
+---
+
+## 8. Receipt numbering
+
+### Current behaviour
+
+Server-allocated from `project_order_counters` under the project `FOR UPDATE`
+lock: `last_number + 1`, prefixed from the pinned source's `receipt.orderPrefix`.
+Transactional rather than a sequence, deliberately, so a rolled-back sale leaves
+no gap. **The client cannot allocate one.**
+
+### Options
+
+| Option | Assessment |
+|---|---|
+| **A. Provisional local number → final server number** | Two numbers for one sale. The customer walks out with a receipt whose number matches nothing in the owner's reports. Reconciling a dispute means a translation table. |
+| **B. Preallocated blocks per device** | Requires a server allocation table, a block-exhaustion path, and permanent gaps when a device is lost mid-block. It also breaks the gap-free property the current design went out of its way to preserve. Real complexity for a real benefit — but not MVP complexity. |
+| **C. Device-prefixed offline sequence** (`T2-014`) | No server change and unique across devices, but it creates a second *kind* of order number living permanently in the books, and every report, search and export has to understand both. |
+| **D. No final receipt number until sync** | The receipt printed at the time of an offline sale is explicitly **provisional**, carrying a reference (not an order number). The order number is allocated exactly once, by the server, at sync. |
+
+### Decision: **D**
+
+Ratified by the owner's approved receipt copy (§22, decision 6), which states
+"A final receipt number will be created after sync" — that sentence *is* option
+D. The other three options are incompatible with it.
+
+It is also the only option that changes nothing about the existing numbering
+invariant — one allocator, gap-free, server-authoritative — and the only one
+that cannot produce two numbers for one sale.
+
+**APPROVED customer-facing copy (owner, Feature 24.4 review).** The receipt is
+honest about its status without ever implying the sale was invalid or did not
+happen — the customer paid, and the receipt must not suggest otherwise:
+
+```
+POS Canvas
+OFFLINE RECEIPT
+
+Ref: OFF-7Q4K-2XN9
+
+... lines, totals ...
+
+This sale is saved on this device
+and will sync when internet is restored.
+A final receipt number will be created after sync.
+```
+
+Note what this wording deliberately avoids: "NOT YET RECORDED", "provisional",
+"unconfirmed" and "pending" all read to a customer as *"your payment may not have
+gone through"*. The sale is real and complete; only its receipt number is still
+to come. Any future edit to this copy must preserve that distinction.
+
+`Ref` is a short, human-readable rendering of `saleRequestId` — enough for staff
+to match a paper receipt to a queued sale, and visibly not of the same shape as
+a real order number (`ORD1042`). Once synced, the device's own sale history shows
+the reference **and** the real order number together, so a later dispute is a
+lookup rather than a puzzle.
+
+**Multiple simultaneous offline devices are safe under D**, because no device
+allocates anything. Under C they would need coordinated prefixes; under B, a
+block allocator.
+
+---
+
+## 9. Inventory
+
+### The scenario in the brief
+
+Device A (offline) shows 5 sandwiches; Device B (online) sells 4; Device A sells
+3 offline.
+
+### The important correction
+
+**Device A never showed "5 sandwiches".** Devices display no stock at all —
+`toDeviceDisplayConfig` strips `trackInventory`, and `refreshStock` is `null`
+(§1.3.3). So there is no stale-count-on-screen problem to solve; there is only
+the question of what happens to the queued sale at sync.
+
+Equally, **this conflict already exists online.** Two online tills can both add
+the last sandwich to a cart; whoever checks out second gets
+`Insufficient inventory`. Offline changes only *when* the loser finds out: at the
+counter (recoverable — the cashier tells the customer) versus at sync (the
+customer left with the food an hour ago).
+
+### Options
+
+| Option | Assessment |
+|---|---|
+| Reject the queued sale | **Unacceptable.** The food is gone and the cash is in the drawer. Deleting the sale to protect a stock number destroys a real financial record. |
+| Inventory reservation / per-device allocation | Genuine distributed inventory. Needs a reservation table, expiry, reclamation, and a policy for a device that never returns. Not MVP. |
+| Allow stock to go negative and flag | Preserves the money, records the truth, and surfaces the discrepancy to the owner. |
+
+### APPROVED (owner, Feature 24.4 review)
+
+**An offline sale must never be destroyed because current stock changed.** Accept
+the sale; let tracked stock floor at 0; record the shortfall; flag the order for
+the owner.
+
+Concretely, for offline-submitted sales only:
+
+- the sale is **never** rejected for insufficient stock;
+- `stockQuantity` decrements to a floor of 0 rather than going negative — the
+  existing schema validates stock as a non-negative integer
+  (`v_stock_num < 0 → 'Inventory configuration for % is invalid'`), so writing a
+  negative would corrupt config the whole app reads;
+- the shortfall (requested minus available) is recorded on the order and in the
+  existing append-only inventory audit rows, so "we sold 3 we did not have" is
+  visible rather than silently absorbed;
+- the owner's order view shows an "inventory shortfall" flag.
+
+Online sales keep the current hard rejection, unchanged. The asymmetry is
+deliberate and defensible: online, the cashier can still act on the refusal;
+offline, the transaction is already complete in the physical world and the books
+must reflect it.
+
+**Queued sales never disappear because stock changed.** That is the invariant.
+
+---
+
+## 10. Payment methods
+
+POS Canvas **records** a payment method. It does not process, authorize,
+capture, settle or refund anything. There is no gateway integration, no
+acquirer, no card data of any kind in the repository (§1.3.7), and nothing in
+this design adds one.
+
+| Method | Offline | Reasoning |
+|---|---|---|
+| **Cash** | **Queue it.** | The money physically changed hands at the counter. The record is a bookkeeping entry that the server was not available to receive yet. Nothing about it is contingent on connectivity. |
+| **Card** | **Queue it** — APPROVED (owner, 24.4 review), with the same honesty as online. | POS Canvas only records the payment-method *label*; it does not authorize or process the card, online or offline. The card was authorized — if it was — by a separate terminal the operator already uses. Recording "this sale was paid by card" offline is exactly as truthful as recording it online. |
+
+The one thing that must not happen is UI copy implying POS Canvas approved a
+card payment. It does not do that online and must not appear to do it offline.
+Existing copy already says "Card" as a label; it should stay that way.
+
+If a real gateway is integrated later, **card must be re-evaluated and will
+probably become online-only**, because at that point the authorization genuinely
+does depend on connectivity. Noted in §22.
+
+---
+
+## 11. Sync state machine
+
+```
+                   enqueue
+                      │
+                      ▼
+                 ┌─────────┐   online + due
+                 │ pending │──────────────────┐
+                 └─────────┘                  ▼
+                      ▲                  ┌─────────┐
+     retriable error  │                  │ syncing │
+     (backoff)        └──────────────────└─────────┘
+                                              │
+              ┌───────────────┬───────────────┼────────────────┐
+              ▼               ▼               ▼                ▼
+         ┌────────┐   ┌────────────────┐  ┌──────────────────┐ (transport
+         │ synced │   │ needs_attention│  │permanent_failure │  failure →
+         └────────┘   └────────────────┘  └──────────────────┘  pending)
+        server said    server said        will never succeed:
+        OK, or replay  something the      hash conflict, or
+        returned the   owner must         local record proven
+        stored order   resolve            corrupt
+                       (e.g. revoked)
+```
+
+### Rules
+
+- **Ordering:** strictly FIFO by `enqueuedAt`, then `localId`. One in flight at a
+  time. Sales are financial records; a burst of parallel submissions buys
+  nothing and makes failure attribution harder.
+- **One bad sale must NOT block the rest.** A sale that reaches
+  `needs_attention` or `permanent_failure` is *skipped*, not retried in place,
+  and the queue continues. This is the single most important property here: a
+  malformed sale from three days ago must never hold up this morning's takings.
+- **Retry:** exponential backoff with jitter — 5s, 15s, 45s, 2m, 5m, 15m, capped
+  at 15m. `nextAttemptAfter` is persisted, so a relaunch does not reset the
+  schedule into a hot loop.
+- **Attempt cap:** after ~10 attempts the sale moves to `needs_attention` and
+  stops automatic retry. It never silently disappears and it is never
+  auto-deleted.
+- **Reconnect detection:** `navigator.onLine` + the `online` event as a *hint*
+  only — both lie routinely (captive portals, "connected" with no route). The
+  real signal is a successful lightweight authenticated call. A reconnect hint
+  triggers an immediate attempt rather than being trusted.
+- **Restart recovery:** on startup, any sale left in `syncing` is reset to
+  `pending`. It is safe by construction: replaying is idempotent, and a sale that
+  actually committed returns its stored order.
+- **Partial failure:** each sale is its own transaction server-side. There is no
+  batch, so there is no partial batch to unwind.
+- **Manual retry:** the operator can force an attempt on `needs_attention`; the
+  owner can see the same queue state. `permanent_failure` needs a human decision
+  and offers no blind retry.
+- **Unverifiable sale time is a reconciliation case, never a rejection.** If the
+  server cannot validate the device-reported `occurred_at` (§6.1), the sale is
+  still recorded — with a null `occurred_at` — and lands in `needs_attention` for
+  the owner. A clock problem must never cost a real sale.
+
+### Terminal-state meanings
+
+| State | Means | Operator sees |
+|---|---|---|
+| `synced` | recorded server-side, order number known | ✓ with the order number |
+| `needs_attention` | server refused for a reason a person must resolve — device revoked, build unusable | a clear reason, and it is *not* their fault |
+| `permanent_failure` | replay is impossible or unsafe — `sale_request_id` reused with a different hash, or the local record failed integrity | escalate; never retried automatically |
+
+---
+
+## 12. Server contract for 24.5
+
+**Preferred posture: reuse `complete_sale_v3` as-is wherever possible.** It
+already handles idempotency, pinned pricing, revocation and atomicity. The
+additions below are the minimum that offline genuinely cannot do without.
+
+| # | Change | Necessity | Why |
+|---|---|---|---|
+| 1 | **`orders.occurred_at timestamptz` NULLABLE**, alongside an untouched `created_at` | **Required** | Both are kept (§6.1). `created_at` stays `now()` — when the server recorded it. `occurred_at` is when the device says the sale happened. A 14:05 sale synced at 18:30 currently records only as 18:30, which corrupts daily takings, shift reports and any time-based reconciliation. Nullable **on purpose**: an unverifiable device clock leaves it null rather than storing a lie. |
+| 2 | **`p_occurred_at` parameter** on a new `complete_sale_v4` | **Required** | to carry (1). **Validated, not trusted**: future beyond a small skew allowance, earlier than the device's pairing, absent or unparseable → store null and flag for reconciliation. Never reject the sale over it. |
+| 3 | **`orders.source`** (`'online' \| 'offline_queued'`) | **Required** | drives the inventory asymmetry in §9 and makes offline sales auditable as a class. |
+| 4 | **Offline stock policy** in the pricing loop | **Required** | for §9: floor at 0 and record the shortfall instead of raising `Insufficient inventory`, for `source='offline_queued'` only. |
+| 5 | **`orders.client_declared_total numeric(12,2)`** + a mismatch flag | Recommended | lets the server *detect and record* a disagreement between what the customer was shown and what the pinned config recomputes. Advisory only — never an input to pricing. |
+| 6 | **Revocation-window decision** encoded in SQL | **Required** | §14 — the current unconditional rejection is a real data-loss path. |
+| 7 | Sync metadata (`synced_at`, device attempt count) | Optional | useful for support; not needed for correctness. |
+
+Everything else — auth, `resolve_sale_owner`, the project lock, canonicalization
+and hashing, the idempotency lookup, counter allocation, the atomic write, money
+bounds, tax modes, audit rows — is **unchanged**.
+
+**Versioning:** this should be `complete_sale_v4`, following the established v2→v3
+pattern, with v3 left callable so devices on older pinned builds keep working.
+No migration is created in 24.4.
+
+---
+
+## 13. Revocation policy
+
+### The problem
+
+1. Device is valid. 2. Goes offline. 3. Owner revokes it. 4. Device cannot know.
+5. Device keeps selling.
+
+### What happens today if nothing changes
+
+`complete_sale_v3` §3 rejects any device whose `paired_devices` row is missing or
+has `revoked_at set`, **before** the idempotency lookup — so on reconnect,
+**every queued sale is rejected and the takings are silently lost.** That is a
+data-destruction path, not a security feature: the cash is in the drawer whether
+or not the owner revoked the device afterwards.
+
+### APPROVED (owner, Feature 24.4 review)
+
+Split "may this device sell now?" from "should this already-completed sale be
+recorded?".
+
+- **Reopening after reconnect:** a **confirmed revoked device cannot reopen or
+  re-enter the POS.** On reconnect it is refused immediately, clears its config
+  cache and its pairing assertion, and returns to the pairing screen. It must not
+  fall back into offline mode on the next launch — a cleared assertion is what
+  makes that structurally impossible (§4.2 refuses any device without one).
+- **Queued sales that occurred BEFORE `revoked_at`:** **accept and record**,
+  flagged `source='offline_queued'` and `post_revocation=false`. The sale
+  physically happened while the device was still authorized. Refusing it does not
+  undo it; it only removes it from the books.
+- **Queued sales that occurred AFTER `revoked_at`:** **reject**, and surface them
+  to the owner as "N sales were attempted after this device was revoked" with
+  their details. This is where the lease (§4.3) does its work: it bounds how many
+  such sales can exist.
+- **The comparison uses server-validated `occurred_at`** (change 2 in §12), not
+  the raw device clock, or a device could backdate its way past revocation.
+
+This is the honest position: **there is no way to stop an offline device from
+taking cash.** What the system can do is refuse to *record* post-revocation sales
+as legitimate, tell the owner exactly what happened, and bound the window.
+
+The operator-facing UX must warn plainly when a device has been offline a long
+time — "Not verified since Tuesday. Reconnect to confirm this till is still
+authorized."
+
+---
+
+## 14. Config update policy
+
+**No change to existing pinning semantics.** A paired device stays on its pinned
+build until something explicitly re-points it, and offline changes nothing about
+that.
+
+- Reconnecting does **not** silently adopt a newer published config. A till's
+  prices changing mid-shift because someone saved the editor is exactly the
+  surprise the immutable-build architecture exists to prevent.
+- The config cache is refreshed from `get_device_config` on every successful
+  online start, but that call returns **the snapshot for the pinned build**, so a
+  refresh normally returns identical bytes. `buildJobId` changing is the *only*
+  legitimate reason for the cached snapshot to change.
+- If `buildJobId` changes, the cache is replaced wholesale, and any sales still
+  queued keep their original `buildJobId` and are priced from it. This is exactly
+  why `buildJobId` is stored per queued sale (§6).
+
+Adopting a newer config remains an explicit action outside this design.
+
+---
+
+## 15. Local data security
+
+### What is stored
+
+| Data | Sensitivity | Notes |
+|---|---|---|
+| Supabase session (existing) | **High** | already in `localStorage`; the one real credential on the device |
+| Pinned config snapshot | Low–medium | the shop's menu and prices — visible to any customer reading the till screen |
+| Queued sales | Medium | line items, quantities, totals, `"cash" \| "card"`, timestamps |
+| Provisional receipt refs | Low | derived from `saleRequestId` |
+
+### What is NOT stored, ever
+
+**No card number. No CVV. No expiry. No cardholder name. No track data.** POS
+Canvas never receives them (§10), so there is nothing to store, and nothing in
+24.5 may introduce them. This is worth a guard in 24.5.
+
+### Encryption at rest — MVP position
+
+**Do not add application-level encryption to IndexedDB for MVP, and do not claim
+any.** Stated plainly, because the reasoning matters:
+
+- The key would have to live on the same device, in the same storage, readable by
+  the same code. Encrypting data with a key stored beside it protects against a
+  casual browse of the database file and nothing more.
+- The genuinely sensitive item — the auth session — is *already* in plain
+  `localStorage` and is a far more valuable target than a list of sandwich sales.
+  Encrypting the queue while leaving the session in the clear would be theatre.
+- Real protection at this layer is OS-level: Windows BitLocker, Android
+  full-disk encryption. That is a deployment recommendation, not an app feature.
+
+**No "military grade", "bank grade" or "end-to-end encrypted" claims may appear
+anywhere** in the product or its documentation. What can be said truthfully:
+*"Sale data is stored locally on the device until it syncs. Card details are
+never collected or stored."*
+
+### Clearing
+
+**APPROVED (owner, Feature 24.4 review): unpair is BLOCKED by default while the
+queue is non-empty.**
+
+- Queued sales are **never** silently deleted. This is the worst bug the feature
+  could ship, and it is ruled out by policy rather than left to care.
+- Unpair, re-pair and confirmed revocation clear the config cache and the pairing
+  assertion — but the **queue is cleared only after it has drained**.
+- Any future discard path must require **explicit confirmation showing the
+  count** ("Discard 7 unsynced sales?"). A discard affordance that does not name
+  the number is not an acceptable implementation of this decision.
+- `resetDeviceSession()` (`lib/device.rpc.ts:107`) is the existing choke point and
+  must gain this decision path, not an unconditional wipe.
+
+---
+
+## 16. Cross-platform storage decision
+
+### The key insight
+
+Both shells load **the same remote origin** — `https://pos-canvas.vercel.app/device`.
+Android Capacitor points at it via `server.url`; Electron via `loadURL`. Neither
+shell contains product logic, and both are byte-identical for every customer.
+
+Therefore **the storage lives in the hosted web app, on one origin, and there is
+exactly one implementation.** No Capacitor plugin, no Electron IPC, no native
+adapter, no second code path to keep in sync.
+
+| Environment | Engine | IndexedDB |
+|---|---|---|
+| Android WebView (Capacitor 8) | Android System WebView (Chromium) | Yes. Capacitor enables DOM storage explicitly (`Bridge.java:584`, `setDomStorageEnabled(true)`). |
+| Windows Electron 43.4.0 | bundled Chromium | Yes. Default persistent session; no `fromPartition`, no ephemeral profile (asserted by existing guards). |
+
+### Persistence risks — the real ones
+
+- **Eviction.** Chromium may evict origin data under storage pressure. Mitigation:
+  request `navigator.storage.persist()` once the device is paired, and record
+  whether it was granted. If it is refused, that is worth surfacing.
+- **Android WebView data clearing.** "Clear data" on the app, an OS storage
+  sweep, or an uninstall removes everything. Unsynced sales are lost. This is
+  inherent to browser-side storage and must be stated in the docs rather than
+  hidden.
+- **Windows `%APPDATA%\POS Canvas`.** Already validated as surviving upgrade and
+  abrupt termination in Feature 23.5. The queue inherits that.
+- **Quota.** A queued sale is on the order of 1–2 KB. Even a pathological
+  10,000-sale backlog is ~20 MB, far inside any realistic quota. Quota
+  exhaustion is therefore an error path to handle, not a design constraint.
+
+**Decision: IndexedDB, one shared implementation in the hosted app, plus a
+`navigator.storage.persist()` request. No platform-specific adapters.**
+
+---
+
+## 17. Offline UX
+
+### Connection states
+
+| State | Indicator | Rule |
+|---|---|---|
+| Online, queue empty | subtle "Online" or nothing at all | the normal case must not nag |
+| Offline, queue empty | **Offline** — "Sales will be saved and synced when you reconnect." | calm and factual |
+| Offline, queue non-empty | **Offline · 3 sales waiting** | a count, never a percentage |
+| Reconnecting / syncing | **Syncing 3 sales…** | may show "2 of 3" because that is a real count |
+| Sync error | **3 sales need attention** with a reason | never a bare red icon |
+| Lease near expiry | **Not verified since Tuesday — reconnect soon** | before it bricks, not after |
+
+### Requirements
+
+- **No fake percentages, no fake progress bars.** A count of sales is a real
+  quantity; a synthetic 0–100% is not.
+- **Never block the cart.** Browsing and building an order must work identically
+  online and offline. The only different moment is checkout.
+- **The operator always knows whether a sale is recorded.** The sale-complete
+  screen says either "Recorded — Order ORD1042" or "Saved on this device — will
+  sync when you reconnect", never something ambiguous.
+- **The queue is visible and inspectable** from the device: a list of pending
+  sales with their reference, time, total and status.
+- **Manual retry** available on `needs_attention`. Not on `pending` — the
+  automatic schedule already handles it, and a "retry" button that does nothing
+  visible teaches operators to distrust the UI.
+- Copy stays inside the existing Feature 22 vocabulary and tone: say what
+  happened, say what to do, promise nothing.
+
+### Owner-facing (APPROVED, owner, 24.4 review)
+
+The owner's **Devices** panel gains a **read-only** per-device sync column: the
+device's queue depth, its sync state and when it was last verified. Read-only is
+the whole point — the owner watches, and the device syncs. No owner-triggered
+"force sync" button, which would imply a control the server does not have over a
+device that is, by definition, not reachable.
+
+### Receipts
+
+The provisional receipt (§8) must state that the sale is not yet recorded. Once
+synced, the device's own history shows the real order number against the
+provisional reference. A reprint after sync should print the **final** receipt
+with the real order number.
+
+---
+
+## 18. Failure-scenario matrix
+
+| # | Scenario | Expected behaviour |
+|---|---|---|
+| 1 | Internet drops before checkout | Cart unaffected. Checkout enqueues locally; provisional receipt; "Offline · 1 sale waiting". |
+| 2 | Drops **while** submitting | Transport error. The sale is already in IndexedDB with its key. It moves to `pending` and retries. **No new key is generated.** |
+| 3 | Server committed, client never got the response | Retry replays the same `sale_request_id`; `complete_sale_v3` §6 returns the stored order. Marked `synced` with the real order number. Exactly one order exists. |
+| 4 | Crash after local enqueue | The sale survives — enqueue is a durable IndexedDB transaction that completes before the receipt is shown. |
+| 5 | Crash during sync | On restart, `syncing` → `pending`. Replay is idempotent (see 3). |
+| 6 | Device restarts offline | Cold start uses the cached assertion + config (§4.2). POS opens in offline mode with the queue intact. |
+| 7 | Multiple queued sales | FIFO, one in flight, each its own server transaction. |
+| 8 | One queued sale has invalid data | It goes to `needs_attention` or `permanent_failure` and is **skipped**. Later sales sync normally. |
+| 9 | Device revoked while offline | Reopen refused on reconnect. Pre-revocation queued sales are recorded; post-revocation ones are rejected and reported to the owner (§13). |
+| 10 | Config unavailable server-side (build deleted) | `This device is not linked to a usable build`. Queue → `needs_attention`; owner must re-pair. Sales are **not** deleted. |
+| 11 | Owner publishes a newer config | Irrelevant to queued sales: they price from their own `buildJobId` (§7). The device stays pinned (§14). |
+| 12 | Two devices sell the same low-stock item offline | Both are recorded. Stock floors at 0; the shortfall is flagged for the owner (§9). Neither sale is destroyed. |
+| 13 | Operator hammers "Complete Sale" | The fingerprint/`resolveSaleRequest` logic already reuses one id for an unchanged cart. Offline, the enqueue is idempotent on that key: one queued sale, not five. |
+| 14 | Connectivity flaps | Backoff plus "one in flight" prevents a thundering herd. A flap mid-submit degenerates to case 2 or 3, both safe. |
+| 15 | Quota exceeded / storage corrupt | Enqueue failure must be **loud and blocking at checkout**: the operator is told the sale cannot be saved *before* they hand over the food. A queue whose integrity check fails goes to `needs_attention` and is never silently dropped. |
+| 16 | Device clock is wrong (dead battery, wrong year, future-dated) | Sale is **recorded**. `created_at` is correct as always; `occurred_at` is left null rather than storing a lie; the order is flagged and lands in `needs_attention` for the owner (§6.1). The sale is never rejected over a clock. |
+| 17 | Operator unpairs with a non-empty queue | **Blocked** (§15). The queue must drain first. Any future discard path names the count explicitly; nothing is deleted silently. |
+
+---
+
+## 19. Implementation sequence for 24.5
+
+Ordered so every phase is independently shippable and independently revertible,
+and so nothing can queue a sale before the server can accept it.
+
+| Phase | Contents | Ships behind |
+|---|---|---|
+| **24.5A** | IndexedDB foundation + config cache + offline **read-only** startup. Device reopens offline and shows the menu. **Checkout is disabled while offline.** | a flag; no risk to money |
+| **24.5B** | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4`. Deployed and tested **with no client using it yet.** | additive migration |
+| **24.5C** | Durable sale queue + persisted idempotency key. Also fixes the existing in-memory key hole (§1.3.8) **for online sales**, which is a standalone win. | flag |
+| **24.5D** | Sync engine + state machine + reconnect detection. | flag |
+| **24.5E** | Offline checkout enabled, provisional receipts, inventory-shortfall reporting, owner-facing offline order views. | flag |
+| **24.5F** | Android + Windows failure testing (§20), including abrupt termination and process kill on real hardware. | gate before enabling by default |
+
+**24.5B precedes any client that can queue a sale.** Shipping the queue first
+would create sales that the server would reject for lacking a contract — the
+exact data-loss the design exists to avoid.
+
+---
+
+## 20. Test plan for 24.5
+
+### Pure unit (no network, no browser)
+
+- Idempotency key generated once and stable across serialize/deserialize.
+- Sync state machine transitions, including every terminal state.
+- Backoff schedule: monotonic, capped, jittered, restored from persistence.
+- FIFO ordering with a mixture of statuses; a skipped sale does not block.
+- Config-cache integrity: tampered snapshot rejected; wrong schema version
+  rejected; wrong `deviceAuthUserId` rejected.
+- Lease expiry arithmetic, including clock-skew and negative-elapsed cases.
+- Provisional reference format: derived from `saleRequestId`, never
+  order-number-shaped.
+- Queued-sale serialization round-trip.
+
+### Integration (fake IndexedDB + stubbed RPC)
+
+- **Duplicate replay:** same key submitted 5× → one order, identical payload.
+- Hash conflict: same key, different items → `permanent_failure`, no order.
+- Crash simulation: kill between enqueue and submit; between submit and
+  response; during sync.
+- Queue drains in order; one poisoned sale is skipped.
+- Corrupted queue record → `needs_attention`, never silent deletion.
+- Revocation: pre- and post-`revoked_at` sales handled per §13.
+- Stale build: `build_jobs` row unusable → `needs_attention`.
+- Quota exhaustion at enqueue → checkout blocked with a clear message.
+
+### Server (migration tests, matching the existing style)
+
+- `complete_sale_v4` idempotent replay returns the stored order.
+- `occurred_at` clamped: future beyond skew rejected; pre-pairing rejected.
+- Offline stock policy floors at 0 and records the shortfall; online path still
+  hard-rejects.
+- Pinned-build pricing unchanged when a newer build exists.
+- Revocation window enforced against server-validated `occurred_at`.
+- v3 remains callable and unchanged.
+
+### Manual / device
+
+| Test | Platform |
+|---|---|
+| Airplane mode mid-shift, 10 sales, reconnect | Android + Windows |
+| Browser reload with a full queue | both |
+| **Abrupt termination** (Task Manager kill) with a full queue | Windows — reuses the 23.5 gate |
+| **Process kill** from Android recents / `am force-stop` | Android |
+| Device reboot offline, reopen, keep selling, reconnect | both |
+| Two devices, same low-stock item, both offline | both |
+| Revoke while offline, then reconnect | both |
+| 72-hour offline soak, then reconnect | both |
+| Receipt uniqueness across 3 devices syncing simultaneously | both |
+| Provisional → final receipt reprint | both |
+
+---
+
+## 21. Explicitly deferred complexity
+
+Out of scope for 24.5 unless a product decision pulls one in:
+
+- Distributed inventory reservation or per-device stock allocation.
+- Preallocated receipt-number blocks (§8 option B).
+- Offline refunds, voids, discounts or price overrides — no server contract
+  exists for any of them.
+- Offline tips (already rejected for devices server-side).
+- Multi-device local mesh / peer sync.
+- Background sync while the app is closed (Service Worker `SyncManager`) — the
+  Electron and WebView stories differ and the benefit is small.
+- Encryption at rest (§15) and any hardware-backed key storage.
+- Conflict resolution UI beyond "here is what happened".
+- Offline analytics or reporting on the till.
+- Card gateway integration, which would change §10's answer.
+
+---
+
+## 22. Approved product decisions
+
+All seven questions raised by the 24.4 design were **decided by the owner at the
+24.4 review**. None is outstanding. They are recorded here as the authority 24.5
+implements against; each is also written into the section that acts on it.
+
+| # | Decision | APPROVED outcome | Implemented by | Section |
+|---|---|---|---|---|
+| 1 | Offline authorization lease | **7 days** from `lastVerifiedAt`, refreshed on every authoritative contact. One named constant. | 24.5A | §4.3 |
+| 2 | Revocation | Offline sales occurring **before** `revoked_at` are **accepted and recorded**. Sales occurring **after** are **rejected and reported** to the owner. A **confirmed revoked device cannot reopen or re-enter the POS** after reconnect. | 24.5B, 24.5E | §13 |
+| 3 | Card payments offline | **Allowed.** POS Canvas records the payment-method *label* only and does not authorize or process the card — online or offline — so queuing a card sale is exactly as truthful as recording one online. | 24.5E | §10 |
+| 4 | Inventory | An offline sale is **never destroyed because current stock changed.** Floor tracked stock at 0 and record/flag the shortfall. | 24.5B | §9 |
+| 5 | Unpair with an unsynced queue | **Blocked by default.** Queued sales are never silently deleted. Any future discard path must require explicit confirmation **showing the count**. | 24.5C | §15 |
+| 6 | Provisional receipt copy | Approved customer-facing wording (`OFFLINE RECEIPT` / `Ref:` / "saved on this device and will sync when internet is restored" / "A final receipt number will be created after sync"). Must **not** imply the sale is invalid or unreal. | 24.5E | §8 |
+| 7 | Owner Devices UI | **Yes** — per-device queue/sync status and pending-sale count, **read-only**. | 24.5E | §17 |
+
+### Architecture clarification approved with them
+
+**Both timestamps are preserved.** `occurred_at` (the validated time the device
+says the sale happened) and `created_at` (the server time the sync was actually
+recorded) are kept side by side; neither replaces the other. Obviously invalid
+device clocks are **not silently trusted** — an unverifiable time leaves
+`occurred_at` null and becomes a reconciliation / `needs_attention` case, and
+never a reason to reject a real sale. See §6.1.
+
+## 23. What 24.4 deliberately did not do
+
+No offline runtime, no IndexedDB code, no queue, no migration, no RPC change, no
+receipt change, no inventory change, no pairing or revocation change, no schema
+change. `lib/offlineDesign.guards.test.ts` asserts this boundary.
