@@ -314,10 +314,23 @@ describe("customer branding stays out of the app's identity", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 24.2 stops at Android", () => {
-  it("no Windows branding was added", () => {
-    // 24.3.
-    expect(exists("windows-shell/build")).toBe(false);
-    expect(read("windows-shell/package.json")).not.toContain('"icon"');
+  it("Windows branding lives on the Windows side, and never reaches Android", () => {
+    // Feature 24.3 replaced the 24.2 fence that asserted windows-shell/build
+    // did not exist. It exists now. What this guard protects is the boundary
+    // that actually matters to 24.2: the two platforms share MASTERS in
+    // assets/brand/ and share nothing else. No Android resource may be produced
+    // from a Windows target, and no Windows asset may appear in the Android
+    // resource tree.
+    expect(exists("windows-shell/build/icon.ico")).toBe(true);
+
+    const androidGenerator = read("assets/brand/generate-android-assets.sh");
+    expect(androidGenerator).not.toContain("windows-shell");
+    expect(androidGenerator).not.toContain(".ico");
+
+    for (const windowsOnly of ["icon.ico", "installerSidebar", "splash-mark"]) {
+      expect(`android res: ${windowsOnly}`).toBe(`android res: ${windowsOnly}`);
+      expect(exists(`${RES}/mipmap-xxhdpi/${windowsOnly}`)).toBe(false);
+    }
   });
 
   it("the Windows release and its pre-release status are unchanged", () => {

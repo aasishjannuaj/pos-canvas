@@ -45,20 +45,36 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- sandboxed Electron preloads must be CommonJS
 const { contextBridge, ipcRenderer } = require("electron");
 
-// The local fallback page is the only document the main process ever loads from
-// disk, so this is precisely "am I the offline page" without needing to know its
-// path or compare a filename.
-const isLocalFallbackPage = window.location.protocol === "file:";
+// Feature 24.3 — THE SCHEME IS NO LONGER ENOUGH TO IDENTIFY THE FALLBACK.
+//
+// Until 24.3 the fallback was the only document the main process ever loaded
+// from disk, so "protocol is file:" WAS "am I the offline page". splash.html
+// made that false. The splash must receive NOTHING: it is not the hosted page,
+// so the identity fact is not its to claim, and it has no Retry button, so the
+// retry capability would be a capability handed to a document with no use for
+// it — the exact surface-for-no-reason this gate was added to remove.
+//
+// Hence two questions instead of one. The filename check is the narrower of the
+// two barriers described above; the main process's own sender check still
+// refuses anything that is not local, and its comment stays true because it
+// tests locality, not identity.
+const isLocalPage = window.location.protocol === "file:";
+const isOfflineFallbackPage =
+  isLocalPage && window.location.pathname.endsWith("/offline.html");
 
-if (isLocalFallbackPage) {
-  // The fallback page gets the retry bridge and NOTHING else. It never pairs, so
-  // it has no use for the identity signal.
-  contextBridge.exposeInMainWorld("posCanvasShell", {
-    /** Ask the shell to try the runtime URL again. Carries no destination. */
-    retry: () => {
-      ipcRenderer.send("pos-canvas-shell:retry");
-    },
-  });
+if (isLocalPage) {
+  // Local documents. Only the fallback gets a capability; the branded splash
+  // falls through this branch with nothing exposed to it at all.
+  if (isOfflineFallbackPage) {
+    // The fallback page gets the retry bridge and NOTHING else. It never pairs,
+    // so it has no use for the identity signal.
+    contextBridge.exposeInMainWorld("posCanvasShell", {
+      /** Ask the shell to try the runtime URL again. Carries no destination. */
+      retry: () => {
+        ipcRenderer.send("pos-canvas-shell:retry");
+      },
+    });
+  }
 } else {
   // Feature 23.3 — the hosted page gets the identity signal and NOTHING else.
   //

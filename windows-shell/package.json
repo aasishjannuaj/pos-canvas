@@ -27,7 +27,9 @@
       "serverUrl.mjs",
       "navigationPolicy.mjs",
       "offline.html",
-      "package.json"
+      "package.json",
+      "splash.html",
+      "splash-mark.png"
     ],
     "win": {
       "target": [

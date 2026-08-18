@@ -303,6 +303,10 @@ describe("the packaged binary is universal", () => {
       "package.json",
       "preload.js",
       "serverUrl.mjs",
+      // Feature 24.3 — the branded startup screen and its artwork. Platform
+      // branding, identical in every installer; nothing customer-specific.
+      "splash-mark.png",
+      "splash.html",
     ]);
   });
 

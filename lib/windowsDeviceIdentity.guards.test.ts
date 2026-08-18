@@ -264,7 +264,7 @@ describe("each document kind gets exactly one bridge", () => {
 
   it("the fallback page keeps retry and gains no identity", () => {
     const retryBranch = preload.slice(
-      preload.indexOf("if (isLocalFallbackPage) {"),
+      preload.indexOf("if (isLocalPage) {"),
       preload.indexOf("} else {")
     );
 
@@ -274,7 +274,7 @@ describe("each document kind gets exactly one bridge", () => {
 
   it("the two bridges are mutually exclusive branches", () => {
     // One `if/else`, so no document can ever receive both.
-    expect(preload).toContain("if (isLocalFallbackPage) {");
+    expect(preload).toContain("if (isLocalPage) {");
     expect(preload).toContain("} else {");
     expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(2);
   });

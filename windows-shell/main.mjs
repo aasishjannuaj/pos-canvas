@@ -31,6 +31,13 @@ const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
 const OFFLINE_PAGE = fileURLToPath(new URL("./offline.html", import.meta.url));
 
+/**
+ * Feature 24.3 — the branded startup screen, shown from disk while the hosted
+ * runtime loads. A DIFFERENT page from OFFLINE_PAGE and deliberately so: this
+ * one says the app is starting, that one says it failed. See splash.html.
+ */
+const SPLASH_PAGE = fileURLToPath(new URL("./splash.html", import.meta.url));
+
 /** The channel the offline page uses to ask for another attempt. Carries nothing. */
 const RETRY_CHANNEL = "pos-canvas-shell:retry";
 
@@ -85,7 +92,11 @@ const WINDOW_DEFAULTS = {
   resizable: true,
   fullscreen: false,
   kiosk: false,
-  backgroundColor: "#fafafa",
+  // Feature 24.3 — the board's splash ground, matched by splash.html. This is
+  // the colour of the very first frame Chromium paints, before any document
+  // exists; leaving it at a generic grey put a flash of the wrong colour in
+  // front of the brand screen.
+  backgroundColor: "#FBFDFD",
   title: "POS Canvas",
   show: false,
 };
@@ -151,8 +162,9 @@ function createWindow() {
     },
   });
 
-  // Shown only once there is something to look at, so a slow first load is a
-  // brief delay rather than a white rectangle.
+  // Feature 24.3 — with the splash loaded from disk first, "something to look
+  // at" now arrives in milliseconds and is the POS Canvas brand screen, so this
+  // fires almost immediately instead of waiting on the network.
   window.once("ready-to-show", () => {
     window.show();
   });
@@ -177,7 +189,30 @@ function createWindow() {
     window.loadFile(OFFLINE_PAGE);
   });
 
-  loadDeviceRuntime(window);
+  // Feature 24.3 — SPLASH FIRST, THEN THE RUNTIME, in this one window.
+  //
+  // WHY NOT A SECOND BrowserWindow, which is the usual Electron splash recipe:
+  // a second window is a second surface to secure, and it would have to be
+  // created, tracked, focused and destroyed correctly on every path — including
+  // second-instance activation, where a stale splash would be an orphan window
+  // the operator cannot close. Reusing this window means the splash inherits
+  // every Feature 23 webPreference and every deny-by-default handler already
+  // applied above, with no second copy that could drift out of agreement.
+  //
+  // Chromium keeps showing the current document until the next one has something
+  // to paint, so the brand screen stays up for the whole remote load and is
+  // replaced by the runtime's first frame rather than by a white gap.
+  //
+  // NEITHER LOAD IS PAGE-INITIATED, so will-navigate and will-redirect do not
+  // fire for either — the navigation policy governs what the PAGE may do and is
+  // untouched by this.
+  //
+  // .finally, not .then: if the local splash somehow fails to load, the till
+  // must still go to the runtime. A branded screen is never allowed to become
+  // the reason a till does not start.
+  window.loadFile(SPLASH_PAGE).finally(() => {
+    loadDeviceRuntime(window);
+  });
 
   return window;
 }

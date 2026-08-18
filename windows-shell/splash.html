@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>POS Canvas</title>
+    <!--
+      Feature 24.3 — the branded startup screen.
+
+      WHAT THIS IS: the first thing an operator sees, shown from local disk the
+      instant the window appears and replaced the moment the hosted /device
+      runtime paints. Before it, the window was created with `show: false` and
+      stayed invisible until the remote page was ready — so on a slow café
+      connection launching POS Canvas looked like launching nothing at all.
+
+      WHAT THIS IS NOT — and the distinction is the reason this is a separate
+      file from offline.html:
+
+        splash.html    the app is STARTING. Transient, says nothing, promises
+                       nothing, and is replaced by the runtime on success AND by
+                       the fallback on failure. It has no button because there is
+                       nothing for the operator to decide yet.
+
+        offline.html   the app has FAILED to reach the runtime. It explains what
+                       happened and offers Retry.
+
+      Collapsing the two would mean either a startup screen that accuses the
+      network before anything has gone wrong, or a failure page that looks like
+      normal loading. They stay separate.
+
+      NO SCRIPT TAG, deliberately — not a style choice. The preload attached to
+      this window exposes NOTHING to this document (see preload.js: the retry
+      bridge is gated to offline.html by name, and the desktop identity fact goes
+      only to the hosted page). This page therefore has no capability to use, and
+      no script that could want one.
+
+      CARRIES NO CUSTOMER IDENTITY. No business name, no project id, no customer
+      logo, no configuration — the shell does not know any of those yet, and this
+      screen is identical on every till in the world. Platform branding only.
+
+      Self-contained apart from splash-mark.png, which sits beside it and is
+      generated from the approved Concept D master by
+      assets/brand/generate-windows-assets.sh.
+    -->
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        /* The board's splash ground, identical to the Android splash and to the
+           BrowserWindow backgroundColor, so the very first painted frame and
+           this page are the same colour and there is no flash between them. */
+        background: #fbfdfd;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+          sans-serif;
+      }
+
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2.25rem;
+      }
+
+      /* Fixed CSS width; the PNG is generated at 2x so it stays sharp on a
+         high-DPI till. Never stretched — height follows the aspect ratio. */
+      img {
+        width: 196px;
+        height: auto;
+        user-select: none;
+        -webkit-user-drag: none;
+      }
+
+      /* An indeterminate bar, not a percentage: the shell genuinely does not
+         know how far along the remote load is, and inventing a number would be
+         a lie told to someone standing at a till. It exists so a slow start
+         reads as "working" rather than "frozen", which is the one thing a
+         static screen cannot say. */
+      .progress {
+        width: 148px;
+        height: 3px;
+        border-radius: 999px;
+        background: rgba(15, 167, 166, 0.16);
+        overflow: hidden;
+      }
+
+      .progress::after {
+        content: "";
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: #0fa7a6;
+        animation: slide 1.4s ease-in-out infinite;
+      }
+
+      @keyframes slide {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(250%);
+        }
+      }
+
+      /* Motion is decoration here, so it goes away when the operating system
+         says it should. The bar stays visible, it simply stops moving. */
+      @media (prefers-reduced-motion: reduce) {
+        .progress::after {
+          animation: none;
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="splash-mark.png" alt="POS Canvas" />
+      <div class="progress" role="presentation"></div>
+    </main>
+  </body>
+</html>

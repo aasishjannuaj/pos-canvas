@@ -27,8 +27,9 @@ hand-edited.
 | Android launcher + adaptive + themed icon | **Concept D mark** | 24.2 ✅ |
 | Android splash | **Concept D mark + wordmark** | 24.2 ✅ |
 | Website favicon | **Concept D mark** | 24.2 ✅ |
-| Windows app + installer icon | Electron's default | 24.3 |
-| Windows splash | none | 24.3 |
+| Windows app + installer icon | **Concept D mark** | 24.3 ✅ |
+| Windows installer wizard artwork | **Concept D mark + wordmark** | 24.3 ✅ |
+| Windows startup splash | **Concept D mark + wordmark** | 24.3 ✅ |
 
 ### Palette (from the approved board)
 
@@ -89,7 +90,7 @@ Concept D is approved as **temporary** branding. Outstanding:
 
 | # | Item | Why |
 |---|---|---|
-| 1 | **Vector master** of the mark (SVG/AI) | Everything today is derived from a 1448x1086 raster board. A vector master would sharpen every size and is required for a clean high-DPI Windows icon. |
+| 1 | **Vector master** of the mark (SVG/AI) | Everything today is derived from a 1448x1086 raster board. The 256px Windows icon and the 2x splash art are the largest raster derivations and are the first places a vector master would visibly improve. |
 | 2 | **Decision on a simplified 16px variant** | The full mark cannot render "POS" at 16px. A reduced form is a design choice, not something to improvise. |
 | 3 | **Confirmation of the icon ground** | `#FBF8F3` was chosen because it is the colour the artwork was anti-aliased against. A different ground needs a re-render, not a recolour. |
 | 4 | **Final identity sign-off** | Before public launch, if Concept D is not the permanent mark. |
@@ -105,17 +106,50 @@ swapping in new approved artwork is a re-run rather than a manual pass.
 
 `app_name` and `applicationId` were already correct and were **not** touched.
 
-## Feature 24.3 — Windows (not started)
+## Feature 24.3 — Windows (complete)
 
-- `windows-shell/build/icon.ico` — multi-resolution (16, 24, 32, 48, 64, 128,
-  256). electron-builder picks this up by convention from `build/`; 256×256 is
-  required.
-- Splash artwork, if a splash is added to the shell.
-- Installer branding (electron-builder NSIS supports a sidebar/header bitmap),
-  only if it looks deliberate rather than decorated.
+```bash
+bash assets/brand/generate-windows-assets.sh
+```
 
-`productName`, `appId` and `shortcutName` are already correct and are **not**
-part of 24.3.
+Same masters as Android, same one-command regeneration. Nothing was redrawn.
+
+### Generated Windows targets (24.3)
+
+| Target | Contents |
+|---|---|
+| `windows-shell/build/icon.ico` | 16, 24, 32, 48, 64, 128, 256 — **all 32bpp**, 256 PNG-compressed, transparent ground |
+| `windows-shell/build/installerHeader.bmp` | 150x57 BMP3 — `MUI_HEADERIMAGE_BITMAP` |
+| `windows-shell/build/installerSidebar.bmp` | 164x314 BMP3 — `MUI_WELCOMEFINISHPAGE_BITMAP`, reused for the uninstaller |
+| `windows-shell/splash-mark.png` | 392x336 — mark above wordmark, transparent, 2x for high-DPI |
+
+**Why the Windows icon ground is TRANSPARENT while Android's is `#FBF8F3`:**
+Android masks every launcher icon into a shape and fills it, so a cream ground is
+the correct ground. Windows composites the icon straight onto the taskbar, where
+a cream square becomes a visible light box on the default dark taskbar. Rendered
+on transparency the mark's own teal silhouette carries the shape on light and
+dark alike. Checked at 16/24/32/48 against both.
+
+**Why the installer bitmap dimensions are what they are:** measured from the NSIS
+3.0.4.1 toolchain electron-builder actually downloads
+(`Contrib/Graphics/Wizard/nsis3-metro.bmp` is 164x314,
+`Contrib/Graphics/Header/nsis3-metro.bmp` is 150x57), not taken from
+documentation. MUI does not scale them.
+
+**Where the two output directories differ:** `windows-shell/build/` is
+electron-builder's `buildResources` directory — build *inputs*, consumed by the
+packager and never shipped inside the app. `windows-shell/splash-mark.png` sits
+beside the shell's own source because it *is* shipped, and therefore appears on
+`build.files`.
+
+**No paths were added to `windows-shell/package.json`.** electron-builder
+resolves `build/icon.ico`, `build/installerHeader.bmp` and
+`build/installerSidebar.bmp` by convention, and defaults the installer,
+uninstaller and uninstaller-sidebar artwork to them. Naming them in config would
+create a second place for the same fact to live.
+
+`productName`, `appId` and `shortcutName` were already correct and were **not**
+touched.
 
 ## Rules
 

@@ -421,11 +421,17 @@ describe("brand assets are approved artwork, in one place", () => {
     expect(existsSync(join(repoRoot, "public/brand"))).toBe(false);
   });
 
-  it("no Windows icon was wired into the installer", () => {
-    // Feature 24.3's job. electron-builder still falls back to Electron's
-    // default, which it reports at build time.
+  it("the Windows icon reaches electron-builder by convention, not by config", () => {
+    // Feature 24.3 replaced the 24.1 fence that asserted NO Windows icon
+    // existed. What survives is the reason the fence read the way it did: there
+    // is still no "icon" key in windows-shell/package.json, because
+    // electron-builder resolves build/icon.ico from its buildResources
+    // directory on its own (app-builder-lib's iconConverter appends
+    // "icon.ico" to the candidate list). Adding a path would be a second place
+    // for the same fact to live, and a second place to get it wrong.
     const shellPackage = read("windows-shell/package.json");
     expect(shellPackage).not.toContain('"icon"');
+    expect(existsSync(join(repoRoot, "windows-shell/build/icon.ico"))).toBe(true);
   });
 
   it("release metadata is untouched by branding", () => {

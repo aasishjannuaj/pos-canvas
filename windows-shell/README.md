@@ -135,14 +135,60 @@ On `https://pos-canvas.vercel.app`, the page sees **nothing**:
 `window.posCanvasShell`, `window.require`, `window.process`, `window.module` and
 `window.ipcRenderer` are all `undefined`.
 
-The retry bridge is exposed only when the document's own scheme is `file:` — i.e.
-only on the local fallback page. Two independent barriers guard it: the preload
-gate decides what the page can *see*, and the main process's sender check decides
-what it will *act on*. `retry()` takes no arguments, so no destination can cross.
+The retry bridge is exposed only on the local fallback page, and since Feature
+24.3 that is checked **by name** (`pathname` ends with `/offline.html`) rather
+than by scheme. There are now two local documents — `splash.html` is the other —
+and the splash gets **neither** bridge: it is not the hosted page, so the identity
+fact is not its to claim, and it has no Retry button, so the capability would be
+handed to a document with no use for it.
+
+Two independent barriers still guard retry: the preload gate decides what the
+page can *see*, and the main process's sender check decides what it will *act
+on*. `retry()` takes no arguments, so no destination can cross.
+
+## Startup splash (Feature 24.3)
+
+`splash.html` is a local, branded startup screen shown from disk the instant the
+window appears, and replaced the moment the hosted `/device` runtime paints.
+
+Before it, the window was created with `show: false` and stayed invisible until
+the remote page was ready — so on a slow connection, launching POS Canvas looked
+like launching nothing at all.
+
+**It is one BrowserWindow, not two.** The usual Electron splash recipe adds a
+second window; that would be a second surface to secure and a second thing to
+create, track, focus and destroy correctly on every path — including
+second-instance activation, where a stale splash would be an orphan window the
+operator cannot close. Reusing the existing window means the splash inherits
+every Feature 23 `webPreference` and every deny-by-default handler already
+applied, with no second copy that can drift. Chromium keeps showing the current
+document until the next one has something to paint, so the brand screen stays up
+for the whole remote load.
+
+| Path | Behaviour |
+|---|---|
+| Normal launch | splash → `/device` → pairing screen or paired POS |
+| Slow connection | splash stays, with an indeterminate bar; no white gap |
+| Load failure | `did-fail-load` → `offline.html`; the splash never hangs forever |
+| Second instance | second process quits and focuses the first window; there is no splash window to orphan |
+| Quit / relaunch | unchanged — the splash stores nothing |
+| Revoked device | unchanged — the splash carries no session or configuration |
+
+It runs **no script**, reaches **no network**, and carries **no customer, project
+or business identity** — it is byte-identical on every till. The load is wired
+with `.finally`, not `.then`: if the local splash somehow fails, the till still
+goes to the runtime. A branded screen is never allowed to become the reason a
+till does not start.
+
+**The splash is not offline capability.** It caches nothing and knows nothing;
+offline work is 24.4+.
 
 ## Offline behaviour
 
-`offline.html` is shown when the runtime URL cannot be reached. It is a message
+`offline.html` is shown when the runtime URL cannot be reached. It is a
+**different page from `splash.html`, deliberately**: the splash says the app is
+starting, this says it failed. Collapsing them would either accuse the network
+before anything went wrong, or make a failure look like normal loading. It is a message
 and a Retry button — **not an offline mode**. POS Canvas requires a connection to
 take payments, and the page says so. It caches no menu, no prices, no pairing
 state and no credentials, and it loads nothing over the network (it is displayed
@@ -254,7 +300,8 @@ Linux and `Get-FileHash` on Windows produces the same value.
 | User data | **Never deleted on uninstall** (`deleteAppDataOnUninstall: false`) |
 | Shortcuts | Start Menu + Desktop, named "POS Canvas" |
 | Signing | **None** — see below |
-| Icon | Electron's default — see below |
+| Icon | **POS Canvas mark** (Feature 24.3) — `build/icon.ico`, 7 sizes |
+| Installer artwork | **POS Canvas** header + wizard sidebar (Feature 24.3) |
 
 ### Minimum Windows version
 
@@ -291,12 +338,58 @@ Consequences, stated plainly:
 Signing is a **Feature 23.6** decision, together with publishing a GitHub Release
 and switching Windows off "Coming Soon".
 
-### Branding is not final
+### Branding (Feature 24.3 — complete)
 
-electron-builder reports *"default Electron icon is used"*, which is deliberate.
-**Final Windows icon, installer branding, splash screen and company branding are
-Feature 24 work, before any public release.** Nothing in this phase should be
-treated as final artwork, and no placeholder company branding was invented.
+electron-builder no longer reports *"default Electron icon is used"*. One file,
+`build/icon.ico`, becomes every Windows surface:
+
+| Surface | Source |
+|---|---|
+| `POS Canvas.exe` (executable, taskbar, alt-tab) | `build/icon.ico`, embedded as `RT_ICON` + `RT_GROUP_ICON` |
+| Start Menu + Desktop shortcut | the executable's icon |
+| Apps & Features entry | the executable's icon |
+| Installer `.exe` | `MUI_ICON` — defaults to the application icon |
+| Uninstaller | `MUI_UNICON` — same |
+| Wizard header | `build/installerHeader.bmp` (150x57) |
+| Wizard welcome/finish panel | `build/installerSidebar.bmp` (164x314), reused for the uninstaller |
+
+Verified on the produced binaries by reading their PE resource directories: both
+`POS Canvas.exe` and the installer carry all seven sizes (16/24/32/48/64/128/256),
+every one 32bpp, 256 PNG-compressed.
+
+**No icon or installer paths appear in `package.json`.** electron-builder resolves
+all of them from `build/` by convention. Regenerate with:
+
+```bash
+bash assets/brand/generate-windows-assets.sh
+```
+
+Artwork is **temporary-approved Concept D**, the same masters as Android. See
+`assets/brand/README.md`.
+
+### The published v1.0.0 installer does NOT have this branding
+
+> **`windows-v1.0.0` on GitHub is the older, pre-branding binary. Do not
+> overwrite it.**
+
+`CURRENT_WINDOWS_RELEASE` still describes those published bytes
+(`03b88e35…`, 99,637,338 bytes) and is **correct as it stands** — the release
+metadata must keep describing what is actually downloadable, not what is in the
+working tree. Feature 24.3 deliberately did not touch it.
+
+Replacing a published asset in place would invalidate the checksum every existing
+surface shows, and would silently change what an already-published URL serves.
+Branding therefore ships in a **new version**, not by mutating history:
+
+1. Choose the next version (`1.0.1` for a branding-only change).
+2. Bump `version` in `windows-shell/package.json` — the artifact name follows it.
+3. Build via **GitHub Actions**, never a macOS cross-build.
+4. Publish a **new** release under `windows-v1.0.1`, still pre-release, still
+   labelled unsigned.
+5. Verify the published bytes, then update `CURRENT_WINDOWS_RELEASE`.
+
+None of that is Feature 24.3, which prepares the branded installer without
+releasing it.
 
 ## Real Windows validation (Feature 23.5)
 
@@ -469,7 +562,10 @@ done. No public download URL exists.
 | 23.4 | **Done** — electron-builder, NSIS installer, GitHub Actions Windows build |
 | 23.5 | **Done** — real-Windows validation, upgrade/pairing-persistence gate |
 | 23.6 | **COMPLETE** — release metadata, shared platform model, pre-release UX, published `windows-v1.0.0`, Windows download live. Signing deferred to public launch by owner decision. |
-| 24 | Not started — final logo, Android/Windows icons, splash screens, installer branding, company information screen, offline capability, cached startup, offline sales/sync, publish progress |
+| 24.1 | **Done** — shared brand identity module |
+| 24.2 | **Done** — Android launcher, adaptive, themed icon and branded cold-start splash |
+| 24.3 | **Done** — Windows icon, installer wizard artwork, branded startup splash |
+| 24.4+ | Not started — company information screen, offline capability, cached startup, offline sales/sync, publish progress |
 
 The four structural `webPreferences` (`contextIsolation`, `nodeIntegration`,
 `sandbox`, `webviewTag`) are present from the first commit rather than being

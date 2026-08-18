@@ -442,10 +442,10 @@ describe("the bridge is invisible to the hosted page", () => {
 
   it("exposes the bridge only on the local fallback document", () => {
     expect(preload).toContain('window.location.protocol === "file:"');
-    expect(preload).toContain("if (isLocalFallbackPage) {");
+    expect(preload).toContain("if (isLocalPage) {");
 
     // The exposure must be INSIDE the conditional, not merely near it.
-    const gate = preload.indexOf("if (isLocalFallbackPage)");
+    const gate = preload.indexOf("if (isLocalPage)");
     const exposure = preload.indexOf("exposeInMainWorld");
     expect(gate).toBeGreaterThan(-1);
     expect(exposure).toBeGreaterThan(gate);
@@ -473,7 +473,7 @@ describe("the bridge is invisible to the hosted page", () => {
     // the hosted page still cannot reach a main-process action. It now receives
     // one immutable fact instead of nothing at all.
     const retryBranch = preload.slice(
-      preload.indexOf("if (isLocalFallbackPage) {"),
+      preload.indexOf("if (isLocalPage) {"),
       preload.indexOf("} else {")
     );
     const identityBranch = preload.slice(preload.indexOf("} else {"));
