@@ -6,60 +6,104 @@ This folder is the single home for the master files an owner approves once, from
 which the Android and Windows assets are produced. It sits outside `public/`
 deliberately: masters are build inputs, not files to serve to browsers.
 
-## Status: empty, awaiting owner-approved artwork
+## Status: Concept D approved as TEMPORARY branding (Feature 24.2)
 
-**Feature 24.1 established the identity, not the artwork.** No POS Canvas logo
-has been designed or approved, so nothing has been placed here, and nothing has
-been generated, downloaded or improvised in its place. The apps currently ship
-the toolchains' default marks:
+The owner approved the **Concept D** visual direction as the temporary
+production branding. The approved board is committed here as the reference of
+record:
 
-| Surface | Today | Replaced in |
+```
+concept-d-brand-board.png    the owner-approved reference (1448x1086)
+```
+
+**This is temporary-approved branding, not a final identity.** It has not been
+through a professional design pass, and the mark is raster-only — there is no
+vector master. Replacing it later means regenerating from a new master, which is
+why every asset below is derived by a scripted, repeatable process rather than
+hand-edited.
+
+| Surface | Today | Phase |
 |---|---|---|
-| Android launcher icon | Capacitor's default `ic_launcher` set | 24.2 |
-| Android splash | Capacitor's default `splash.png` | 24.2 |
-| Windows app + installer icon | Electron's default icon | 24.3 |
-| Website favicon | `app/favicon.ico` — still the Next.js default | 24.2 or 24.3 |
+| Android launcher + adaptive + themed icon | **Concept D mark** | 24.2 ✅ |
+| Android splash | **Concept D mark + wordmark** | 24.2 ✅ |
+| Website favicon | **Concept D mark** | 24.2 ✅ |
+| Windows app + installer icon | Electron's default | 24.3 |
+| Windows splash | none | 24.3 |
 
-These are placeholders by omission, not by choice, and they are the reason
-24.2 and 24.3 exist.
+### Palette (from the approved board)
 
-## What the owner must supply
+| Role | Hex |
+|---|---|
+| Primary — Vibrant Teal | `#0FA7A6` |
+| Teal 80% | `#2BCBC4` |
+| Mint 60% | `#7FE6DB` |
+| Peach 40% | `#FFC7A3` |
+| Coral 20% | `#FF7F68` |
+| Blush 10% | `#FFE9DE` |
+| Board page / icon ground | `#FBF8F3` |
+| Splash ground | `#FBFDFD` |
+| Wordmark ink | `#000119` |
 
-One master mark, from which everything else is derived. Requested as:
+### Derived masters
 
-| # | Asset | Format | Size | Notes |
-|---|---|---|---|---|
-| 1 | **Master app icon** | SVG preferred, else PNG | ≥ 1024×1024, square | Opaque or transparent; the full mark |
-| 2 | **Adaptive foreground** | SVG or PNG, transparent | 1024×1024 | Android crops to a circle/squircle — keep the mark inside the centre **66%** safe zone |
-| 3 | **Adaptive background** | Solid colour hex, or PNG | 1024×1024 | A flat brand colour is usually enough |
-| 4 | **Monochrome mark** | SVG or PNG, single colour on transparent | 1024×1024 | Android 13+ themed icons |
-| 5 | **Splash / wordmark** | SVG preferred | ≥ 1024 wide | Centred on a flat background; used on both platforms |
-| 6 | **Brand colours** | Hex values | — | At minimum a background colour for the splash and adaptive background |
-
-Suggested filenames once approved:
+Extracted from the approved board, not redrawn — redrawing would have meant
+inventing a logo rather than using the approved one.
 
 ```
-assets/brand/
-  icon-master.svg          (1)
-  icon-adaptive-fg.svg     (2)
-  icon-adaptive-bg.svg     (3)  — or a hex value recorded in lib/brand.ts
-  icon-monochrome.svg      (4)
-  splash-master.svg        (5)
+icon-mark-master.png         376x372  the blob mark, alpha, decorative dots removed
+icon-monochrome-master.png   376x372  single-colour silhouette, POS + smile knocked out
+wordmark-master.png          424x63   "POS Canvas" wordmark, ink only
 ```
 
-## Feature 24.2 — Android (not started)
+**Why the decorative dots were dropped:** the four accent dots sit at the
+extremes of the mark and would fall outside the adaptive icon's 66dp safe zone,
+where circular and squircle masks clip them. The splash uses the same dot-free
+master so every surface shows one consistent mark.
 
-Generated from the masters into the existing tree, which already has the right
-shape (`mipmap-*`, `mipmap-anydpi-v26/ic_launcher.xml`,
-`drawable/ic_launcher_background.xml`, `drawable*/splash.png`):
+**Why the ground is `#FBF8F3` rather than white:** the artwork's edges were
+anti-aliased against that exact page colour. Compositing onto it reproduces the
+original edge with zero halo; compositing onto white leaves a faint cream fringe.
 
-- `mipmap-{m,h,xh,xxh,xxx}dpi/ic_launcher.png`, `ic_launcher_round.png`,
-  `ic_launcher_foreground.png`
-- `mipmap-anydpi-v26/ic_launcher.xml` + `ic_launcher_round.xml` (adaptive)
-- `drawable/ic_launcher_background.xml` (or a colour resource)
-- `drawable-{port,land}-{m,h,xh,xxh,xxx}dpi/splash.png`
+### Generated Android targets (24.2)
 
-`app_name` and `applicationId` are already correct and are **not** part of 24.2.
+| Target | Sizes |
+|---|---|
+| `mipmap-*/ic_launcher.png` | 48, 72, 96, 144, 192 — mark at 82% on the cream ground |
+| `mipmap-*/ic_launcher_round.png` | same, circular |
+| `mipmap-*/ic_launcher_foreground.png` | 108, 162, 216, 324, 432 — mark fitted to the 66/108dp safe zone, transparent |
+| `mipmap-*/ic_launcher_monochrome.png` | same geometry, single colour (Android 13+ themed icons) |
+| `values/ic_launcher_background.xml` | `#FBF8F3` |
+| `drawable-port-*/splash.png` | 320x480 … 1280x1920 |
+| `drawable-land-*/splash.png` | 480x320 … 1920x1280 |
+| `drawable/splash.png` | 480x320 |
+| `app/favicon.ico` | 16, 32, 48 |
+
+**Known limit:** at 16px the mark cannot render "POS" legibly — the shape and
+coral accent read, the letters do not. The approved board's own 16x16 preview
+shows the same. A simplified small-size variant would be a design decision for
+the owner, not something to improvise.
+
+## Still needed from the owner
+
+Concept D is approved as **temporary** branding. Outstanding:
+
+| # | Item | Why |
+|---|---|---|
+| 1 | **Vector master** of the mark (SVG/AI) | Everything today is derived from a 1448x1086 raster board. A vector master would sharpen every size and is required for a clean high-DPI Windows icon. |
+| 2 | **Decision on a simplified 16px variant** | The full mark cannot render "POS" at 16px. A reduced form is a design choice, not something to improvise. |
+| 3 | **Confirmation of the icon ground** | `#FBF8F3` was chosen because it is the colour the artwork was anti-aliased against. A different ground needs a re-render, not a recolour. |
+| 4 | **Final identity sign-off** | Before public launch, if Concept D is not the permanent mark. |
+
+## Feature 24.2 — Android (complete)
+
+```bash
+bash assets/brand/generate-android-assets.sh
+```
+
+Regenerates every target from the masters. The build is scripted end to end, so
+swapping in new approved artwork is a re-run rather than a manual pass.
+
+`app_name` and `applicationId` were already correct and were **not** touched.
 
 ## Feature 24.3 — Windows (not started)
 

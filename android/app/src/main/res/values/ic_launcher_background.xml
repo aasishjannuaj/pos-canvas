@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#FFFFFF</color>
+    <!-- Feature 24.2 — the page colour of the approved Concept D brand board.
+         Matching it exactly means the mark's anti-aliased edge blends with no
+         halo, because the artwork was rendered against this very colour. -->
+    <color name="ic_launcher_background">#FBF8F3</color>
 </resources>

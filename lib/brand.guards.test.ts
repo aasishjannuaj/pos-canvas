@@ -397,27 +397,28 @@ describe("platform branding never becomes customer branding", () => {
 // Scope — 24.2 / 24.3 artwork not started
 // ---------------------------------------------------------------------------
 
-describe("Feature 24.1 stops at identity, not artwork", () => {
-  it("documents the asset contract without shipping artwork", () => {
+describe("brand assets are approved artwork, in one place", () => {
+  it("the asset contract is documented", () => {
     expect(existsSync(join(repoRoot, "assets/brand/README.md"))).toBe(true);
-
-    // The folder holds the contract only. No masters have been approved, and
-    // none were improvised.
-    const contract = read("assets/brand/README.md");
-    expect(contract).toContain("awaiting owner-approved artwork");
   });
 
-  it("no brand artwork was generated or committed", () => {
-    for (const invented of [
-      "assets/brand/icon-master.svg",
-      "assets/brand/icon-adaptive-fg.svg",
-      "assets/brand/splash-master.svg",
-      "public/brand",
-      "windows-shell/build",
-    ]) {
-      expect(`${invented} exists`).toBe(`${invented} exists`);
-      expect(existsSync(join(repoRoot, invented))).toBe(false);
-    }
+  it("the artwork is the owner-approved reference, not something improvised", () => {
+    // Feature 24.2 replaced the 24.1 fence that asserted NO artwork existed.
+    // What survives is the rule that mattered: every mark traces to an approved
+    // board committed alongside it, and nothing was invented, downloaded or
+    // AI-improvised in its place. lib/androidBranding.guards.test.ts asserts the
+    // generated targets.
+    expect(existsSync(join(repoRoot, "assets/brand/concept-d-brand-board.png"))).toBe(true);
+    expect(existsSync(join(repoRoot, "assets/brand/icon-mark-master.png"))).toBe(true);
+
+    const contract = read("assets/brand/README.md");
+    expect(contract).toContain("TEMPORARY");
+    expect(contract).toContain("Concept D");
+  });
+
+  it("no second asset tree appeared", () => {
+    // One home for masters. public/ serves files to browsers and is not it.
+    expect(existsSync(join(repoRoot, "public/brand"))).toBe(false);
   });
 
   it("no Windows icon was wired into the installer", () => {
