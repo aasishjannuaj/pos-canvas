@@ -16,7 +16,38 @@
     </style>
 
 
+    <!-- Feature 24.2 - the cold-start window: the very first thing Android
+         draws for this app, before any of our code runs.
+
+         WHY THESE TWO ATTRIBUTES EXIST: the parent Theme.SplashScreen leaves
+         both unset, and the resulting defaults are not ours.
+
+           - Background. On API 31+ androidx maps
+             android:windowSplashScreenBackground to
+             ?windowSplashScreenBackground (see the library's values-v31).
+             Unset, that falls through to the platform's ?android:colorBackground
+             - a Material You value, measured on an API 36 emulator as #EEEDF6
+             in light mode and #181920 in dark. The cold-start screen therefore
+             changed colour with the device theme and was never the brand ground.
+
+           - Icon. On API 24-30 the compat layer-list draws
+             ?windowSplashScreenAnimatedIcon, which the base Theme.SplashScreen
+             defines as @android:drawable/sym_def_app_icon - the stock Android
+             robot, not our mark. API 31+ happens to fall back to the launcher
+             icon instead, so the two paths disagreed. Naming the mipmap pins
+             both to the same approved artwork.
+
+         The background is deliberately the SAME colour as the adaptive icon's
+         own background, so the mark's anti-aliased edge meets the screen with
+         no halo - the same reasoning recorded in values/ic_launcher_background.xml. -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+
+        <!-- Retained from the Capacitor template. The parent theme sets its own
+             android:windowBackground, so this never paints the cold-start
+             window; it is left in place because removing it is a boot-path
+             change, which 24.2 is not. -->
         <item name="android:background">@drawable/splash</item>
     </style>
 </resources>

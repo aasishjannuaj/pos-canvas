@@ -195,6 +195,33 @@ describe("every splash density is present and correctly sized", () => {
       "<item name=\"android:background\">@drawable/splash</item>"
     );
   });
+
+  it("the cold-start window is pinned to the brand, not the device theme", () => {
+    // REGRESSION GUARD. Theme.SplashScreen leaves both of these unset, and the
+    // defaults are wrong in opposite directions: the background falls through
+    // to the platform's ?android:colorBackground (Material You - it followed
+    // the emulator's light/dark setting instead of the brand ground), and on
+    // API 24-30 the compat icon falls through to the stock Android robot.
+    // Neither failure is visible to any other test in this repository.
+    const styles = read(`${RES}/values/styles.xml`);
+
+    expect(styles).toContain(
+      '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
+    );
+    expect(styles).toContain(
+      '<item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>'
+    );
+  });
+
+  it("the splash background is the same ground as the icon, so the mark has no halo", () => {
+    // These two must not drift apart: the adaptive icon is rendered against
+    // its own background colour, and the cold-start screen sits directly
+    // behind it. A mismatch shows up as a ring around the mark.
+    expect(read(`${RES}/values/ic_launcher_background.xml`)).toContain("#FBF8F3");
+    expect(read(`${RES}/values/styles.xml`)).toContain(
+      '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
