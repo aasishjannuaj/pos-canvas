@@ -65,6 +65,19 @@ type PosRuntimeProps = {
 
   // Optional: lets a host re-check its own authorization after a rejected sale.
   onSaleRejected?: PosRuntimeOnSaleRejected;
+
+  /**
+   * Feature 24.5A — when set, completing a sale is IMPOSSIBLE and this string
+   * says why.
+   *
+   * A reason rather than a boolean, so the panel can explain itself and so the
+   * only way to disable checkout is to state a cause. Null means the ordinary
+   * online runtime, unchanged in every respect.
+   *
+   * Browsing, the cart, modifiers and totals all keep working — the fence is
+   * around the one action that writes money.
+   */
+  checkoutBlockedReason?: string | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -83,6 +96,7 @@ export default function PosRuntime({
   homeLink,
   logoBaseUrl,
   onSaleRejected,
+  checkoutBlockedReason = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
@@ -255,6 +269,21 @@ export default function PosRuntime({
   }
 
   async function completeSale() {
+    // Feature 24.5A — THE OFFLINE FENCE, and it is deliberately the very first
+    // statement in this function.
+    //
+    // Placed ahead of every other guard so there is no ordering in which a
+    // blocked runtime reaches planSaleSubmission or submitSale. A disabled
+    // button is a UI affordance; this is the actual boundary, and it is what
+    // guarantees no sale RPC is called and no request id is minted while
+    // offline. 24.5C is where a queued sale becomes possible; until then the
+    // honest answer is that the till cannot complete this sale.
+    if (checkoutBlockedReason !== null) {
+      setSaleSaveStatus("error");
+      setSaleSaveError(checkoutBlockedReason);
+      return;
+    }
+
     if (cart.length === 0 || !selectedPaymentMethod || checkoutStatus === "success") {
       return;
     }
@@ -466,6 +495,7 @@ export default function PosRuntime({
             onSelectPaymentMethod={selectPaymentMethod}
             checkoutStatus={checkoutStatus}
             onCompleteSale={completeSale}
+            checkoutBlockedReason={checkoutBlockedReason}
             saleSaveStatus={saleSaveStatus}
             saleSaveError={saleSaveError}
             recentOrders={[]}

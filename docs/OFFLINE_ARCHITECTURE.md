@@ -1,9 +1,38 @@
 # Offline architecture — design (Feature 24.4)
 
-**Status: DESIGN ONLY. Nothing here is implemented.** Feature 24.4 produced this
-document and nothing else: no offline runtime, no local queue, no IndexedDB
-wrapper, no migration, no RPC change. Implementation is Feature 24.5, phased in
-§20.
+## Implementation status
+
+| Phase | Contents | Status |
+|---|---|---|
+| **24.5A** | IndexedDB foundation, cached pairing assertion, cached immutable config, integrity validation, 7-day lease, read-only offline startup, **offline checkout disabled** | **IMPLEMENTED** |
+| 24.5B | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **NOT IMPLEMENTED** |
+| 24.5C | Durable sale queue + persisted idempotency key | **NOT IMPLEMENTED** |
+| 24.5D | Sync engine | **NOT IMPLEMENTED** |
+| 24.5E | Offline checkout, provisional receipts, inventory reporting, owner Devices UI | **NOT IMPLEMENTED** |
+| 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
+
+**No sale can be completed offline today.** 24.5A lets a paired till reopen and
+browse its pinned menu during an outage; the Complete Sale action is fenced off
+in `PosRuntime.completeSale` before anything can submit, and no sale, queue,
+receipt or idempotency key is written to disk. Everything below §20 that
+describes queued sales is still design, not behaviour.
+
+### What 24.5A actually shipped
+
+| Concern | Module |
+|---|---|
+| Rules — canonicalization, SHA-256 integrity, identity binding, lease | `lib/deviceOfflineCache.ts` (pure) |
+| The only IndexedDB in the repository | `lib/deviceOfflineStore.ts` |
+| Glue between the two | `lib/deviceOfflineSession.ts` |
+| Transport-failure vs server-rejection | `lib/deviceConnectivity.ts` (pure) |
+| Cold-start fallback decision | `decideOfflineFallback` in `lib/deviceSession.ts` (pure) |
+| Operator banner | `components/device/DeviceOfflineBanner.tsx` |
+
+The safety property that matters most: **a server that ANSWERED is never
+overridden by cache.** `permitsOfflineFallback` admits only a classified
+`transport` failure, so a revoked or unpaired device — which is a server answer
+— can never fall back to a cached POS, and a confirmed revocation clears the
+cache outright.
 
 Scope: the two universal shells — Android (Capacitor WebView) and Windows
 (Electron) — both of which load the same hosted `/device` runtime over the
@@ -948,6 +977,77 @@ and so nothing can queue a sale before the server can accept it.
 **24.5B precedes any client that can queue a sale.** Shipping the queue first
 would create sales that the server would reject for lacking a contract — the
 exact data-loss the design exists to avoid.
+
+---
+
+## 19A. Manual test plan — 24.5A (read-only offline startup)
+
+Automated coverage stops at the browser boundary: vitest runs under Node, so the
+real Android WebView and the real Electron window have to be driven by hand.
+Run every row on **both** platforms. Nothing here involves a sale, because
+24.5A cannot complete one.
+
+### Precondition (both platforms)
+
+1. Pair the device online with a real project.
+2. Confirm the POS opens and the menu renders.
+3. Close and reopen while still online — normal POS, no offline banner.
+
+That third step matters: it proves the cache write on an authoritative start did
+not break the ordinary path.
+
+### Windows (Electron)
+
+| # | Step | Expected |
+|---|---|---|
+| 1 | Close the app completely | — |
+| 2 | Disable the network adapter / turn off Wi-Fi | — |
+| 3 | Launch POS Canvas | Branded splash, then the POS opens from cache |
+| 4 | Look at the top of the screen | Amber bar: **Offline · Using last verified configuration · Last verified: {date}** |
+| 5 | Browse the menu, add items, choose modifiers | All work normally; totals calculate |
+| 6 | Open checkout and pick a payment method | **Complete Sale is disabled**, with "Internet connection required to complete sales." |
+| 7 | Restore the network | — |
+| 8 | Relaunch (or press Retry) | Offline bar disappears; normal online POS; checkout enabled |
+
+### Android (Capacitor WebView)
+
+Identical sequence, using airplane mode — or, on an emulator,
+`adb shell svc wifi disable && adb shell svc data disable` (restore with
+`enable`). Step 3's splash is the Android cold-start splash from 24.2.
+
+### Lease expiry
+
+Cannot be waited out by hand. Verify by moving the **device** clock forward more
+than 7 days while offline, then relaunching:
+
+| Expected | |
+|---|---|
+| POS does **not** open | "Reconnect required — This till has been offline for more than 7 days." |
+
+Moving the clock *backwards* instead must also refuse, with the clock message —
+that is the anti-tamper path, and it is the one worth checking deliberately.
+
+### Revocation must beat the cache
+
+The most important manual test in this phase.
+
+1. With the device online and a valid cache, have the owner **revoke** it.
+2. Leave the device online and relaunch, or press Retry.
+3. **Expected:** the revoked screen. The cached POS must **not** open, now or on
+   any later launch — the confirmed revocation clears the cache.
+4. Then disable the network and relaunch again.
+5. **Expected:** still not the POS. With the cache cleared there is nothing to
+   fall back to, and the device asks to be paired again.
+
+If step 3 or step 5 ever shows a working POS, stop: the transport-versus-answer
+classification has failed and 24.5A is not shippable.
+
+### Re-pair isolation
+
+1. Pair to Business A, confirm the menu, go offline once to see it cached.
+2. Reset the device and pair to Business B.
+3. Go offline and relaunch.
+4. **Expected:** Business B's menu. Business A's must never appear.
 
 ---
 

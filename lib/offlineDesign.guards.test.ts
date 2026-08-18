@@ -98,8 +98,14 @@ describe("Feature 24.4 produced a design document", () => {
     }
   });
 
-  it("it states plainly that nothing is implemented", () => {
-    expect(read(DESIGN_DOC)).toContain("DESIGN ONLY. Nothing here is implemented.");
+  it("it records which phases are implemented and which are not", () => {
+    // 24.4 said "nothing is implemented". 24.5A implemented the first phase, so
+    // the document must now say which, or it stops describing reality.
+    const doc = read(DESIGN_DOC);
+
+    expect(doc).toContain("24.5A");
+    expect(doc).toContain("IMPLEMENTED");
+    expect(doc).toContain("NOT IMPLEMENTED");
   });
 
   it("the owner's seven decisions are recorded as decided, not still open", () => {
@@ -150,42 +156,40 @@ describe("Feature 24.4 produced a design document", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 24.4 implemented no offline runtime", () => {
-  it("no offline queue, sync engine or storage module exists", () => {
+  // SUPERSEDED IN PART BY 24.5A, deliberately and with the reason recorded.
+  //
+  // Two of this block's original assertions — "no product source touches
+  // IndexedDB" and "the device has no local config persistence" — were fences
+  // around the DESIGN phase. 24.5A implemented exactly the thing they fenced,
+  // so keeping them would mean a passing suite could only be bought by not
+  // doing the approved work. They are replaced by the substantive checks in
+  // lib/offlineReadOnly.guards.test.ts, which assert that IndexedDB lives in
+  // ONE module and that the cache holds configuration and never a sale.
+  //
+  // What survives here is everything 24.5A was still not allowed to do.
+  it("no sale queue, sync engine or offline-sale module exists", () => {
     for (const premature of [
       "lib/offline.ts",
       "lib/offlineQueue.ts",
       "lib/offlineSale.ts",
       "lib/syncEngine.ts",
       "lib/saleQueue.ts",
-      "lib/indexedDb.ts",
-      "lib/localStore.ts",
-      "lib/configCache.ts",
     ]) {
-      expect(`24.5 module exists early: ${premature}`).toBe(`24.5 module exists early: ${premature}`);
+      expect(`24.5C+ module exists early: ${premature}`).toBe(
+        `24.5C+ module exists early: ${premature}`
+      );
       expect(exists(premature)).toBe(false);
     }
   });
 
-  it("no product source touches IndexedDB or a storage-persistence API", () => {
-    // The design chooses IndexedDB (§16). Choosing it is 24.4; using it is 24.5.
-    for (const file of productSourceFiles()) {
-      const source = read(file);
+  it("the config cache is read-only to the device and stores no sale", () => {
+    // 24.5A caches a configuration. It does not cache, queue or replay money.
+    const cache = read("lib/deviceOfflineCache.ts");
 
-      for (const api of ["indexedDB", "IDBDatabase", "navigator.storage", "openDatabase"]) {
-        expect(`${file} uses ${api}`).toBe(`${file} uses ${api}`);
-        expect(source).not.toContain(api);
-      }
+    for (const premature of ["QueuedSale", "saleRequestId", "paymentMethod"]) {
+      expect(`cache: ${premature}`).toBe(`cache: ${premature}`);
+      expect(cache).not.toContain(premature);
     }
-  });
-
-  it("the device still has no local config persistence", () => {
-    // toDeviceDisplayConfig and the RPC path are unchanged: config is fetched,
-    // used, and forgotten.
-    const deviceRpc = read("lib/device.rpc.ts");
-
-    expect(deviceRpc).toContain("get_device_config");
-    expect(deviceRpc).not.toContain("cacheConfig");
-    expect(deviceRpc).not.toContain("readConfigCache");
   });
 });
 

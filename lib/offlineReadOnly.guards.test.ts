@@ -1,0 +1,372 @@
+// Feature 24.5A — guards for the read-only offline start.
+//
+// TWO JOBS. First, prove the safety fences hold: checkout is impossible while
+// running from cache, and a server that ANSWERED can never be overridden by a
+// cached one. Second, prove 24.5A stopped where it was supposed to — no queue,
+// no migration, no RPC change, no receipt or inventory work.
+//
+// The fence assertions are STRUCTURAL because the guarded property is an
+// ordering one: "the block is checked before anything can submit". A behavioural
+// test of a React component cannot express that under this repository's
+// deliberately DOM-free vitest environment, whereas source ordering can — the
+// same technique lib/windowsShellSecurity.guards.test.ts uses on the preload.
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+function read(relativePath: string): string {
+  return readFileSync(join(repoRoot, relativePath), "utf-8");
+}
+
+function exists(relativePath: string): boolean {
+  return existsSync(join(repoRoot, relativePath));
+}
+
+/** Strips comments so explanatory prose never satisfies or trips a guard. */
+function code(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
+const RUNTIME = "components/runtime/PosRuntime.tsx";
+const PANEL = "components/runtime/PosCheckoutPanel.tsx";
+const DEVICE_APP = "components/device/DeviceApp.tsx";
+const STORE = "lib/deviceOfflineStore.ts";
+const CACHE = "lib/deviceOfflineCache.ts";
+const SESSION = "lib/deviceOfflineSession.ts";
+const CONNECTIVITY = "lib/deviceConnectivity.ts";
+
+/** Every non-test source file that ships. */
+function productSourceFiles(): string[] {
+  const files: string[] = [];
+
+  const walk = (relative: string): void => {
+    for (const entry of readdirSync(join(repoRoot, relative), { withFileTypes: true })) {
+      const next = `${relative}/${entry.name}`;
+
+      if (entry.isDirectory()) {
+        walk(next);
+        continue;
+      }
+      if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+      if (/\.test\.tsx?$/.test(entry.name)) continue;
+
+      files.push(next);
+    }
+  };
+
+  for (const root of ["lib", "components", "app"]) walk(root);
+
+  return files;
+}
+
+// ---------------------------------------------------------------------------
+// The checkout fence
+// ---------------------------------------------------------------------------
+
+describe("checkout is impossible while running from cache", () => {
+  const runtime = code(read(RUNTIME));
+
+  it("the block is checked BEFORE anything that could submit", () => {
+    // Ordering is the property. A guard placed after planSaleSubmission would
+    // still disable the button while minting a request id on every press.
+    const fence = runtime.indexOf("if (checkoutBlockedReason !== null)");
+    const plan = runtime.indexOf("planSaleSubmission({");
+    const submit = runtime.indexOf("await submitSale({");
+
+    expect(fence).toBeGreaterThan(-1);
+    expect(plan).toBeGreaterThan(fence);
+    expect(submit).toBeGreaterThan(fence);
+  });
+
+  it("the fence returns rather than falling through", () => {
+    const fence = runtime.indexOf("if (checkoutBlockedReason !== null)");
+    const body = runtime.slice(fence, fence + 260);
+
+    expect(body).toContain("return;");
+  });
+
+  it("the pay button is disabled by the same condition", () => {
+    expect(code(read(PANEL))).toContain("checkoutBlockedReason !== null ||");
+  });
+
+  it("the device supplies the reason ONLY in offline mode", () => {
+    const app = code(read(DEVICE_APP));
+
+    expect(app).toContain('getDeviceRuntimeMode(state) === "offline_read_only"');
+    expect(app).toContain("OFFLINE_CHECKOUT_BLOCKED_MESSAGE");
+  });
+
+  it("the operator copy promises nothing and blames nobody", () => {
+    const message = read(DEVICE_APP).match(
+      /OFFLINE_CHECKOUT_BLOCKED_MESSAGE =\s*\n?\s*"([^"]+)"/
+    )?.[1];
+
+    expect(message).toBeDefined();
+    expect(message).toContain("Internet connection required");
+
+    for (const banned of ["error", "failed", "invalid", "corrupt"]) {
+      expect(`copy says ${banned}`).toBe(`copy says ${banned}`);
+      expect(message?.toLowerCase()).not.toContain(banned);
+    }
+  });
+
+  it("no offline sale, queue, or receipt path was created", () => {
+    const app = code(read(DEVICE_APP));
+
+    for (const premature of [
+      "enqueue",
+      "queueSale",
+      "offlineSale",
+      "provisionalReceipt",
+      "persistSale",
+    ]) {
+      expect(`DeviceApp: ${premature}`).toBe(`DeviceApp: ${premature}`);
+      expect(app).not.toContain(premature);
+    }
+  });
+
+  it("the sale request id is still only passed through, never stored", () => {
+    // `saleRequestId` legitimately appears once: the EXISTING online checkout
+    // hands the runtime's id to complete_sale_v3. 24.5C is what persists it.
+    // Banning the word outright would have flagged untouched online code, so
+    // the guard checks the shape instead.
+    const app = code(read(DEVICE_APP));
+    const occurrences = app.match(/saleRequestId/g) ?? [];
+
+    expect(occurrences).toHaveLength(2);
+    expect(app).toContain("saleRequestId: input.saleRequestId");
+    expect(app).not.toContain("writeCacheKey");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A server answer always wins
+// ---------------------------------------------------------------------------
+
+describe("a server that answered is never overridden by cache", () => {
+  it("only a transport failure can reach the fallback", () => {
+    const app = code(read(DEVICE_APP));
+
+    expect(app).toContain("permitsOfflineFallback(failure)");
+    expect(app).toContain("openOfflineOrFail");
+  });
+
+  it("permitsOfflineFallback admits exactly one kind", () => {
+    const connectivity = code(read(CONNECTIVITY));
+
+    expect(connectivity).toContain('return kind === "transport";');
+  });
+
+  it("a confirmed revocation clears the cache", () => {
+    // Otherwise the next launch would open offline on a withdrawn device.
+    const app = code(read(DEVICE_APP));
+
+    expect(app).toContain('if (next.status === "revoked")');
+    expect(app).toContain("clearOfflineCache()");
+  });
+
+  it("a local reset clears the cache before signing out", () => {
+    const app = code(read(DEVICE_APP));
+    const clear = app.indexOf("await clearOfflineCache();");
+    const signOut = app.indexOf("await resetDeviceSession();");
+
+    expect(clear).toBeGreaterThan(-1);
+    expect(signOut).toBeGreaterThan(clear);
+  });
+
+  it("the lease is never refreshed by a read", () => {
+    const session = code(read(SESSION));
+    const load = session.indexOf("export async function loadOfflineFallback");
+    const body = session.slice(load);
+
+    expect(body).not.toContain("writePairingAssertionRecord");
+    expect(body).not.toContain("writePinnedConfigRecord");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-platform storage
+// ---------------------------------------------------------------------------
+
+describe("one shared implementation, no platform adapter", () => {
+  it("IndexedDB appears in exactly one module", () => {
+    const offenders = productSourceFiles().filter(
+      (file) => file !== STORE && /indexedDB|IDBDatabase|IDBFactory/.test(read(file))
+    );
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("navigator.storage is requested from that same module only", () => {
+    const offenders = productSourceFiles().filter(
+      (file) => file !== STORE && read(file).includes("navigator.storage")
+    );
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("no Capacitor storage plugin, SQLite, or Electron persistence was added", () => {
+    const manifest = read("package.json");
+
+    for (const banned of [
+      "@capacitor/preferences",
+      "capacitor-sqlite",
+      "sqlite",
+      "localforage",
+      "dexie",
+      "idb",
+      "electron-store",
+    ]) {
+      expect(`package.json: ${banned}`).toBe(`package.json: ${banned}`);
+      expect(manifest).not.toContain(`"${banned}"`);
+    }
+  });
+
+  it("the shells gained no storage code of their own", () => {
+    for (const file of [
+      "windows-shell/main.mjs",
+      "windows-shell/preload.js",
+      "capacitor.config.ts",
+    ]) {
+      const source = code(read(file));
+
+      // "Preferences" alone would match webPreferences, which is Electron's
+      // own security configuration and has nothing to do with storage.
+      for (const banned of [
+        "indexedDB",
+        "sqlite",
+        "@capacitor/preferences",
+        "offlineQueue",
+        "electron-store",
+      ]) {
+        expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+        expect(source).not.toContain(banned);
+      }
+    }
+  });
+
+  it("fake-indexeddb is a DEV dependency and never a runtime one", () => {
+    const manifest = JSON.parse(read("package.json"));
+
+    expect(manifest.devDependencies["fake-indexeddb"]).toBeDefined();
+    expect(manifest.dependencies["fake-indexeddb"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope — 24.5B-F did not start
+// ---------------------------------------------------------------------------
+
+describe("Feature 24.5A stops at read-only startup", () => {
+  it("no sale queue exists, in code or in storage", () => {
+    for (const premature of [
+      "lib/offlineQueue.ts",
+      "lib/offlineSale.ts",
+      "lib/saleQueue.ts",
+      "lib/syncEngine.ts",
+    ]) {
+      expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);
+      expect(exists(premature)).toBe(false);
+    }
+
+    // No object store is reserved either — see the store module's comment.
+    const store = code(read(STORE));
+
+    expect(store).not.toContain("sale-queue");
+    expect(store).not.toContain("queueStore");
+    expect((store.match(/createObjectStore\(/g) ?? []).length).toBe(1);
+  });
+
+  it("the cache stores configuration only, never a sale", () => {
+    const cache = code(read(CACHE));
+
+    for (const banned of ["saleRequestId", "QueuedSale", "paymentMethod", "occurred_at"]) {
+      expect(`cache: ${banned}`).toBe(`cache: ${banned}`);
+      expect(cache).not.toContain(banned);
+    }
+  });
+
+  it("no migration was added for offline work", () => {
+    const migrationsDir = join(repoRoot, "supabase/migrations");
+
+    for (const name of readdirSync(migrationsDir).filter((f) => f.endsWith(".sql"))) {
+      const sql = readFileSync(join(migrationsDir, name), "utf-8");
+
+      for (const premature of ["occurred_at", "complete_sale_v4", "offline_queued"]) {
+        expect(`${name}: ${premature}`).toBe(`${name}: ${premature}`);
+        expect(sql).not.toContain(premature);
+      }
+    }
+  });
+
+  it("the sale RPC contract is untouched", () => {
+    const rpc = read("lib/device.rpc.ts");
+
+    expect(rpc).toContain('rpc("complete_sale_v3"');
+    expect(rpc).not.toContain("complete_sale_v4");
+    expect(read("lib/saleRequest.ts")).not.toContain("offline");
+  });
+
+  it("receipt numbering and inventory are untouched", () => {
+    for (const file of productSourceFiles()) {
+      const source = read(file);
+
+      for (const premature of [
+        "provisionalReceipt",
+        "allocateOrderNumber",
+        "stockShortfall",
+      ]) {
+        expect(`${file}: ${premature}`).toBe(`${file}: ${premature}`);
+        expect(source).not.toContain(premature);
+      }
+    }
+  });
+
+  it("no 24.6 publish-progress work began", () => {
+    expect(exists("lib/publishProgress.ts")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression
+// ---------------------------------------------------------------------------
+
+describe("Feature 24.5A changed nothing it was not meant to", () => {
+  it("Android and Windows branding is untouched", () => {
+    expect(read("android/app/src/main/res/values/styles.xml")).toContain(
+      '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
+    );
+    expect(exists("windows-shell/build/icon.ico")).toBe(true);
+    expect(exists("windows-shell/splash.html")).toBe(true);
+  });
+
+  it("release metadata is untouched", () => {
+    expect(read("lib/windowsRelease.ts")).toContain(
+      "03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d"
+    );
+    expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: true");
+    expect(read("lib/androidRelease.ts")).toContain(
+      "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125"
+    );
+  });
+
+  it("the online checkout path is unchanged when nothing blocks it", () => {
+    const runtime = code(read(RUNTIME));
+
+    // The default keeps every existing host — the owner editor and the Builder
+    // Preview — on exactly the path they were on before 24.5A.
+    expect(runtime).toContain("checkoutBlockedReason = null");
+    expect(runtime).toContain("await submitSale({");
+    expect(runtime).toContain("saleRequestId: plan.request.id");
+  });
+
+  it("the customer logo pipeline is untouched", () => {
+    expect(read("lib/logoUpload.ts")).toContain('LOGO_BUCKET = "project-logos"');
+  });
+});

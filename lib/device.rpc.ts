@@ -19,6 +19,8 @@
 // EXISTING getRedeemErrorMessage table and never surfaces a raw Postgres
 // message, so the UI cannot reintroduce the distinction the backend removed.
 import { getDeviceSupabaseClient } from "@/lib/supabase/deviceClient";
+import { classifyDeviceFailure } from "@/lib/deviceConnectivity";
+import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
   getRedeemErrorMessage,
   isValidPairingCodeShape,
@@ -56,7 +58,11 @@ function redeemFailure(code: RedeemErrorCode): RedeemPairingResult {
 // Session
 // ---------------------------------------------------------------------------
 
-export type DeviceSessionResult = { ok: true; userId: string } | { ok: false };
+export type DeviceSessionResult =
+  | { ok: true; userId: string }
+  // Feature 24.5A — `failure` is present only when the attempt actually errored.
+  // A simple "no session stored" is not a failure and carries nothing.
+  | { ok: false; failure?: DeviceFailureKind };
 
 /** Returns the existing anonymous session, if the browser still holds one. */
 export async function getDeviceSession(): Promise<DeviceSessionResult> {
@@ -85,12 +91,12 @@ export async function signInDeviceAnonymously(): Promise<DeviceSessionResult> {
       await getDeviceSupabaseClient().auth.signInAnonymously();
 
     if (error || !data.user?.id) {
-      return { ok: false };
+      return { ok: false, failure: classifyDeviceFailure(error) };
     }
 
     return { ok: true, userId: data.user.id };
-  } catch {
-    return { ok: false };
+  } catch (thrown) {
+    return { ok: false, failure: classifyDeviceFailure(thrown) };
   }
 }
 
@@ -125,20 +131,31 @@ export async function resetDeviceSession(): Promise<void> {
 // Pairing
 // ---------------------------------------------------------------------------
 
+/**
+ * Feature 24.5A — the failure now carries WHY.
+ *
+ * The success shape is byte-for-byte what it always was. What changed is that a
+ * failure reports whether the request reached a server, because that is the
+ * only thing separating "the shop's internet is down" from "the server told
+ * this device no" — and only the first may open a cached POS.
+ *
+ * Nothing about the EXISTING behaviour depends on the new field: every caller
+ * that only checks `ok` behaves exactly as before.
+ */
 export async function fetchDevicePairingState(): Promise<
-  { ok: true; state: PairingStateResult } | { ok: false }
+  { ok: true; state: PairingStateResult } | { ok: false; failure: DeviceFailureKind }
 > {
   try {
     const { data, error } =
       await getDeviceSupabaseClient().rpc("get_device_pairing_state");
 
     if (error) {
-      return { ok: false };
+      return { ok: false, failure: classifyDeviceFailure(error) };
     }
 
     return { ok: true, state: parsePairingState(data) };
-  } catch {
-    return { ok: false };
+  } catch (thrown) {
+    return { ok: false, failure: classifyDeviceFailure(thrown) };
   }
 }
 
@@ -213,17 +230,35 @@ export async function redeemDevicePairingCode(input: {
 // Pinned configuration
 // ---------------------------------------------------------------------------
 
-export async function fetchDeviceConfig(): Promise<DeviceConfigResult> {
+/**
+ * Feature 24.5A — a transport failure is reported as such.
+ *
+ * `config_unavailable` previously covered both "the build is gone" and "there is
+ * no network", which are opposite situations: the first must send the operator
+ * to the re-pair screen, the second may open the cache. The reason values are
+ * unchanged; `failure` is additive and only set when the call itself failed.
+ */
+export async function fetchDeviceConfig(): Promise<
+  DeviceConfigResult & { failure?: DeviceFailureKind }
+> {
   try {
     const { data, error } = await getDeviceSupabaseClient().rpc("get_device_config");
 
     if (error) {
-      return { ok: false, reason: "config_unavailable" };
+      return {
+        ok: false,
+        reason: "config_unavailable",
+        failure: classifyDeviceFailure(error),
+      };
     }
 
     return parseDeviceConfig(data);
-  } catch {
-    return { ok: false, reason: "config_unavailable" };
+  } catch (thrown) {
+    return {
+      ok: false,
+      reason: "config_unavailable",
+      failure: classifyDeviceFailure(thrown),
+    };
   }
 }
 

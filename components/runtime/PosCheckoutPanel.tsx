@@ -56,6 +56,11 @@ type PosCheckoutPanelProps = {
   onSelectPaymentMethod: (method: PaymentMethod) => void;
   checkoutStatus: CheckoutStatus;
   onCompleteSale: () => void;
+  /**
+   * Feature 24.5A — non-null disables the pay action and explains why.
+   * The engine refuses the sale regardless; this is the operator-facing half.
+   */
+  checkoutBlockedReason?: string | null;
   saleSaveStatus: SaleSaveStatus;
   saleSaveError: string | null;
 
@@ -104,6 +109,7 @@ export default function PosCheckoutPanel({
   onSelectPaymentMethod,
   checkoutStatus,
   onCompleteSale,
+  checkoutBlockedReason = null,
   saleSaveStatus,
   saleSaveError,
   recentOrders,
@@ -465,10 +471,24 @@ export default function PosCheckoutPanel({
                   </p>
                 )}
 
+                {/* Feature 24.5A — stated where the decision is made, not as a
+                    banner elsewhere, so the operator reads it at the moment
+                    they reach for Complete Sale. Neutral rather than red: this
+                    is a limitation, not a failure, and nothing has gone wrong. */}
+                {checkoutBlockedReason !== null && (
+                  <p className="text-center text-xs text-neutral-600">
+                    {checkoutBlockedReason}
+                  </p>
+                )}
+
                 <button
                   type="button"
                   onClick={onCompleteSale}
-                  disabled={!selectedPaymentMethod || saleSaveStatus === "saving"}
+                  disabled={
+                    checkoutBlockedReason !== null ||
+                    !selectedPaymentMethod ||
+                    saleSaveStatus === "saving"
+                  }
                   className="w-full rounded-full bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {saleSaveStatus === "saving" ? "Saving..." : "Complete Sale"}

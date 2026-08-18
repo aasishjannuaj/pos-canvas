@@ -14,6 +14,11 @@
 // guarantee get_device_config provides by filtering `revoked_at is null` on
 // every call.
 import { isGeneratedPosConfig } from "@/lib/generatedPosConfig";
+import {
+  evaluateLease,
+  readPairingAssertion,
+  readPinnedConfig,
+} from "@/lib/deviceOfflineCache";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
 import type { MenuItem } from "@/lib/projectConfig";
 
@@ -30,6 +35,7 @@ export type DeviceStatus =
   | "ready"
   | "revoked"
   | "config_unavailable"
+  | "reconnect_required"
   | "error";
 
 /** Why the device cannot proceed. Never carries a raw database message. */
@@ -51,10 +57,55 @@ export type DeviceState =
   | { status: "unpaired"; notice: string | null }
   | { status: "redeeming" }
   | { status: "loading_config"; pairing: DevicePairing }
-  | { status: "ready"; pairing: DevicePairing; config: GeneratedPosConfig }
+  // Feature 24.5A — `offline` is OPTIONAL and absent for an online start, so
+  // every existing construction of this state is unchanged. Its presence is
+  // what makes the runtime read-only.
+  | {
+      status: "ready";
+      pairing: DevicePairing;
+      config: GeneratedPosConfig;
+      offline?: OfflineRuntimeInfo | null;
+    }
   | { status: "revoked"; pairing: DevicePairing }
   | { status: "config_unavailable"; pairing: DevicePairing | null }
+  // Feature 24.5A — the device is offline AND cannot use its cache: no cache,
+  // an expired 7-day lease, a corrupt record, or an identity that no longer
+  // matches. Deliberately NOT an "error": nothing is broken, the till simply
+  // needs the network before it can be trusted again.
+  | { status: "reconnect_required"; reason: OfflineBlockedReason }
   | { status: "error"; kind: DeviceErrorKind; message: string };
+
+// ---------------------------------------------------------------------------
+// Feature 24.5A — offline read-only mode
+// ---------------------------------------------------------------------------
+
+/**
+ * How the runtime is currently running.
+ *
+ * An EXPLICIT mode, never inferred from navigator.onLine: that property reports
+ * "online" behind a captive portal and on a machine with a live NIC and no
+ * route. The mode is set by which cold-start branch actually opened the POS.
+ */
+export type DeviceRuntimeMode = "online" | "offline_read_only";
+
+/** What the operator is told while running from cache. */
+export type OfflineRuntimeInfo = {
+  /** ISO — when the server last confirmed this device. */
+  lastVerifiedAt: string;
+  /** ISO — when the 7-day lease runs out. */
+  leaseExpiresAt: string;
+  /** Within the warning window, so the UI can say "reconnect soon". */
+  expiringSoon: boolean;
+};
+
+/** Why a cached start was refused. Every value means "require the network". */
+export type OfflineBlockedReason =
+  | "no_cache"
+  | "identity_mismatch"
+  | "lease_expired"
+  | "clock_invalid"
+  | "cache_corrupt"
+  | "storage_unavailable";
 
 export const DEVICE_ERROR_MESSAGES: Record<DeviceErrorKind, string> = {
   offline:
@@ -351,3 +402,137 @@ export function getDeviceDisplayName(pairing: DevicePairing): string {
 export function isDeviceOperational(state: DeviceState): boolean {
   return state.status === "ready";
 }
+
+
+// ---------------------------------------------------------------------------
+// Feature 24.5A — the cached cold-start decision
+// ---------------------------------------------------------------------------
+
+/**
+ * The single place that decides whether a cached POS may open.
+ *
+ * PURE AND EXHAUSTIVE ON PURPOSE. Storage I/O happens in the caller and its
+ * results are passed in as raw values, so every refusal path is reachable in a
+ * test under plain Node — including the ones that are almost impossible to
+ * produce on a real device (a tampered digest, a clock in the future, a record
+ * from another business).
+ *
+ * THIS FUNCTION IS ONLY EVER REACHED AFTER A TRANSPORT FAILURE. Classification
+ * lives in lib/deviceConnectivity.ts, and a server that answered — revoked,
+ * unpaired, unusable build — never gets here. That separation is what stops a
+ * revoked till from trading on cache.
+ *
+ * Every failure is the same outcome for the operator: reconnect required. The
+ * distinct reasons exist so the refusal can be explained and tested, not so
+ * some of them can be treated leniently.
+ */
+export async function decideOfflineFallback(input: {
+  now: number;
+  sessionUserId: string;
+  assertionRecord: unknown;
+  configRecord: unknown;
+  leaseMs?: number;
+}): Promise<
+  | {
+      ok: true;
+      pairing: DevicePairing;
+      config: GeneratedPosConfig;
+      offline: OfflineRuntimeInfo;
+    }
+  | { ok: false; reason: OfflineBlockedReason }
+> {
+  const assertion = readPairingAssertion(input.assertionRecord, input.sessionUserId);
+
+  if (!assertion.ok) {
+    if (assertion.reason === "identity_mismatch") {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+
+    // A record written by a newer envelope, or a malformed one, is corrupt for
+    // our purposes: unusable and not to be guessed at.
+    return {
+      ok: false,
+      reason: assertion.reason === "missing" ? "no_cache" : "cache_corrupt",
+    };
+  }
+
+  const lease = evaluateLease(
+    assertion.assertion.lastVerifiedAt,
+    input.now,
+    input.leaseMs
+  );
+
+  if (!lease.ok) {
+    if (lease.reason === "expired") {
+      return { ok: false, reason: "lease_expired" };
+    }
+
+    // "future", "unparseable" and "missing" all mean the recorded time cannot
+    // be reasoned about. Refuse rather than assume, so a wrong clock can never
+    // be used to extend a lease.
+    return { ok: false, reason: "clock_invalid" };
+  }
+
+  const config = await readPinnedConfig(input.configRecord, {
+    deviceAuthUserId: assertion.assertion.deviceAuthUserId,
+    projectId: assertion.assertion.projectId,
+    buildJobId: assertion.assertion.buildJobId,
+  });
+
+  if (!config.ok) {
+    if (config.reason === "missing") {
+      return { ok: false, reason: "no_cache" };
+    }
+
+    if (config.reason === "identity_mismatch") {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+
+    return { ok: false, reason: "cache_corrupt" };
+  }
+
+  return {
+    ok: true,
+    pairing: {
+      deviceId: assertion.assertion.deviceId,
+      projectId: assertion.assertion.projectId,
+      buildJobId: assertion.assertion.buildJobId,
+      deviceName: assertion.assertion.deviceName,
+      platform: assertion.assertion.platform,
+      // Not cached: neither is needed to run, and storing a stale revokedAt
+      // would invite treating it as an authorization answer. Offline
+      // authorization is the lease, and nothing else.
+      createdAt: null,
+      revokedAt: null,
+    },
+    config: config.record.configSnapshot,
+    offline: {
+      lastVerifiedAt: assertion.assertion.lastVerifiedAt,
+      leaseExpiresAt: new Date(lease.expiresAt).toISOString(),
+      expiringSoon: lease.expiringSoon,
+    },
+  };
+}
+
+/** The runtime mode a resolved state implies. Never guessed from the network. */
+export function getDeviceRuntimeMode(state: DeviceState): DeviceRuntimeMode {
+  return state.status === "ready" && state.offline
+    ? "offline_read_only"
+    : "online";
+}
+
+/** Copy for every refusal. One sentence of what, one of what to do. */
+export const OFFLINE_BLOCKED_MESSAGES: Record<OfflineBlockedReason, string> = {
+  no_cache:
+    "This till has not been set up for offline use yet. Connect to the internet once to finish setting it up.",
+  identity_mismatch:
+    "This till's saved setup does not match the device it is paired to. Connect to the internet to set it up again.",
+  lease_expired:
+    "This till has been offline for more than 7 days. Connect to the internet to confirm it is still active.",
+  clock_invalid:
+    "This device's date and time could not be confirmed. Check the clock, then connect to the internet.",
+  cache_corrupt:
+    "This till's saved setup could not be read. Connect to the internet to load it again.",
+  storage_unavailable:
+    "This till cannot save its setup on this device. Connect to the internet to keep using it.",
+};

@@ -30,13 +30,33 @@ import {
   decideConfigState,
   decidePairingState,
   getDeviceDisplayName,
+  getDeviceRuntimeMode,
+  OFFLINE_BLOCKED_MESSAGES,
   resolveDeviceIdentity,
   toDeviceDisplayConfig,
 } from "@/lib/deviceSession";
 import type { DeviceState } from "@/lib/deviceSession";
+import { permitsOfflineFallback } from "@/lib/deviceConnectivity";
+import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
+import {
+  clearOfflineCache,
+  loadOfflineFallback,
+  persistDeviceCache,
+} from "@/lib/deviceOfflineSession";
+import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
 import type { PosRuntimeCompleteSale } from "@/lib/posRuntimeHost";
+
+/**
+ * Feature 24.5A — why Complete Sale is unavailable while running from cache.
+ *
+ * Concise, non-technical, and honest about the shape of the limitation rather
+ * than the cause: the operator can neither fix the internet nor install 24.5C,
+ * so the message says what is true and what is coming.
+ */
+const OFFLINE_CHECKOUT_BLOCKED_MESSAGE =
+  "Internet connection required to complete sales. Offline sales will be added in a later update.";
 
 const RESET_NOTE =
   "Resetting only signs this device out. It does not remove the device from " +
@@ -49,6 +69,40 @@ export default function DeviceApp() {
   // Guards against a second resolve running while the first is in flight (e.g.
   // a retry tapped twice, or a rejected sale firing while a check is running).
   const resolving = useRef(false);
+
+  /**
+   * Feature 24.5A — attempt a cached, read-only start, or say why not.
+   *
+   * Refuses outright unless the failure was classified as transport. Every
+   * other outcome — including "unknown" — keeps the till on the network, per
+   * docs/OFFLINE_ARCHITECTURE.md §G: if uncertain, do not grant offline access.
+   */
+  const openOfflineOrFail = useCallback(
+    async (sessionUserId: string, failure: DeviceFailureKind | undefined) => {
+      if (failure === undefined || !permitsOfflineFallback(failure)) {
+        setState(createDeviceError("offline"));
+        return;
+      }
+
+      const fallback = await loadOfflineFallback({
+        now: Date.now(),
+        sessionUserId,
+      });
+
+      if (!fallback.ok) {
+        setState({ status: "reconnect_required", reason: fallback.reason });
+        return;
+      }
+
+      setState({
+        status: "ready",
+        pairing: fallback.pairing,
+        config: fallback.config,
+        offline: fallback.offline,
+      });
+    },
+    []
+  );
 
   /**
    * The cold-start / re-resolve path, in the approved order:
@@ -67,24 +121,36 @@ export default function DeviceApp() {
     try {
       setState({ status: "checking" });
 
-      let session = await getDeviceSession();
+      const existing = await getDeviceSession();
+      let session = existing;
 
       if (!session.ok) {
         setState({ status: "signing_in" });
         session = await signInDeviceAnonymously();
-
-        if (!session.ok) {
-          // Anonymous sign-in is the one step with no fallback: without it the
-          // device cannot call any RPC. Most often this is simply offline.
-          setState(createDeviceError("offline"));
-          return;
-        }
       }
+
+      if (!session.ok) {
+        // Feature 24.5A — no session means no RPC is even possible. If the
+        // sign-in failed for a TRANSPORT reason there may still be a usable
+        // cached session id from a previous run; there is not, because the
+        // session itself is what failed, so this stays the existing offline
+        // error. A device that has never signed in has nothing cached either.
+        setState(createDeviceError("offline"));
+        return;
+      }
+
+      const sessionUserId = session.userId;
 
       const pairingState = await fetchDevicePairingState();
 
       if (!pairingState.ok) {
-        setState(createDeviceError("offline"));
+        // Feature 24.5A — the ONE place a cached start becomes possible.
+        //
+        // `failure` is what makes this safe. A server that ANSWERED — revoked,
+        // unpaired, unauthorized — never reaches the fallback, because that
+        // answer is the authoritative one and ignoring it is exactly the bug
+        // this feature must not have. Only an unreachable server qualifies.
+        await openOfflineOrFail(sessionUserId, pairingState.failure);
         return;
       }
 
@@ -92,6 +158,13 @@ export default function DeviceApp() {
 
       // Anything other than "load the config now" is terminal for this pass.
       if (next.status !== "loading_config") {
+        // A confirmed revocation is a server answer, and the cache must not
+        // outlive it: clearing here is what stops the next launch from opening
+        // offline on a device the owner has withdrawn.
+        if (next.status === "revoked") {
+          void clearOfflineCache();
+        }
+
         setState(next);
         return;
       }
@@ -99,11 +172,37 @@ export default function DeviceApp() {
       setState(next);
 
       const configResult = await fetchDeviceConfig();
-      setState(decideConfigState(configResult, next.pairing));
+
+      // A transport failure here means the pairing check succeeded and the
+      // network dropped mid-start. The cache is still the right answer.
+      if (!configResult.ok && configResult.failure !== undefined) {
+        await openOfflineOrFail(sessionUserId, configResult.failure);
+        return;
+      }
+
+      const resolved = decideConfigState(configResult, next.pairing);
+
+      setState(resolved);
+
+      // Feature 24.5A — refresh the durable cache on EVERY authoritative start,
+      // so `lastVerifiedAt` tracks the last time the server actually vouched for
+      // this device and the snapshot follows an authoritative build change.
+      if (resolved.status === "ready") {
+        void persistDeviceCache({
+          deviceAuthUserId: sessionUserId,
+          pairing: resolved.pairing,
+          config: resolved.config,
+          verifiedAt: new Date().toISOString(),
+        });
+      }
+
+      if (resolved.status === "revoked") {
+        void clearOfflineCache();
+      }
     } finally {
       resolving.current = false;
     }
-  }, []);
+  }, [openOfflineOrFail]);
 
   useEffect(() => {
     void resolveDeviceState();
@@ -150,6 +249,11 @@ export default function DeviceApp() {
   }
 
   async function handleReset() {
+    // Feature 24.5A — the cached configuration belongs to the pairing being
+    // reset. Clearing it here is what guarantees Business A's menu cannot
+    // appear on this device after it is paired to Business B; the auth-user
+    // check in decideOfflineFallback is the second, independent barrier.
+    await clearOfflineCache();
     await resetDeviceSession();
     setPairingError(null);
     setState({ status: "unpaired", notice: null });
@@ -246,8 +350,28 @@ export default function DeviceApp() {
         />
       );
 
-    case "ready":
+    // Feature 24.5A — offline, and the cache cannot be used. Distinct from
+    // "error" because nothing is broken: the till needs the network before it
+    // can be trusted again, and Retry is the correct and only action.
+    case "reconnect_required":
       return (
+        <DeviceStatusScreen
+          title="Reconnect required"
+          message={OFFLINE_BLOCKED_MESSAGES[state.reason]}
+          onRetry={() => void resolveDeviceState()}
+          onReset={handleReset}
+          resetNote={RESET_NOTE}
+        />
+      );
+
+    case "ready": {
+      const offline = state.offline ?? null;
+
+      return (
+        <div className="flex h-full min-h-0 w-full flex-col">
+          {offline !== null && <DeviceOfflineBanner offline={offline} />}
+
+          <div className="min-h-0 flex-1">
         <PosRuntime
           // Stock tracking is stripped for display: the pinned snapshot's
           // stockQuantity is frozen at build time and is NOT live inventory.
@@ -264,7 +388,20 @@ export default function DeviceApp() {
           // storage grant a device does not already have.
           logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
           onSaleRejected={handleSaleRejected}
+          // Feature 24.5A — THE FENCE. Non-null only when this start came from
+          // cache, and PosRuntime refuses the sale before it reaches
+          // planSaleSubmission, so no sale RPC is called and no request id is
+          // minted offline. Browsing, the cart, modifiers and totals are
+          // untouched; only the money-writing action is closed.
+          checkoutBlockedReason={
+            getDeviceRuntimeMode(state) === "offline_read_only"
+              ? OFFLINE_CHECKOUT_BLOCKED_MESSAGE
+              : null
+          }
         />
+          </div>
+        </div>
       );
+    }
   }
 }
