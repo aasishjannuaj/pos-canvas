@@ -13,6 +13,14 @@
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+
+        <!-- 24.2 POLISH PASS — the brand ground, so the handover from the splash
+             is seamless. This window exists from the moment the splash exits
+             until the hosted runtime paints its first frame; at its default it
+             was a flash of theme white between two cream screens. It is
+             windowBackground (the window), not background (views), so the
+             WebView still paints over it normally once it has content. -->
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
     </style>
 
 
@@ -42,7 +50,23 @@
          no halo - the same reasoning recorded in values/ic_launcher_background.xml. -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <!-- 24.2 POLISH PASS — a DEDICATED splash mark, not the launcher icon.
+             @mipmap/ic_launcher is an adaptive icon: the platform scales its
+             108dp canvas up to the splash's 288dp canvas (2.67x), and that
+             canvas had itself been produced by downscaling the 376px master
+             into a 66dp safe zone. The result on a real phone was a 2.67x
+             upscale of an already-degraded image — roughly 34% of the pixels
+             it was being asked to draw — which is the blur the owner reported.
+             This drawable is cut from the same approved master in ONE resample,
+             at the 288dp/192dp geometry the platform actually renders. -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/pos_canvas_splash_icon</item>
+
+        <!-- Required by androidx SplashScreen.installSplashScreen(), which
+             MainActivity now calls so the brand stays visible long enough to
+             register. Without it androidx has no theme to hand off to and logs
+             a warning; Capacitor's own setTheme() then runs and reaches the
+             same place, but relying on that would be relying on an accident. -->
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
 
         <!-- Retained from the Capacitor template. The parent theme sets its own
              android:windowBackground, so this never paints the cold-start

@@ -50,6 +50,44 @@ for d in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
     -compose CopyOpacity -composite -depth 8 -define png:compression-level=9 -strip "$RES/mipmap-$DPI/ic_launcher_round.png"
 done
 
+# --- Android 12+ system splash icon (24.2 polish pass)
+#
+# WHY A DEDICATED ASSET RATHER THAN @mipmap/ic_launcher, which is what the launch
+# theme pointed at until now: the launcher icon's adaptive foreground is produced
+# by DOWNSCALING the 376px master into a 66dp safe zone — 198px at xxhdpi — and
+# the platform then scales that up to the splash icon size. On this 420dpi
+# emulator the mark is drawn at 504px, so it was a 2.5x upscale of an image that
+# had already thrown most of its detail away. That double resampling is the blur
+# the owner reported.
+#
+# WHY IT IS STILL AN ADAPTIVE ICON. Verified on a real API 36 device, not
+# assumed: a plain PNG in windowSplashScreenAnimatedIcon renders as NOTHING —
+# the cream background appears and the mark never does, with no error in logcat.
+# Bisecting against @mipmap/ic_launcher showed the adaptive-icon path is what
+# the platform actually draws. So the fix keeps that path and changes only what
+# feeds it: the same approved master, resampled ONCE, at a resolution high
+# enough that the platform DOWNSCALES to reach the screen instead of upscaling.
+#
+# GEOMETRY is the adaptive contract: a 108dp canvas whose visible content sits
+# in the centred 66dp safe zone. 972 = 9x108, so the mark lands on 594px, which
+# is comfortably above the ~504px the platform asks for at 420dpi and above the
+# 576px a 3x device asks for. nodpi because an adaptive icon scales its layers
+# to its own bounds; a density ladder would add four more files that the
+# platform resamples anyway.
+mkdir -p "$RES/drawable-nodpi" "$RES/drawable-anydpi-v26"
+magick -size 972x972 xc:none \
+  \( "$MARK" -filter Lanczos -resize 594x594 \) \
+  -gravity center -compose over -composite \
+  -depth 8 -define png:compression-level=9 -strip "$RES/drawable-nodpi/pos_canvas_splash_foreground.png"
+
+# The API 24-25 fallback: the same mark already composited on the brand ground,
+# because those releases have no adaptive-icon support and androidx's compat
+# splash draws whatever it is given.
+magick -size 972x972 xc:"$CREAM" \
+  \( "$MARK" -filter Lanczos -resize 594x594 \) \
+  -gravity center -compose over -composite \
+  -depth 8 -define png:compression-level=9 -strip "$RES/drawable-nodpi/pos_canvas_splash_icon.png"
+
 # --- splash: light ground, centred mark above the wordmark, never stretched
 splash() {
   OUT="$1"; W="$2"; H="$3"

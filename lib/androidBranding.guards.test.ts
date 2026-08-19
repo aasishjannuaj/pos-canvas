@@ -25,6 +25,21 @@ function read(relativePath: string): string {
   return readFileSync(join(repoRoot, relativePath), "utf-8");
 }
 
+/**
+ * Strips comments so explanatory prose never trips a guard.
+ *
+ * Needed because MainActivity DOCUMENTS the things it must not do — "not
+ * System.currentTimeMillis()", "nothing sleeps" — and a raw text search finds
+ * the explanation as readily as a violation. The same convention the Windows
+ * shell guards use.
+ */
+function code(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
 function exists(relativePath: string): boolean {
   return existsSync(join(repoRoot, relativePath));
 }
@@ -209,8 +224,140 @@ describe("every splash density is present and correctly sized", () => {
       '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
     );
     expect(styles).toContain(
-      '<item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>'
+      '<item name="windowSplashScreenAnimatedIcon">@drawable/pos_canvas_splash_icon</item>'
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // 24.2 polish pass — sharpness and brand visibility
+  //
+  // Owner feedback from a real phone: the startup mark looked blurry and
+  // vanished too fast to register. Both causes are structural and neither is
+  // visible in a diff, which is why they are pinned here.
+  // -------------------------------------------------------------------------
+
+  it("the splash icon is NOT the launcher icon", () => {
+    // THE BLUR. @mipmap/ic_launcher's adaptive foreground is the 376px master
+    // downscaled into a 66dp safe zone — 198px at xxhdpi — which the platform
+    // then upscaled to ~504px on a 420dpi screen. A 2.5x upscale of an already
+    // degraded image. Pointing the splash back at the launcher icon would
+    // silently reintroduce exactly that.
+    const styles = read(`${RES}/values/styles.xml`);
+    const launchTheme = styles.slice(styles.indexOf("AppTheme.NoActionBarLaunch"));
+
+    expect(code(launchTheme)).not.toContain('windowSplashScreenAnimatedIcon">@mipmap/');
+    expect(styles).toContain(
+      '<item name="windowSplashScreenAnimatedIcon">@drawable/pos_canvas_splash_icon</item>'
+    );
+  });
+
+  it("the dedicated splash icon exists as an adaptive icon with a high-res foreground", () => {
+    // VERIFIED ON A REAL API 36 DEVICE, not assumed: a plain PNG in
+    // windowSplashScreenAnimatedIcon renders as NOTHING — cream background, no
+    // mark, no error in logcat. The adaptive path is what the platform draws,
+    // so this must stay an adaptive-icon XML.
+    const xml = read(`${RES}/drawable-anydpi-v26/pos_canvas_splash_icon.xml`);
+
+    expect(xml).toContain("<adaptive-icon");
+    expect(xml).toContain('<background android:drawable="@color/ic_launcher_background"/>');
+    expect(xml).toContain('<foreground android:drawable="@drawable/pos_canvas_splash_foreground"/>');
+
+    // The API 24-25 fallback, where adaptive icons do not exist.
+    expect(exists(`${RES}/drawable-nodpi/pos_canvas_splash_icon.png`)).toBe(true);
+  });
+
+  it("the splash foreground is high enough resolution to be DOWNSCALED on screen", () => {
+    // The whole point of the fix. The platform asks for roughly 504px of mark
+    // on a 420dpi phone and 576px on a 3x one; a source below that is an
+    // upscale, which is the blur coming back.
+    const path = `${RES}/drawable-nodpi/pos_canvas_splash_foreground.png`;
+
+    expect(exists(path)).toBe(true);
+    expect(pngSize(path)).toEqual({ width: 972, height: 972 });
+
+    // 972 x 66/108 = 594px of actual mark inside the adaptive safe zone.
+    expect(bytes(path)).toBeGreaterThan(50_000);
+  });
+
+  it("the launcher icon chain is untouched by the splash fix", () => {
+    // The approved launcher artwork must not move because the SPLASH needed
+    // sharpening. Separate resources, separate concerns.
+    const launcher = read(`${RES}/mipmap-anydpi-v26/ic_launcher.xml`);
+
+    expect(launcher).toContain('<foreground android:drawable="@mipmap/ic_launcher_foreground"/>');
+    expect(launcher).toContain('<monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>');
+    expect(launcher).not.toContain("pos_canvas_splash");
+
+    for (const density of DENSITIES) {
+      expect(exists(`${RES}/mipmap-${density}/ic_launcher.png`)).toBe(true);
+      expect(exists(`${RES}/mipmap-${density}/ic_launcher_foreground.png`)).toBe(true);
+      expect(exists(`${RES}/mipmap-${density}/ic_launcher_monochrome.png`)).toBe(true);
+    }
+  });
+
+  it("the brand stays on screen long enough to register, without blocking", () => {
+    // THE SECOND COMPLAINT. On a fast device the splash was dismissed the
+    // instant the first frame was ready.
+    const main = code(read("android/app/src/main/java/com/poscanvas/app/MainActivity.java"));
+
+    expect(main).toContain("SplashScreen.installSplashScreen(this)");
+    expect(main).toContain("setKeepOnScreenCondition");
+
+    const declared = main.match(/MINIMUM_BRAND_VISIBLE_MS\s*=\s*(\d+)L/);
+
+    expect(declared).not.toBeNull();
+
+    const ms = Number(declared?.[1]);
+
+    expect(ms).toBeGreaterThanOrEqual(1200);
+    expect(ms).toBeLessThanOrEqual(1500);
+  });
+
+  it("nothing sleeps, blocks, or fakes progress on the startup path", () => {
+    // A minimum display time implemented by sleeping would freeze the UI thread
+    // and stall the WebView load it is supposed to overlap.
+    const main = code(read("android/app/src/main/java/com/poscanvas/app/MainActivity.java"));
+
+    for (const banned of [
+      "Thread.sleep",
+      "SystemClock.sleep",
+      "await(",
+      "Handler(",
+      "postDelayed",
+      "setProgress",
+      "ProgressBar",
+      "%",
+    ]) {
+      expect(`MainActivity: ${banned}`).toBe(`MainActivity: ${banned}`);
+      expect(main).not.toContain(banned);
+    }
+
+    // Monotonic time: a wall clock can jump backwards and strand the splash.
+    expect(main).toContain("SystemClock.uptimeMillis()");
+    expect(main).not.toContain("System.currentTimeMillis()");
+  });
+
+  it("the handover from splash to runtime stays on the brand ground", () => {
+    // Measured on device: at the WebView's default the sequence was
+    // cream splash -> WHITE -> POS. Both halves of the fix are asserted, since
+    // either alone leaves the flash.
+    expect(read(`${RES}/values/styles.xml`)).toContain(
+      '<item name="android:windowBackground">@color/ic_launcher_background</item>'
+    );
+    expect(read("capacitor.config.ts")).toContain('backgroundColor: "#FBF8F3"');
+  });
+
+  it("the splash carries no customer or project identity", () => {
+    for (const file of [
+      `${RES}/values/styles.xml`,
+      `${RES}/drawable-anydpi-v26/pos_canvas_splash_icon.xml`,
+    ]) {
+      const source = read(file);
+
+      expect(`${file}`).toBe(file);
+      expect(source).not.toContain("project-logos");
+      expect(source).not.toContain("businessName");
+    }
   });
 
   it("the splash background is the same ground as the icon, so the mark has no halo", () => {

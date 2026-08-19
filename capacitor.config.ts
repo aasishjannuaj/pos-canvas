@@ -73,6 +73,20 @@ const config: CapacitorConfig = {
   },
 
   android: {
+    // 24.2 POLISH PASS — the brand ground, behind the WebView.
+    //
+    // MEASURED, not guessed: with the WebView at its default the startup
+    // sequence went cream splash -> WHITE -> POS, because the WebView paints
+    // its own background from the moment it is attached until the hosted page
+    // has something to draw. On a slow connection that white gap is the
+    // longest thing an operator sees, and it undoes the splash it follows.
+    // Setting it to the approved ground makes the whole startup one colour.
+    //
+    // This is Android-scoped by construction (CapacitorConfig.android), and it
+    // is a BACKGROUND only: the hosted page paints over it normally the instant
+    // it renders, so nothing about the runtime's own appearance changes.
+    backgroundColor: "#FBF8F3",
+
     // Feature 16.2 — keeps the WebView's own scroll/bounce behavior
     // predictable inside the app shell. No kiosk mode, no lock task mode,
     // and no irreversible hiding of system navigation: this is a normal,
