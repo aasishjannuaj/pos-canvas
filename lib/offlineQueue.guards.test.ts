@@ -177,30 +177,44 @@ describe("24.5C stores intents and submits nothing", () => {
     }
   });
 
-  it("NOTHING in the app calls enqueueSale yet", () => {
-    // The single most important fence in this feature. 24.5E wires checkout.
+  it("enqueueSale is reachable from exactly ONE module", () => {
+    // SUPERSEDED IN PART BY 24.5E. This used to assert that nothing anywhere
+    // called enqueueSale, which was the right fence while offline checkout was
+    // closed. 24.5E opened it, so the property that matters now is narrower and
+    // stricter: exactly one module writes a sale to the queue, and it is not a
+    // React component.
     const callers = productSourceFiles()
       .filter((file) => file !== SESSION)
       .filter((file) => code(read(file)).includes("enqueueSale"));
 
-    expect(callers).toEqual([]);
+    expect(callers).toEqual(["lib/offlineCheckoutSession.ts"]);
+
+    // The UI asks a library to persist a sale; it never persists one itself.
+    for (const file of [RUNTIME, DEVICE_APP]) {
+      expect(`${file}: enqueueSale`).toBe(`${file}: enqueueSale`);
+      expect(code(read(file))).not.toContain("enqueueSale");
+    }
   });
 
-  it("offline checkout remains fenced exactly as 24.5A left it", () => {
+  it("the checkout fence is still the first statement, and still returns", () => {
+    // 24.5E CHANGED WHO SETS THE REASON, NOT WHERE IT IS CHECKED. The block is
+    // still evaluated before anything that could submit or persist, and an
+    // ineligible offline device still lands on it.
     const runtime = code(read(RUNTIME));
     const fence = runtime.indexOf("if (checkoutBlockedReason !== null)");
     const plan = runtime.indexOf("planSaleSubmission({");
     const submit = runtime.indexOf("await submitSale({");
+    const queue = runtime.indexOf("await queueOfflineSale({");
 
     expect(fence).toBeGreaterThan(-1);
     expect(plan).toBeGreaterThan(fence);
     expect(submit).toBeGreaterThan(fence);
+    expect(queue).toBeGreaterThan(fence);
 
     const app = code(read(DEVICE_APP));
 
-    expect(app).toContain('getDeviceRuntimeMode(state) === "offline_read_only"');
-    expect(app).toContain("OFFLINE_CHECKOUT_BLOCKED_MESSAGE");
-    expect(app).not.toContain("enqueueSale");
+    expect(app).toContain('getDeviceRuntimeMode(state) === "offline"');
+    expect(app).toContain("describeOfflineCheckoutBlock(");
   });
 
   it("online checkout still calls complete_sale_v3, never v4", () => {
@@ -230,11 +244,13 @@ describe("24.5C stores intents and submits nothing", () => {
     }
   });
 
-  it("no provisional receipt or owner queue UI was built", () => {
+  it("the OWNER-facing queue console is still deferred", () => {
+    // NARROWED BY 24.5E. lib/provisionalReceipt.ts is the approved receipt
+    // model and now exists; what has NOT been built — and is explicitly not in
+    // this phase — is the owner's per-device sync panel and any 24.6 work.
     for (const premature of [
-      "components/device/OfflineReceipt.tsx",
-      "components/device/DeviceQueueStatus.tsx",
-      "lib/provisionalReceipt.ts",
+      "components/devices/DeviceQueueStatus.tsx",
+      "components/dashboard/DeviceSyncPanel.tsx",
       "lib/publishProgress.ts",
     ]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);

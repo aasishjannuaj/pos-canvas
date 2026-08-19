@@ -85,8 +85,16 @@ export type DeviceState =
  * An EXPLICIT mode, never inferred from navigator.onLine: that property reports
  * "online" behind a captive portal and on a machine with a live NIC and no
  * route. The mode is set by which cold-start branch actually opened the POS.
+ *
+ * RENAMED IN 24.5E, from "offline_read_only". The value had always meant "this
+ * session opened from the cache rather than from the server", but its name also
+ * asserted what such a session was allowed to DO — and 24.5E changed that: a
+ * cached session with a valid lease may now complete sales into the durable
+ * queue. A constant that says read-only while sales are being taken is the kind
+ * of drift that misleads the next reader, so the name now describes the fact it
+ * has always described and nothing more.
  */
-export type DeviceRuntimeMode = "online" | "offline_read_only";
+export type DeviceRuntimeMode = "online" | "offline";
 
 /** What the operator is told while running from cache. */
 export type OfflineRuntimeInfo = {
@@ -516,9 +524,7 @@ export async function decideOfflineFallback(input: {
 
 /** The runtime mode a resolved state implies. Never guessed from the network. */
 export function getDeviceRuntimeMode(state: DeviceState): DeviceRuntimeMode {
-  return state.status === "ready" && state.offline
-    ? "offline_read_only"
-    : "online";
+  return state.status === "ready" && state.offline ? "offline" : "online";
 }
 
 /** Copy for every refusal. One sentence of what, one of what to do. */

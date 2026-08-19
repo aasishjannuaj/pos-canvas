@@ -8,19 +8,340 @@
 | **24.5B** | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **IMPLEMENTED** |
 | **24.5C** | Durable sale queue + persisted idempotency key, IndexedDB v2 | **IMPLEMENTED** |
 | **24.5D** | Sync engine — FIFO drain, single-flight, persisted backoff | **IMPLEMENTED** |
-| 24.5E | Offline checkout, provisional receipts, inventory reporting, owner Devices UI | **NOT IMPLEMENTED** |
+| **24.5E** | Offline checkout, provisional receipts, startup/reconnect sync wiring, reconciliation, unpair block, cashier status | **IMPLEMENTED** (owner Devices UI deferred) |
 | 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
 
-**The server is ready; no client uses it.** 24.5B added `complete_sale_v4` and
-its schema, and deliberately wired nothing onto it — the device still calls
-`complete_sale_v3`. Server readiness precedes client adoption so the contract can
-be reviewed and deployed on its own.
+**A paired till with a valid cache can now complete a sale offline.** 24.5E
+opened the fence 24.5A put up. What changed is narrow and stated exactly in
+§24.5E below: the sale is validated locally, written to the durable queue, and
+handed to the customer as a provisional receipt. Nothing about pricing authority
+moved — the server still prices every sale from the pinned build snapshot when
+it syncs, and the client still sends no amount.
 
-**No sale can be completed offline today.** 24.5A lets a paired till reopen and
-browse its pinned menu during an outage; the Complete Sale action is fenced off
-in `PosRuntime.completeSale` before anything can submit, and no sale, queue,
-receipt or idempotency key is written to disk. Everything below §20 that
-describes queued sales is still design, not behaviour.
+**Online checkout is unchanged.** An online device sale still goes to
+`complete_sale_v3` and still returns the server's authoritative receipt.
+`complete_sale_v4` remains reachable from exactly one adapter,
+`lib/offlineSaleRpc.ts`, called only by the sync engine — never from checkout.
+
+**Still deferred to a later phase:** the owner-facing per-device sync panel
+(§17), any remediation console for `needs_attention`, and an explicit "discard N
+unsynced sales" confirmation. See §24.5E's *What 24.5E deliberately did not do*.
+
+### What 24.5E actually shipped
+
+| Concern | Module |
+|---|---|
+| Eligibility, sale identity, enqueue payload (pure) | `lib/offlineCheckout.ts` |
+| Storage glue: validate, persist, reconstruct, count | `lib/offlineCheckoutSession.ts` |
+| Provisional receipt + reconciliation model (pure) | `lib/provisionalReceipt.ts` |
+| Cashier counts + reset safety (pure) | `lib/offlineSaleStatus.ts` |
+| The printed/on-screen offline receipt | `components/runtime/OfflineReceipt.tsx` |
+| Cashier status strip + "Sync now" | `components/device/DeviceSyncStatus.tsx` |
+| Checkout branch, receipt display, print | `components/runtime/PosRuntime.tsx` |
+| Wiring: eligibility, sale handler, sync lifecycle, reset block | `components/device/DeviceApp.tsx` |
+
+#### Offline checkout eligibility
+
+Offline checkout is permitted only on an **explicit positive answer**. An
+undecided device is not an eligible one: while the check is still running the
+till shows `OFFLINE_CHECKOUT_PREPARING_MESSAGE` and cannot complete a sale.
+
+`decideOfflineCheckoutSession` (pure) requires **all** of:
+
+1. the runtime is in offline mode — `getDeviceRuntimeMode(state) === "offline"`,
+   which is set by the cold-start branch that actually opened the POS and is
+   never inferred from `navigator.onLine`;
+2. no locally known revocation (`pairing.revokedAt === null`);
+3. a cached pairing assertion that parses and belongs to **this** anonymous auth
+   user;
+4. a valid 7-day lease, evaluated against the current clock, refusing a
+   `lastVerifiedAt` in the future;
+5. a cached pinned configuration that parses under the same validator a fresh
+   server response must clear;
+6. its SHA-256 integrity digest **recomputed** and matching;
+7. the cached project / build / auth-user identity matching, **and** the cached
+   device / project / build matching the pairing the app is actually running;
+8. the durable IndexedDB queue openable and listable.
+
+Checks 3–6 are `decideOfflineFallback`, reused unchanged: **the bar for selling
+from a cache is never lower than the bar for opening from one**, and sharing the
+function is the only way to guarantee that. Check 7's second half is the one
+thing a cached *start* cannot do, because at start there is no running pairing
+to compare against.
+
+`decideOfflineSaleEligibility` then checks the sale itself: the lease **again**
+(a till can sit open past midnight on the seventh day), a non-empty cart, and a
+payment method of `cash` or `card`.
+
+Every failure produces one of `OFFLINE_CHECKOUT_BLOCKED_MESSAGES`, so no refusal
+can reach an operator unexplained. **There is no silent fallback to an in-memory
+sale anywhere on this path.**
+
+**Local stock is deliberately not a condition.** An offline sale is never
+refused because the cached snapshot looks short — §9's approved rule. The server
+floors tracked stock at zero and records the shortfall at sync.
+
+#### The durable-success-before-UI-success rule
+
+```
+cashier confirms
+  → re-validate the offline session FROM DISK   (integrity recomputed, lease re-checked)
+  → check this sale                             (cart, payment method, lease)
+  → mint ONE saleRequestId + ONE occurredAt     (frozen in a draft)
+  → await enqueueSale                           (an IndexedDB transaction)
+  → ONLY THEN: clear cart, show success, show receipt
+```
+
+`PosRuntime.completeSale` awaits the host's `queueOfflineSale` and returns early
+on failure — the cart survives, no success is displayed, and no receipt is
+produced. `lib/offlineCheckout.guards.test.ts` asserts this ordering
+structurally, and the guard was verified to fail when the clear is moved ahead
+of the check.
+
+**A failed write is loud and blocking** (§18 case 15): the operator is told the
+sale did not complete and that the items are still in the cart, *before* they
+hand anything over.
+
+**A duplicate is a success only when it is the SAME sale.** The unique index on
+`saleRequestId` refuses a second record claiming one sale. Usually that means a
+previous attempt committed and its answer was lost, and returning the stored
+record is the truthful answer — reporting failure there is how one sale becomes
+two.
+
+But "something already holds this id" and "this sale is already saved" are
+different statements, and only the second justifies telling a cashier the sale
+is done. `isEquivalentOfflineSale` therefore compares the stored record against
+the attempted one field by field before that claim is made:
+`saleRequestId`, `queueRecordId`, `deviceAuthUserId`, `deviceId`, `projectId`,
+`buildJobId`, `paymentMethod`, `tipAmount`, `source`, `occurredAt`, and the
+items **canonically** — option ids sorted within a group, groups within a line,
+lines within the order, matching the shape the server hashes.
+
+A non-equivalent record is a **hard local conflict**: `conflicting_local_record`,
+a distinct operator message asking for the till to be checked, the cart left
+intact, no receipt, and both records left on disk. Retrying cannot resolve it —
+the same key would collide again — and `complete_sale_v4` would reject whichever
+request reached it second as a hash conflict.
+
+#### `sale_request_id` and `occurred_at`
+
+Both are minted **once**, together, in `resolveOfflineSaleDraft`, before
+anything is written, and neither ever changes. `occurredAt` is taken from the
+clock reading captured when the handler was entered — the moment the cashier
+confirmed — not when validation finished and not when the transaction committed.
+
+A retry of the **same cart within the same attempt** resolves to the same draft,
+because the draft is keyed on `createSaleFingerprint` — the same fingerprint the
+online path uses, covering `projectId | paymentMethod | tipAmount |
+sorted(lineKey=quantity)`, which is exactly what `complete_sale_v4` hashes. A
+changed payment method, quantity, item or modifier selection is a materially
+different request and mints a new identity; a cosmetic reordering does not.
+
+**The draft is scoped to ONE checkout attempt, in both directions.** This is the
+distinction that matters, and it needs two rules, not one:
+
+| Event | Draft |
+|---|---|
+| enqueue fails | **kept** — a retry must be one sale, not two |
+| enqueue succeeds durably | **consumed** — the next sale mints its own |
+| checkout closes (cancelled, or done) | **discarded** — the attempt is over |
+
+Without the third rule, a cashier who failed to save a sale, cancelled, and
+later rang up a cart that happened to hash identically would inherit the
+abandoned sale's identity — recording a new customer's money at an old
+customer's `occurred_at`. The runtime knows when an attempt ends and the host
+does not, so `PosRuntime.closeCheckout` calls the host's
+`discardOfflineSaleDraft`. **A cart fingerprint identifies a retry candidate; it
+is never a permanent identity for every future identical sale.**
+
+A separate `queueRecordId` is minted alongside, so this device's local handle on
+a row stays distinct from the server's identity for the sale.
+
+#### Provisional receipt
+
+Owner-approved wording (§8, §22 decision 6), reproduced exactly in
+`lib/provisionalReceipt.ts` and imported by the component rather than retyped:
+
+```
+OFFLINE RECEIPT
+Ref: OFF-7Q4K-2XN9
+
+... business name, items, modifiers, quantities, subtotal, tax, total,
+    payment method, sale time ...
+
+This sale is saved on this device
+and will sync when internet is restored.
+A final receipt number will be created after sync.
+```
+
+`ProvisionalReceipt` carries **no server field at all** — not even a nullable
+`orderNumber`, because a nullable server field is the shape that eventually gets
+filled in with something invented. The server identity lives only in
+`SaleReconciliation`.
+
+**Printing reuses the existing mechanism.** The same `.receipt-print-area`
+region and the same Print Receipt button; no second printing stack. The printed
+document carries the banner and no order number.
+
+#### Offline reference
+
+`toOfflineReference(saleRequestId)` folds the whole request id to 40 bits and
+renders eight Crockford Base32 characters as `OFF-XXXX-XXXX`.
+
+- **Derived, not generated** — a pure function of a value already persisted, so
+  there is no second identifier to keep in step and nothing extra to store.
+- **Stable across restart** by construction: same id in, same reference out.
+- **Visibly not an order number.** `OFF-` prefixed, and not the
+  prefix-plus-digits shape a real one has.
+- **Folded rather than truncated**, so it does not assume where the entropy in
+  an id happens to sit.
+- Not a security token: a short digest of a random id, used to look a sale up on
+  the device that already holds it. Nothing keys on it.
+
+#### Receipt arithmetic — the concrete audit
+
+For a line of **quantity 2** of a 6.49 item with **+1.50** and **+0.75**
+modifiers, under the config's **6.35%** added tax:
+
+| Displayed | Value |
+|---|---|
+| unit price | `8.74` = 6.49 + 1.50 + 0.75 |
+| line total | `17.48` = 8.74 × 2 |
+| subtotal | `17.48` |
+| tax | `1.11` |
+| total | `18.59` |
+
+The `+1.50` / `+0.75` rows rendered under the line are a **per-unit breakdown**,
+not addends — the line total above them already contains them, exactly as
+`AuthoritativeReceipt` renders the server's own snapshot. Tests pin that the
+subtotal equals the line total alone (not 19.73, and not 21.98), that the line
+total equals unit × quantity, and that every figure equals what
+`calculateCartSummary` returns for the same cart — the check that would catch the
+receipt ever growing its own arithmetic.
+
+#### Pricing and tax source
+
+Provisional totals come from the **cached pinned `GeneratedPosConfig`**, through
+the existing POS arithmetic — `createCartItem` for a line's unit price,
+`buildModifierSnapshot` for the modifier names and adjustments, and
+`calculateCartSummary` for subtotal, tax and total. There is no second pricing
+implementation, and nothing in `lib/provisionalReceipt.ts` computes tax itself.
+
+**The server remains the pricing authority.** `complete_sale_v4` prices from the
+same immutable build snapshot at sync, and the client still sends no amount
+(§7). The displayed totals are what the customer was shown, not an input.
+
+#### Restart / reconstruction
+
+The receipt is built from **(durable record + pinned config)** — never from the
+cart, and never from React state. That pair is exactly what a restarted app has,
+so `reconstructProvisionalReceipt` produces a byte-identical receipt after a
+process kill, carrying the same reference and the same `occurredAt`.
+
+The cart is never written to storage, so a completed queued sale can never
+resurrect as a cart on the next launch.
+
+#### Startup sync wiring
+
+`triggerStartupSaleSyncOnce()` is called from **exactly one place**: an effect in
+`DeviceApp`, gated on the anonymous session existing. It is gated on the session
+rather than on mount because the drain submits under the device's own paired
+session — starting it earlier would turn a queue of good sales into a queue of
+authentication failures.
+
+The latch lives at **module scope in the engine**, not in the component: React
+can mount a component twice (StrictMode, an error boundary, a route change), and
+a second "startup" would un-claim a submission still on the wire.
+
+It is **keyed on the device auth session, not a bare boolean** — "once per
+logical device session", not "once per JS process". A process can outlive a
+pairing: unpair and re-pair happen without a reload, and the new pairing is a
+new anonymous auth user with its own queue lifetime. Under a process-wide
+boolean that second session would silently never receive its startup pass. The
+effect keys on the same value, so every rerender, remount and StrictMode
+double-invoke within one session presents an identical key and collapses to one
+run, while a genuinely new session correctly gets its own.
+
+Startup is the only trigger that runs `recoverInterruptedSyncs`; a reconnect or
+a manual press drains without reclaiming.
+
+#### Reconnect wiring
+
+One `subscribeToReconnect` call, in one effect, whose teardown is the returned
+unsubscribe. Repeated `online` events are absorbed by the engine's single-flight
+— five events produce one drain and one shared report.
+
+The `online` event is a **hint**. Nothing about correctness rests on it: offline
+checkout is gated on the validated cache and the lease, never on
+`navigator.onLine`, and every submission still has to succeed on its own.
+
+#### Reconciliation
+
+On success `markSynced` writes the state change and the server identity
+together, so a record can never be `synced` without the order number that proves
+it. `reconcileQueuedSale` then exposes:
+
+| Provisional | Final, after sync |
+|---|---|
+| `offlineReference` | `serverOrderId` |
+| `occurredAt` | `serverOrderNumber` |
+| provisional totals | `serverCreatedAt` |
+| `state: pending` | `state: synced` |
+
+`describeSyncedAs` renders **"Synced as ORD1042"**, and returns `null` when
+there is nothing truthful to say.
+
+- **`occurred_at` is never overwritten with the server's `created_at`.** Both
+  are kept side by side (§6.1): one answers "when did the customer pay", the
+  other "when did this enter the books".
+- **`synced` is derived from the STATE**, not from the presence of an order
+  number, so a `needs_attention` sale can never present itself as recorded.
+- **A synced record is not deleted.** The reference-to-order mapping has to
+  exist somewhere for the operator holding a paper slip.
+
+#### Unpair / reset block
+
+`handleReset` reads the queue and calls `decideDeviceResetSafety` **before**
+anything is cleared or signed out, and returns on refusal — a reset that got
+halfway would be the same data loss it exists to prevent. The refusal names the
+count, per §15.
+
+Blocked by: `pending`, `syncing`, `needs_attention`, `permanent_failure`, and
+any record that no longer parses. **Not** blocked by synced records alone: those
+are a copy rather than the only copy, and they carry their reconciliation data.
+
+The storage layer backs this independently: `clearOfflineCache` clears the
+config store only, and there is no bulk delete of the sale queue anywhere in the
+repository. The one delete that exists refuses any record that is not `synced`.
+
+#### `needs_attention` — cashier status
+
+`DeviceSyncStatus` renders at most two lines, and nothing at all when the queue
+is empty:
+
+```
+3 sales waiting to sync     ·     1 sale needs attention     [Sync now]
+```
+
+Counts, never percentages. No database vocabulary — no "queue", "record",
+"state" or error code reaches an operator. A record that failed to parse counts
+as needing attention rather than disappearing. "Sync now" is offered only while
+the device believes it is online; during an outage it is hidden, because a
+button that visibly does nothing teaches operators to distrust the UI.
+
+#### What 24.5E deliberately did not do
+
+- **No database change.** No migration was added or edited; the 17 existing
+  migrations are untouched.
+- **No owner-facing UI.** The per-device sync column in the owner's Devices
+  panel (§17, decision 7) is not built.
+- **No remediation console.** A `needs_attention` sale is surfaced as a count,
+  not as a per-sale screen with retry.
+- **No "discard N unsynced sales" path.** Reset only ever refuses.
+- **No change to online checkout**, to `complete_sale_v3`, or to the online
+  `sale_request_id` semantics.
+
+---
 
 ### What 24.5D actually shipped
 
@@ -115,10 +436,15 @@ those fall through to `needs_attention`, which is the safe direction. A stable
 server error-code contract would replace that table entirely and is the right
 fix when one exists.
 
-**Nothing runs it yet.** No caller invokes `runSaleSync`, nothing calls
-`enqueueSale`, offline checkout is still fenced, and online checkout still calls
-`complete_sale_v3`. The startup / reconnect / manual hooks are exported for
-24.5E to attach.
+**Nothing ran it yet — as of 24.5D.** No caller invoked `runSaleSync`, nothing
+called `enqueueSale`, and offline checkout was still fenced. The startup /
+reconnect / manual hooks were exported for 24.5E to attach.
+
+> **Superseded by 24.5E**, which attached them: one latched startup trigger and
+> one reconnect subscription in `DeviceApp`, and one enqueue caller in
+> `lib/offlineCheckoutSession.ts`. Online checkout still calls
+> `complete_sale_v3`, and `complete_sale_v4` is still reachable only from
+> `lib/offlineSaleRpc.ts`.
 
 ### What 24.5C actually shipped
 
@@ -181,9 +507,12 @@ is reported by `listQueuedSales` as `quarantined` and left on disk. It is money
 someone took; the honest response is "there is a row here I cannot understand",
 which 24.5D turns into a `needs_attention` item.
 
-**Nothing submits.** No client calls `enqueueSale`, offline checkout is still
-fenced in `PosRuntime.completeSale`, and online checkout still calls
-`complete_sale_v3`. 24.5C builds the durable floor; 24.5D stands on it.
+**Nothing submitted — as of 24.5C.** No client called `enqueueSale` and offline
+checkout was still fenced in `PosRuntime.completeSale`. 24.5C built the durable
+floor; 24.5D stood on it.
+
+> **Superseded by 24.5E**, which fills the queue from a real checkout. The
+> record shape, the state machine and the quarantine rule are unchanged.
 
 ### What 24.5A actually shipped
 
@@ -1192,10 +1521,16 @@ device that is, by definition, not reachable.
 
 ### Receipts
 
-The provisional receipt (§8) must state that the sale is not yet recorded. Once
-synced, the device's own history shows the real order number against the
-provisional reference. A reprint after sync should print the **final** receipt
-with the real order number.
+The provisional receipt (§8) must state that the sale is saved on this device
+and that a receipt number is still to come. Once synced, the device's own
+history shows the real order number against the provisional reference. A reprint
+after sync should print the **final** receipt with the real order number.
+
+> **Clarified in 24.5E.** An earlier phrasing here said the receipt must state
+> the sale is "not yet recorded". §8's approved copy is the authority and
+> deliberately avoids that wording: to the customer holding the slip it reads as
+> *your payment may not have gone through*, which is untrue. The sale is real
+> and complete; only its number is pending.
 
 ---
 

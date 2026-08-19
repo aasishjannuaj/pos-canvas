@@ -254,13 +254,25 @@ describe("Feature 24.4 changed no schema, RPC or migration", () => {
     expect(saleRequest).not.toContain("offline");
   });
 
-  it("receipt numbering and inventory logic are untouched", () => {
-    // Both are server-side and neither may gain a client-side counterpart here.
+  it("no client ever allocates a receipt number or a stock figure", () => {
+    // NARROWED BY 24.5E, and the narrowing is the point.
+    //
+    // This used to ban the word "provisionalReceipt" everywhere, as a fence
+    // around 24.4's design-only scope. 24.5E built the provisional receipt —
+    // the owner-approved decision D in docs/OFFLINE_ARCHITECTURE.md §8 — so
+    // keeping that ban would mean a passing suite could only be bought by not
+    // doing the approved work.
+    //
+    // What survives is the property the original guard was actually protecting:
+    // the two things only the SERVER may produce. A client that allocated an
+    // order number would create a second numbering authority, and one that
+    // computed a stock shortfall would be inventing an inventory fact it has no
+    // basis for. A provisional receipt does neither: it carries a derived
+    // reference and no order number at all.
     for (const file of productSourceFiles()) {
       const source = read(file);
 
       for (const premature of [
-        "provisionalReceipt",
         "provisionalOrderNumber",
         "allocateOrderNumber",
         "stockShortfall",

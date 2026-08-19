@@ -265,7 +265,7 @@ describe("the runtime mode is explicit, never inferred", () => {
       },
     } as unknown as DeviceState;
 
-    expect(getDeviceRuntimeMode(state)).toBe("offline_read_only");
+    expect(getDeviceRuntimeMode(state)).toBe("offline");
   });
 
   it("non-ready states are never offline mode", () => {

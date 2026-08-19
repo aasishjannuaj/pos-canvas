@@ -16,8 +16,11 @@ import {
 } from "@/lib/nativeShell";
 import Receipt from "@/components/editor/Receipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import { describeCartModifiers, getItemQuantityInCart } from "@/lib/cart";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
+import { OFFLINE_RECEIPT_REFERENCE_LABEL } from "@/lib/provisionalReceipt";
+import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 
 // Feature 14.3 — the shared cart/checkout/receipt UI, extracted from
 // EditorPreview.tsx's preview-mode branch so it isn't duplicated between
@@ -72,12 +75,27 @@ type PosCheckoutPanelProps = {
   // receipt flow itself — only viewing the order just completed is).
   recentOrders: CompletedOrder[];
   lastCompletedOrderId: string | null;
+
+  /**
+   * Feature 24.5E — set when the sale just completed was saved on this device.
+   *
+   * SEPARATE FROM provisionalReceipt below because the two are needed at
+   * different moments: this one drives the success screen, which is shown while
+   * the receipt overlay is closed, exactly as lastCompletedOrderId already does
+   * for an online sale. Null on every online sale, so that path is unchanged.
+   */
+  lastOfflineReference?: string | null;
   onOpenReceipt: (orderId: string) => void;
   selectedOrder: CompletedOrder | null;
   // Feature 16.3 D3 — when set, the overlay renders the AUTHORITATIVE
   // server receipt instead of the preview model. EditorPreview never passes
   // it, so the Builder preview path is byte-identical to before.
   authoritativeReceipt?: CompletedSaleReceipt | null;
+  // Feature 24.5E — when set, the overlay renders the PROVISIONAL receipt for a
+  // sale saved on this device. A third, deliberately distinct model: it carries
+  // no order number, and there is no branch in this panel that could give it
+  // one. Only ever set by a paired device selling offline.
+  provisionalReceipt?: ProvisionalReceipt | null;
   onCloseReceipt: () => void;
 };
 
@@ -114,9 +132,11 @@ export default function PosCheckoutPanel({
   saleSaveError,
   recentOrders,
   lastCompletedOrderId,
+  lastOfflineReference = null,
   onOpenReceipt,
   selectedOrder,
   authoritativeReceipt = null,
+  provisionalReceipt = null,
   onCloseReceipt,
 }: PosCheckoutPanelProps) {
   // Feature 16.2 — only ever set inside the Android shell, where printing
@@ -131,9 +151,16 @@ export default function PosCheckoutPanel({
     message: string;
   } | null>(null);
 
-  // One id for either receipt model, so the print notice keys correctly.
-  const shownReceiptId = authoritativeReceipt?.orderId ?? selectedOrder?.id ?? null;
-  const receiptVisible = authoritativeReceipt !== null || selectedOrder !== null;
+  // One id for every receipt model, so the print notice keys correctly. A
+  // provisional sale is addressed by its durable queue record id — the only
+  // stable handle it has, and deliberately not an order number.
+  const shownReceiptId =
+    authoritativeReceipt?.orderId ??
+    provisionalReceipt?.queueRecordId ??
+    selectedOrder?.id ??
+    null;
+  const receiptVisible =
+    authoritativeReceipt !== null || provisionalReceipt !== null || selectedOrder !== null;
 
   const activePrintNotice =
     printNotice !== null && printNotice.orderId === shownReceiptId
@@ -357,10 +384,33 @@ export default function PosCheckoutPanel({
           {checkoutStatus === "success" ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <span className="text-2xl">✅</span>
-              <p className="text-sm font-semibold text-neutral-900">
-                Sale completed
-              </p>
-              <p className="text-xs text-neutral-500">The cart has been cleared.</p>
+
+              {/* Feature 24.5E — the operator must always know WHICH of the two
+                  true things happened: the server recorded this sale, or this
+                  device saved it. docs/OFFLINE_ARCHITECTURE.md §17 requires the
+                  sale-complete screen to say one or the other and never
+                  something ambiguous. Neither wording suggests the payment is
+                  in doubt, because it is not. */}
+              {lastOfflineReference !== null ? (
+                <>
+                  <p className="text-sm font-semibold text-neutral-900">
+                    Sale saved on this device
+                  </p>
+                  <p className="text-xs text-neutral-500">
+                    It will sync when internet is restored.
+                  </p>
+                  <p className="text-xs font-medium tabular-nums text-neutral-700">
+                    {OFFLINE_RECEIPT_REFERENCE_LABEL} {lastOfflineReference}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-neutral-900">
+                    Sale completed
+                  </p>
+                  <p className="text-xs text-neutral-500">The cart has been cleared.</p>
+                </>
+              )}
 
               {/* Feature 9.3 — non-blocking inventory refresh warning. The
                   sale already succeeded; this is informational only, never
@@ -524,6 +574,13 @@ export default function PosCheckoutPanel({
             {authoritativeReceipt ? (
               <AuthoritativeReceipt
                 receipt={authoritativeReceipt}
+                businessProfile={businessProfile}
+                receiptSettings={receipt}
+                currencySymbol={currencySymbol}
+              />
+            ) : provisionalReceipt ? (
+              <OfflineReceipt
+                receipt={provisionalReceipt}
                 businessProfile={businessProfile}
                 receiptSettings={receipt}
                 currencySymbol={currencySymbol}

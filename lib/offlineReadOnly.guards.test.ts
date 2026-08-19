@@ -98,44 +98,62 @@ describe("checkout is impossible while running from cache", () => {
   it("the device supplies the reason ONLY in offline mode", () => {
     const app = code(read(DEVICE_APP));
 
-    expect(app).toContain('getDeviceRuntimeMode(state) === "offline_read_only"');
-    expect(app).toContain("OFFLINE_CHECKOUT_BLOCKED_MESSAGE");
+    expect(app).toContain('getDeviceRuntimeMode(state) === "offline"');
+    expect(app).toContain("describeOfflineCheckoutBlock(");
   });
 
-  it("the operator copy promises nothing and blames nobody", () => {
-    const message = read(DEVICE_APP).match(
-      /OFFLINE_CHECKOUT_BLOCKED_MESSAGE =\s*\n?\s*"([^"]+)"/
+  it("every operator refusal promises nothing and blames nobody", () => {
+    // MOVED BY 24.5E. The single OFFLINE_CHECKOUT_BLOCKED_MESSAGE constant this
+    // used to read lived in DeviceApp and said offline sales were not built
+    // yet. They are now, so the copy it pinned would be a lie — but the RULE it
+    // enforced is the valuable part and now applies to the whole table of
+    // refusals in lib/offlineCheckout.ts, plus the preparing message.
+    const checkout = read("lib/offlineCheckout.ts");
+    const tableStart = checkout.indexOf("OFFLINE_CHECKOUT_BLOCKED_MESSAGES: Record<");
+    const table = checkout.slice(tableStart, checkout.indexOf("\n};", tableStart));
+    const messages = table.match(/"[^"]{20,}"/g);
+
+    expect(messages).not.toBeNull();
+    expect((messages ?? []).length).toBeGreaterThanOrEqual(5);
+
+    const preparing = read("lib/offlineCheckout.ts").match(
+      /OFFLINE_CHECKOUT_PREPARING_MESSAGE =\s*\n?\s*"([^"]+)"/
     )?.[1];
 
-    expect(message).toBeDefined();
-    expect(message).toContain("Internet connection required");
+    expect(preparing).toBeDefined();
 
-    for (const banned of ["error", "failed", "invalid", "corrupt"]) {
-      expect(`copy says ${banned}`).toBe(`copy says ${banned}`);
-      expect(message?.toLowerCase()).not.toContain(banned);
+    for (const copy of [...(messages ?? []), `"${preparing}"`]) {
+      for (const banned of ["error", "failed", "invalid", "corrupt", "database", "queue"]) {
+        expect(`copy says ${banned}`).toBe(`copy says ${banned}`);
+        expect(copy.toLowerCase()).not.toContain(banned);
+      }
     }
   });
 
-  it("no offline sale, queue, or receipt path was created", () => {
+  it("the device host still persists nothing itself", () => {
+    // SUPERSEDED IN PART BY 24.5E, which wired offline checkout. What survives
+    // is the LAYERING: the component asks a library to persist a sale and never
+    // touches storage, a queue record or a receipt model of its own.
     const app = code(read(DEVICE_APP));
 
-    for (const premature of [
-      "enqueue",
-      "queueSale",
-      "offlineSale",
-      "provisionalReceipt",
-      "persistSale",
+    for (const banned of [
+      "enqueueSale",
+      "indexedDB",
+      "openOfflineDb",
+      "localStorage",
+      "buildProvisionalReceipt",
+      "QueuedSale",
     ]) {
-      expect(`DeviceApp: ${premature}`).toBe(`DeviceApp: ${premature}`);
-      expect(app).not.toContain(premature);
+      expect(`DeviceApp: ${banned}`).toBe(`DeviceApp: ${banned}`);
+      expect(app).not.toContain(banned);
     }
   });
 
-  it("the sale request id is still only passed through, never stored", () => {
-    // `saleRequestId` legitimately appears once: the EXISTING online checkout
-    // hands the runtime's id to complete_sale_v3. 24.5C is what persists it.
-    // Banning the word outright would have flagged untouched online code, so
-    // the guard checks the shape instead.
+  it("the sale request id is still only passed through, never stored here", () => {
+    // `saleRequestId` legitimately appears in the EXISTING online checkout,
+    // which hands the runtime's id to complete_sale_v3. 24.5E did not add a
+    // second one: the offline id is minted and persisted inside
+    // lib/offlineCheckout.ts and lib/saleQueueSession.ts, not here.
     const app = code(read(DEVICE_APP));
     const occurrences = app.match(/saleRequestId/g) ?? [];
 
@@ -347,15 +365,16 @@ describe("Feature 24.5A stops at read-only startup", () => {
     expect(read("lib/saleRequest.ts")).not.toContain("offline");
   });
 
-  it("receipt numbering and inventory are untouched", () => {
+  it("no client allocates an order number or invents a stock figure", () => {
+    // NARROWED BY 24.5E. The provisional receipt is now built (approved
+    // decision D, docs/OFFLINE_ARCHITECTURE.md §8), so banning its name would
+    // make the suite pass only by leaving approved work undone. The surviving
+    // property is the one that always mattered: the server allocates order
+    // numbers and owns inventory, and no client-side counterpart exists.
     for (const file of productSourceFiles()) {
       const source = read(file);
 
-      for (const premature of [
-        "provisionalReceipt",
-        "allocateOrderNumber",
-        "stockShortfall",
-      ]) {
+      for (const premature of ["allocateOrderNumber", "stockShortfall"]) {
         expect(`${file}: ${premature}`).toBe(`${file}: ${premature}`);
         expect(source).not.toContain(premature);
       }

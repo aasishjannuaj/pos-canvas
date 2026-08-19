@@ -346,6 +346,55 @@ export async function triggerSaleSync(
 }
 
 /**
+ * Feature 24.5E — the startup trigger, latched PER DEVICE SESSION.
+ *
+ * WHY A MODULE-LEVEL LATCH RATHER THAN A REACT REF. The startup run is the only
+ * one permitted to reclaim records stranded in `syncing` (see triggerSaleSync),
+ * and reclaiming twice while a submission is still on the wire would un-claim
+ * live work. React gives no guarantee that a component mounts once: StrictMode
+ * mounts twice in development, and a remount after an error boundary or a route
+ * change would fire again. A ref inside the component is scoped to the
+ * component; the property being protected is not, so the latch is not either.
+ *
+ * WHY IT IS KEYED RATHER THAN A BARE BOOLEAN — a review correction. A bare
+ * boolean means "once per JS process", and a process can outlive a pairing:
+ * unpair and re-pair happen without a reload, and the new pairing is a new
+ * anonymous auth user with its own queue lifetime. Under a boolean that second
+ * session would silently never receive its startup pass. Keying on the device
+ * auth session gives the invariant that was actually wanted — once per logical
+ * device session — while still collapsing every rerender, remount and
+ * StrictMode double-invoke within one session to a single run, because the key
+ * for those is identical.
+ *
+ * Returns null when this session has already fired, so a caller can tell
+ * "already done" from "ran and found nothing".
+ */
+let startupSyncSessionKey: string | null = null;
+
+export function triggerStartupSaleSyncOnce(
+  sessionKey: string,
+  deps: Partial<SyncDeps> = {}
+): Promise<SyncRunReport | null> {
+  if (startupSyncSessionKey === sessionKey) {
+    return Promise.resolve(null);
+  }
+
+  startupSyncSessionKey = sessionKey;
+
+  return triggerSaleSync("startup", deps);
+}
+
+/** True once the startup run has been claimed for this device session. */
+export function hasTriggeredStartupSync(sessionKey: string): boolean {
+  return startupSyncSessionKey === sessionKey;
+}
+
+/** Test seam: forget the latch. Never called by product code. */
+export function resetStartupSyncForTests(): void {
+  startupSyncSessionKey = null;
+}
+
+/**
  * Reclaims records stranded in `syncing` by a process that died mid-submission.
  *
  * Exposed so a host can run it once at startup — see triggerSaleSync. Safe

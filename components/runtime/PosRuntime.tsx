@@ -22,7 +22,10 @@ import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
 import { SALE_UNCONFIRMED_MESSAGE, planSaleSubmission } from "@/lib/saleSubmission";
+import { OFFLINE_RECEIPT_UNAVAILABLE_NOTE } from "@/lib/provisionalReceipt";
+import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import PosHeader from "@/components/runtime/PosHeader";
 import ProductBrowser from "@/components/editor/pos-layouts";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
@@ -30,7 +33,9 @@ import type {
   PosRuntimeCompleteSale,
   PosRuntimeHomeLink,
   PosRuntimeLogoBaseUrl,
+  PosRuntimeDiscardOfflineSaleDraft,
   PosRuntimeOnSaleRejected,
+  PosRuntimeQueueOfflineSale,
   PosRuntimeRefreshStock,
 } from "@/lib/posRuntimeHost";
 
@@ -76,8 +81,38 @@ type PosRuntimeProps = {
    *
    * Browsing, the cart, modifiers and totals all keep working — the fence is
    * around the one action that writes money.
+   *
+   * Feature 24.5E DID NOT WEAKEN THIS. It is still the first statement in
+   * completeSale and still the only fence that matters; what changed is that a
+   * device with a validated offline session now passes null here and supplies
+   * queueOfflineSale instead, so "offline" and "cannot sell" stopped being the
+   * same sentence.
    */
   checkoutBlockedReason?: string | null;
+
+  /**
+   * Feature 24.5E — when set, this runtime completes sales LOCALLY.
+   *
+   * Non-null means the host has already validated everything that makes an
+   * offline sale safe (pairing assertion, 7-day lease, pinned configuration and
+   * its integrity, identity, durable storage) and will make the sale durable
+   * before it answers. The runtime then submits nothing: no RPC is called, no
+   * server receipt exists, and the customer gets a provisional one.
+   *
+   * null — the default, and what the owner runtime and the Builder Preview both
+   * pass — leaves the online complete_sale_v3 path byte-identical to before.
+   */
+  queueOfflineSale?: PosRuntimeQueueOfflineSale | null;
+
+  /**
+   * Feature 24.5E — tells the host this checkout attempt is over.
+   *
+   * Supplied together with queueOfflineSale, by the same host, under the same
+   * condition. It is what bounds the reuse of a sale's identity to a single
+   * attempt: see PosRuntimeDiscardOfflineSaleDraft for why an unbounded reuse
+   * would record a later customer's sale at an earlier customer's time.
+   */
+  discardOfflineSaleDraft?: PosRuntimeDiscardOfflineSaleDraft | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -97,6 +132,8 @@ export default function PosRuntime({
   logoBaseUrl,
   onSaleRejected,
   checkoutBlockedReason = null,
+  queueOfflineSale = null,
+  discardOfflineSaleDraft = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
@@ -123,6 +160,15 @@ export default function PosRuntime({
   const [lastCompletedReceipt, setLastCompletedReceipt] =
     useState<CompletedSaleReceipt | null>(null);
 
+  // Feature 24.5E — the offline equivalent, kept in a SEPARATE slot rather than
+  // widened into the one above. The two receipt models mean different things
+  // (one has a server order number, one deliberately has none), and a single
+  // union-typed slot is how a provisional total eventually gets rendered by the
+  // authoritative component. Only one is ever non-null: each success path
+  // clears the other, so a stale receipt of the wrong kind cannot be reopened.
+  const [lastProvisionalReceipt, setLastProvisionalReceipt] =
+    useState<ProvisionalReceipt | null>(null);
+
   // One id per logical checkout attempt; reused across retries of the same
   // intent so a lost response replays instead of double-selling.
   const [saleRequest, setSaleRequest] = useState<SaleRequestState | null>(null);
@@ -145,6 +191,7 @@ export default function PosRuntime({
   const cartSummary = calculateCartSummary(cart, config.tax, 0);
 
   const shownReceipt = receiptOpen ? lastCompletedReceipt : null;
+  const shownProvisionalReceipt = receiptOpen ? lastProvisionalReceipt : null;
 
   // Feature 14.3 — warn only while there's a real, not-yet-checked-out cart
   // to lose; registered/removed as cart.length flips, exactly mirroring
@@ -252,14 +299,26 @@ export default function PosRuntime({
     setCheckoutStatus("idle");
     setSaleSaveStatus("idle");
     setSaleSaveError(null);
+
+    // Feature 24.5E — THE ATTEMPT IS OVER, whether it succeeded, failed, or was
+    // cancelled. Any sale identity the host is still holding for a retry is
+    // void from here: the next Complete Sale is a different sale, even if the
+    // cart that reaches it looks identical.
+    discardOfflineSaleDraft?.();
   }
 
   function selectPaymentMethod(method: PaymentMethod) {
     setSelectedPaymentMethod(method);
   }
 
-  function openReceipt(orderId: string) {
-    if (lastCompletedReceipt?.orderId === orderId) {
+  // Feature 24.5E — one opener for both receipt kinds. A provisional sale is
+  // addressed by its durable queue record id, which is the only stable handle
+  // it has: it has no order number, and it must not be given one.
+  function openReceipt(receiptId: string) {
+    if (
+      lastCompletedReceipt?.orderId === receiptId ||
+      lastProvisionalReceipt?.queueRecordId === receiptId
+    ) {
       setReceiptOpen(true);
     }
   }
@@ -273,11 +332,15 @@ export default function PosRuntime({
     // statement in this function.
     //
     // Placed ahead of every other guard so there is no ordering in which a
-    // blocked runtime reaches planSaleSubmission or submitSale. A disabled
-    // button is a UI affordance; this is the actual boundary, and it is what
-    // guarantees no sale RPC is called and no request id is minted while
-    // offline. 24.5C is where a queued sale becomes possible; until then the
-    // honest answer is that the till cannot complete this sale.
+    // blocked runtime reaches planSaleSubmission, submitSale or the durable
+    // enqueue below. A disabled button is a UI affordance; this is the actual
+    // boundary, and it is what guarantees no sale RPC is called, no request id
+    // is minted and no record is written when a sale must not happen.
+    //
+    // 24.5E DID NOT MOVE OR WEAKEN THIS. What changed is who sets the reason: a
+    // device with a validated cache and a live lease now passes null and
+    // supplies queueOfflineSale, while a device that fails any part of that
+    // check still lands here with a message saying which part.
     if (checkoutBlockedReason !== null) {
       setSaleSaveStatus("error");
       setSaleSaveError(checkoutBlockedReason);
@@ -296,6 +359,49 @@ export default function PosRuntime({
 
     setSaleSaveStatus("saving");
     setSaleSaveError(null);
+
+    // Feature 24.5E — THE OFFLINE BRANCH, and the ordering below is the whole
+    // safety property of this feature:
+    //
+    //   await the host's durable write
+    //     -> if it failed, STOP. The cart is untouched, nothing says "saved",
+    //        and no receipt is produced. There is no memory-only fallback and
+    //        no optimistic success anywhere on this path.
+    //     -> only once it succeeded: keep the receipt, clear the cart, and
+    //        show the success view.
+    //
+    // Nothing here submits. The host has already made the sale durable; the
+    // sync engine sends it to complete_sale_v4 later, from storage, on its own
+    // schedule. This component has never heard of that RPC.
+    if (queueOfflineSale !== null) {
+      const saved = await queueOfflineSale({
+        paymentMethod: selectedPaymentMethod,
+        // The same literal-0 tip the online path uses. There is still no
+        // tip-entry UI, and complete_sale_v4 rejects a device tip outright.
+        tipAmount: cartSummary.tip,
+        cart,
+      });
+
+      if (!saved.ok) {
+        // The sale did NOT happen. The cart survives so the cashier can retry
+        // before handing anything over — see docs/OFFLINE_ARCHITECTURE.md §18
+        // case 15, which requires this failure to be loud and blocking.
+        setSaleSaveStatus("error");
+        setSaleSaveError(saved.message);
+        return;
+      }
+
+      // Past this line the sale is on disk.
+      setLastCompletedReceipt(null);
+      setLastProvisionalReceipt(saved.receipt);
+      clearCart();
+      setCheckoutStatus("success");
+      setSaleSaveStatus("success");
+      // Informational only, on the success screen: the sale is saved either
+      // way, and this says nothing about whether it was recorded.
+      setSaleSaveError(saved.receipt === null ? OFFLINE_RECEIPT_UNAVAILABLE_NOTE : null);
+      return;
+    }
 
     // Feature 18.2 Phase 5A — the stock re-check, the request-id decision and
     // the payload build all moved to lib/saleSubmission.ts, unchanged in
@@ -349,6 +455,10 @@ export default function PosRuntime({
     // Success: the authoritative payload is the ONLY record kept. The cart is
     // discarded and the request id cleared, so the next sale gets a new id.
     setLastCompletedReceipt(receipt);
+    // Feature 24.5E — a device that reconnects mid-shift must not be able to
+    // reopen the previous offline sale's provisional receipt from the success
+    // screen of an online one.
+    setLastProvisionalReceipt(null);
     setSaleRequest(null);
     clearCart();
 
@@ -499,10 +609,16 @@ export default function PosRuntime({
             saleSaveStatus={saleSaveStatus}
             saleSaveError={saleSaveError}
             recentOrders={[]}
-            lastCompletedOrderId={lastCompletedReceipt?.orderId ?? null}
+            lastCompletedOrderId={
+              lastCompletedReceipt?.orderId ??
+              lastProvisionalReceipt?.queueRecordId ??
+              null
+            }
+            lastOfflineReference={lastProvisionalReceipt?.offlineReference ?? null}
             onOpenReceipt={openReceipt}
             selectedOrder={null}
             authoritativeReceipt={shownReceipt}
+            provisionalReceipt={shownProvisionalReceipt}
             onCloseReceipt={closeReceipt}
           />
         </aside>
@@ -516,6 +632,21 @@ export default function PosRuntime({
         <div className="receipt-print-area">
           <AuthoritativeReceipt
             receipt={shownReceipt}
+            businessProfile={config.businessProfile}
+            receiptSettings={config.receipt}
+            currencySymbol={currencySymbol}
+          />
+        </div>
+      )}
+
+      {/* Feature 24.5E — the same print mechanism, a different document. The
+          existing Print Receipt button and the existing .receipt-print-area
+          stylesheet are reused unchanged; no second printing stack exists. What
+          is printed carries the OFFLINE RECEIPT banner and no order number. */}
+      {shownProvisionalReceipt && (
+        <div className="receipt-print-area">
+          <OfflineReceipt
+            receipt={shownProvisionalReceipt}
             businessProfile={config.businessProfile}
             receiptSettings={config.receipt}
             currencySymbol={currencySymbol}

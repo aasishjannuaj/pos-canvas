@@ -123,37 +123,83 @@ describe("complete_sale_v4 is reachable from exactly one adapter", () => {
 // THE FENCES
 // ---------------------------------------------------------------------------
 
-describe("24.5D drains a queue and enables nothing", () => {
-  it("offline checkout remains fenced exactly as 24.5A left it", () => {
+describe("the sync engine is driven from exactly one place", () => {
+  it("the checkout fence is still evaluated before any sale path", () => {
+    // SUPERSEDED IN PART BY 24.5E, which opened offline checkout. The fence
+    // itself did not move: it is still the first statement in completeSale, and
+    // both sale paths — the online submit and the durable enqueue — are below
+    // it, so an ineligible device reaches neither.
     const runtime = code(read(RUNTIME));
     const fence = runtime.indexOf("if (checkoutBlockedReason !== null)");
     const plan = runtime.indexOf("planSaleSubmission({");
     const submit = runtime.indexOf("await submitSale({");
+    const queue = runtime.indexOf("await queueOfflineSale({");
 
     expect(fence).toBeGreaterThan(-1);
     expect(plan).toBeGreaterThan(fence);
     expect(submit).toBeGreaterThan(fence);
+    expect(queue).toBeGreaterThan(fence);
 
     const app = code(read(DEVICE_APP));
 
-    expect(app).toContain('getDeviceRuntimeMode(state) === "offline_read_only"');
-    expect(app).toContain("OFFLINE_CHECKOUT_BLOCKED_MESSAGE");
+    expect(app).toContain('getDeviceRuntimeMode(state) === "offline"');
+    expect(app).toContain("describeOfflineCheckoutBlock(");
   });
 
-  it("NOTHING calls enqueueSale — the queue is still only fillable by a test", () => {
+  it("enqueueSale is called by ONE library module and no component", () => {
     const callers = productSourceFiles()
       .filter((file) => file !== "lib/saleQueueSession.ts")
       .filter((file) => code(read(file)).includes("enqueueSale"));
 
-    expect(callers).toEqual([]);
+    expect(callers).toEqual(["lib/offlineCheckoutSession.ts"]);
   });
 
-  it("the engine is a library — nothing in the app runs it yet", () => {
+  it("the engine is triggered from the device runtime and nowhere else", () => {
+    // 24.5D shipped the engine as a library with nothing calling it; 24.5E
+    // wires it, and this is where that wiring is pinned. ONE host: a second
+    // caller elsewhere would mean two components racing to drive one queue.
     const callers = productSourceFiles()
       .filter((file) => file !== ENGINE)
       .filter((file) => /runSaleSync|triggerSaleSync|subscribeToReconnect/.test(code(read(file))));
 
-    expect(callers).toEqual([]);
+    expect(callers).toEqual([DEVICE_APP]);
+  });
+
+  it("startup recovery is claimed exactly once per device session", () => {
+    const engine = code(read(ENGINE));
+    const app = code(read(DEVICE_APP));
+
+    // The latch lives at module scope, not in a component: React can mount a
+    // component twice (StrictMode, an error boundary, a route change) and a
+    // second "startup" would un-claim a submission still on the wire.
+    //
+    // KEYED, not a bare boolean — a 24.5E review correction. A process can
+    // outlive a pairing (unpair and re-pair happen without a reload), and a
+    // process-wide boolean would deny the new device session its startup pass
+    // forever. See lib/offlineCheckout.guards.test.ts for the full rule.
+    expect(engine).toContain("let startupSyncSessionKey: string | null = null");
+    expect(engine).toContain("if (startupSyncSessionKey === sessionKey)");
+    expect(engine).toContain("startupSyncSessionKey = sessionKey");
+
+    // Exactly one call site, and it is the latched one — never the raw trigger.
+    expect((app.match(/await triggerStartupSaleSyncOnce\(/g) ?? [])).toHaveLength(1);
+    expect(app).not.toContain('triggerSaleSync("startup")');
+
+    // Only the startup trigger recovers stranded records.
+    const trigger = engine.slice(engine.indexOf("export async function triggerSaleSync"));
+
+    expect(trigger.slice(0, 600)).toContain('if (trigger === "startup")');
+    expect(code(read("lib/saleSyncEngine.ts")).match(/recoverInterruptedSyncs\(/g)).toHaveLength(2);
+  });
+
+  it("the reconnect listener is subscribed once and cleaned up", () => {
+    const app = code(read(DEVICE_APP));
+
+    expect((app.match(/subscribeToReconnect\(/g) ?? [])).toHaveLength(1);
+    // The effect RETURNS the unsubscribe, which is what makes teardown happen.
+    expect(app).toMatch(/return subscribeToReconnect\(/);
+    // Connectivity is a hint that nudges a drain, never a gate on selling.
+    expect(app).not.toContain("navigator.onLine");
   });
 
   it("registers no global listener or timer of its own", () => {
@@ -182,11 +228,13 @@ describe("24.5D drains a queue and enables nothing", () => {
     expect(topLevelCalls).toEqual([]);
   });
 
-  it("no provisional receipt or checkout wiring appeared", () => {
+  it("24.5F and 24.6 have not started", () => {
+    // NARROWED BY 24.5E, which built the provisional receipt and its component.
+    // What is still out of scope: the owner-facing queue console and the
+    // publish-progress work of a later milestone.
     for (const premature of [
-      "lib/provisionalReceipt.ts",
-      "components/device/OfflineReceipt.tsx",
-      "components/device/DeviceQueueStatus.tsx",
+      "components/devices/DeviceQueueStatus.tsx",
+      "components/dashboard/DeviceSyncPanel.tsx",
       "lib/publishProgress.ts",
     ]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);

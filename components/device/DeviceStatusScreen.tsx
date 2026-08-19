@@ -14,6 +14,15 @@ type DeviceStatusScreenProps = {
   onReset?: () => void;
   /** Explains what Reset does — never shown without it. */
   resetNote?: string;
+  /**
+   * Feature 24.5E — the outcome of the LAST action taken on this screen.
+   *
+   * Exists so a refused reset can say why in the place the operator pressed the
+   * button, rather than failing silently. Rendered as a notice rather than an
+   * error: refusing to reset a device holding unsynced sales is the system
+   * working, not breaking.
+   */
+  actionNotice?: string | null;
 };
 
 export default function DeviceStatusScreen({
@@ -24,6 +33,7 @@ export default function DeviceStatusScreen({
   retryLabel = "Try again",
   onReset,
   resetNote,
+  actionNotice = null,
 }: DeviceStatusScreenProps) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-neutral-50 px-6 py-12">
@@ -64,6 +74,15 @@ export default function DeviceStatusScreen({
               </button>
             )}
           </div>
+        )}
+
+        {!busy && actionNotice !== null && (
+          <p
+            aria-live="polite"
+            className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-900"
+          >
+            {actionNotice}
+          </p>
         )}
 
         {!busy && onReset && resetNote && (
