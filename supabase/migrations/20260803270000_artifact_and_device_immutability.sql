@@ -208,7 +208,6 @@ create or replace trigger paired_devices_guard_immutable
 -- ----------------------------------------------------------------------------
 do $$
 declare
-  c_build_jobs_fp constant text := 'f9772a2f8fa5c6e1c862609a8d30f94d';
   v_row record;
   v_name text;
   v_count integer;
@@ -247,15 +246,38 @@ begin
     raise exception 'D4c: build_jobs rows changed';
   end if;
 
-  -- The D4b-verified constant, checked independently of the in-session capture.
+  -- REPLAYABILITY REPAIR (found bootstrapping a fresh staging database).
+  --
+  -- This pair used to read:
+  --     if v_count <> 5 ...
+  --     if (...) <> c_build_jobs_fp ...
+  -- where 5 and the fingerprint were production's build_jobs state on the day
+  -- D4c was authored. That made this migration impossible to replay: an empty
+  -- database correctly has zero rows and failed the count outright, which is
+  -- exactly what happened on the first staging push.
+  --
+  -- The fingerprint half was quietly worse. It compared with `<>` against
+  -- md5(string_agg(...)), which is NULL over zero rows, and `NULL <> constant`
+  -- is NULL rather than true — so on an empty table it did not fail, it did
+  -- nothing at all. A check that cannot fire is not a check.
+  --
+  -- The invariant D4c actually needs is "this migration disturbed no
+  -- pre-existing build_jobs row". d4c_tbl_baseline already captured exactly
+  -- that, before any mutation, using the same coalesce(...,'empty') sentinel so
+  -- an empty table compares equal to itself. Reading it from there holds on
+  -- production, where the five rows still exist, and on a fresh database, where
+  -- zero rows must equal zero rows. Nothing is weakened: an unexpected mutation
+  -- still fails, and now it fails on any database rather than only on one.
   select count(*) into v_count from public.build_jobs;
-  if v_count <> 5 then
-    raise exception 'D4c: expected 5 build_jobs rows, found %', v_count;
+  if v_count <> (select n from d4c_tbl_baseline where tbl = 'build_jobs') then
+    raise exception 'D4c: build_jobs row count changed from % to %',
+      (select n from d4c_tbl_baseline where tbl = 'build_jobs'), v_count;
   end if;
 
-  if (select md5(string_agg(md5(b::text), '|' order by b.id::text)) from public.build_jobs b)
-     <> c_build_jobs_fp then
-    raise exception 'D4c: build_jobs fingerprint does not match the D4b baseline';
+  if (select coalesce(md5(string_agg(md5(b::text), '|' order by b.id::text)), 'empty')
+      from public.build_jobs b)
+     is distinct from (select fp from d4c_tbl_baseline where tbl = 'build_jobs') then
+    raise exception 'D4c: build_jobs fingerprint does not match the migration-start baseline';
   end if;
 
   -- ---- existing functions untouched ----------------------------------------

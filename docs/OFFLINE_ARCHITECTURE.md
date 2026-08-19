@@ -212,7 +212,7 @@ function, in order:
    project row lock. The client has no way to produce one and never has.
 
 5. **`orders.created_at` defaults to `now()`** — server time at insert. There is
-   **no** `occurred_at` column (`20260803201200_capture_operational_schema.sql:123`).
+   **no** `occurred_at` column (`20260729000000_capture_operational_schema.sql:123`).
 
 6. **Revocation is checked on every call, including replays**, and deliberately
    *before* the idempotency lookup.

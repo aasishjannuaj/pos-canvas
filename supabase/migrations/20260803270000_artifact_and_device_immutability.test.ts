@@ -230,10 +230,25 @@ describe("verification block", () => {
     }
   });
 
-  it("pins the D4b build_jobs count and fingerprint", () => {
-    expect(executable).toContain("'f9772a2f8fa5c6e1c862609a8d30f94d'");
-    expect(executable).toContain("D4c: expected 5 build_jobs rows, found %");
-    expect(executable).toContain("D4c: build_jobs fingerprint does not match the D4b baseline");
+  it("pins the build_jobs count and fingerprint to the migration-start baseline", () => {
+    // SUPERSEDED, deliberately. This used to assert the presence of the literal
+    // fingerprint 'f9772a2f…' and "expected 5 build_jobs rows" — i.e. it pinned
+    // production's data state INTO the test, which is why the defect survived
+    // review and only surfaced when a fresh database was first built from this
+    // history.
+    //
+    // The invariant it was reaching for is real and is still asserted below and
+    // in "the verification block replays on any database": build_jobs must come
+    // out of this migration with the same rows it went in with. What changed is
+    // that the comparison target is now captured at migration start instead of
+    // hardcoded, so it holds on production AND on an empty database.
+    expect(executable).toContain(
+      "if v_count <> (select n from d4c_tbl_baseline where tbl = 'build_jobs') then"
+    );
+    expect(executable).toContain("D4c: build_jobs row count changed from % to %");
+    expect(executable).toContain(
+      "D4c: build_jobs fingerprint does not match the migration-start baseline"
+    );
   });
 
   it("asserts all three tables are unchanged in count and content", () => {
@@ -277,5 +292,87 @@ describe("verification block", () => {
     expect(executable).toContain("D4c: the number of RLS policies changed");
     expect(executable).toContain("D4c: an RLS policy definition changed");
     expect(executable).toContain("D4c: the D1 table privilege matrix changed");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Replayability — can this migration run on a database that is not production?
+//
+// WHY THIS EXISTS: bootstrapping a fresh staging database, this migration failed
+// with `D4c: expected 5 build_jobs rows, found 0`. Its verification block
+// asserted production's live data as a precondition — exactly 5 build_jobs rows
+// and an md5 fingerprint of those specific rows, both correct on the day D4c was
+// authored and correct nowhere else.
+//
+// The fingerprint half was quietly worse than the count: it compared with `<>`
+// against md5(string_agg(...)), which is NULL over zero rows, and
+// `NULL <> constant` evaluates to NULL rather than true. On an empty table it
+// did not fail — it did nothing. A check that cannot fire is not a check.
+//
+// The invariant D4c genuinely needs is "this migration disturbed no pre-existing
+// row", which d4c_tbl_baseline already captured before any mutation. These
+// guards pin the repair so the production coupling cannot come back.
+// ---------------------------------------------------------------------------
+
+describe("the verification block replays on any database", () => {
+  it("carries no hardcoded fingerprint of production data", () => {
+    // A 32-hex constant in a verification block is, in practice, always a
+    // snapshot of one database's rows.
+    expect(executable).not.toMatch(/constant text\s*:=\s*'[0-9a-f]{32}'/);
+    expect(executable).not.toContain("c_build_jobs_fp");
+    expect(executable).not.toContain("f9772a2f8fa5c6e1c862609a8d30f94d");
+  });
+
+  it("compares row counts against the migration-start baseline, never a literal", () => {
+    // Every `count(*) into v_count from public.<table>` must be tested against
+    // d4c_tbl_baseline. A literal would be production's state, not an invariant.
+    const literalComparisons = executable.match(/if\s+v_count\s*<>\s*\d+\s+then/g) ?? [];
+
+    expect(literalComparisons).toEqual([]);
+    expect(executable).toContain(
+      "if v_count <> (select n from d4c_tbl_baseline where tbl = 'build_jobs') then"
+    );
+  });
+
+  it("compares fingerprints NULL-safely, so an empty table is checked rather than skipped", () => {
+    // coalesce(...,'empty') gives zero rows a deterministic value, and
+    // `is distinct from` makes the comparison NULL-safe in both directions.
+    const fingerprintChecks = executable.match(/is distinct from \(select fp from d4c_tbl_baseline/g) ?? [];
+
+    expect(fingerprintChecks.length).toBeGreaterThanOrEqual(3);
+    expect(executable).not.toMatch(/md5\(string_agg\([^)]*\)\)[\s\S]{0,40}<>\s*c_/);
+  });
+
+  it("still captures a baseline for all three tables before mutating anything", () => {
+    // The repair must not have removed what it now depends on.
+    const capture = executable.indexOf("create temporary table d4c_tbl_baseline");
+    const verify = executable.indexOf("d4c_tbl_baseline where tbl = 'build_jobs'");
+
+    expect(capture).toBeGreaterThan(-1);
+    expect(verify).toBeGreaterThan(capture);
+
+    for (const table of ["build_artifacts", "paired_devices", "build_jobs"]) {
+      expect(`baseline missing ${table}`).toBe(`baseline missing ${table}`);
+      expect(executable).toContain(`from public.${table}`);
+    }
+
+    // The empty-table sentinel the baseline and every comparison share.
+    expect(executable).toContain("'empty')");
+  });
+
+  it("still fails when rows actually change", () => {
+    // The point of the repair is portability, NOT leniency: the exceptions that
+    // detect a mutation must all still be present.
+    for (const guard of [
+      "row count changed from % to %",
+      "D4c: build_artifacts rows changed",
+      "D4c: paired_devices rows changed",
+      "D4c: build_jobs rows changed",
+      "does not match the migration-start baseline",
+    ]) {
+      expect(`missing guard: ${guard}`).toBe(`missing guard: ${guard}`);
+      expect(executable).toContain(guard);
+    }
   });
 });

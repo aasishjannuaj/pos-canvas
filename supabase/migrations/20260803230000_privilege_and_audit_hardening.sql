@@ -9,7 +9,7 @@
 -- ----------------------------------------------------------------------------
 --
 -- 1. anon holds ALL on inventory_transactions. Granted explicitly in
---    20260803201200 ("grant all on table public.inventory_transactions to
+--    20260729000000 ("grant all on table public.inventory_transactions to
 --    anon") and confirmed live: an unauthenticated anon-key client can SELECT
 --    the table. TRUNCATE is NOT subject to RLS, so this is a real privilege on
 --    an operational table, not a theoretical one.

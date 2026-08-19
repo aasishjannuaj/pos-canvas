@@ -32,8 +32,15 @@ const PAIRING_FUNCTIONS = [
 describe("migration ordering", () => {
   it("sorts after both capture migrations", () => {
     // String comparison, which is how a migration runner orders filenames.
+    //
+    // The schema-capture migration was renamed from 20260803201200 to
+    // 20260729000000 during the staging bootstrap: it creates `projects`, and
+    // 20260729151600_build_jobs_and_artifacts.sql has always had a foreign key
+    // to it, so the original order could never build a database from scratch.
+    // Production never showed it because `projects` predates this repo being
+    // migration-managed at all.
     expect(
-      "20260803201200_capture_operational_schema.sql" <
+      "20260729000000_capture_operational_schema.sql" <
         "20260803210000_device_pairing.sql"
     ).toBe(true);
     expect(

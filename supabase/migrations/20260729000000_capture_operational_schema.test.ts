@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
 
-const SCHEMA_MIGRATION = "20260803201200_capture_operational_schema.sql";
+const SCHEMA_MIGRATION = "20260729000000_capture_operational_schema.sql";
 const FUNCTION_MIGRATION =
   "20260803201210_capture_checkout_inventory_functions.sql";
 
