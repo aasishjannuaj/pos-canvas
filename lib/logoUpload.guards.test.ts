@@ -260,12 +260,20 @@ describe("the bucket is public-read and service-role-write only", () => {
   });
 
   it("does not modify any earlier migration", () => {
-    const files = readdirSync(join(repoRoot, "supabase/migrations"))
-      .filter((f) => f.endsWith(".sql"))
-      .sort();
+    // WAS "this is the newest file", which is a different claim from the one
+    // this test is named for and breaks the moment ANY later feature adds a
+    // migration — as 24.5B did. What actually matters is that the logo bucket
+    // is created in exactly one place and no other migration touches it.
+    const dir = join(repoRoot, "supabase/migrations");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".sql"));
 
-    // This is the newest file; every other name sorts before it.
-    expect(files[files.length - 1]).toBe("20260813120000_project_logo_storage.sql");
+    expect(files).toContain("20260813120000_project_logo_storage.sql");
+
+    const others = files
+      .filter((f) => f !== "20260813120000_project_logo_storage.sql")
+      .filter((f) => readFileSync(join(dir, f), "utf-8").includes("project-logos"));
+
+    expect(others).toEqual([]);
   });
 });
 

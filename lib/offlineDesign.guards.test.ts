@@ -198,26 +198,45 @@ describe("Feature 24.4 implemented no offline runtime", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 24.4 changed no schema, RPC or migration", () => {
-  it("no migration mentions the 24.5 server contract", () => {
-    // §12 proposes occurred_at, a source column and complete_sale_v4. None of
-    // them may exist yet: a migration is the one thing here that is not
-    // revertible by deleting a file.
+  it("the 24.5 server contract lives in ONE new migration, and edits none", () => {
+    // SUPERSEDED BY 24.5B, deliberately. This previously asserted that NO
+    // migration mentioned occurred_at, source or complete_sale_v4 — a fence
+    // around the design phase. 24.5B implemented exactly that contract, so
+    // keeping the fence would mean a passing suite could only be bought by not
+    // doing the approved work.
+    //
+    // What survives is the property that actually protects production: the new
+    // contract is additive and confined to its own file. No earlier migration
+    // — least of all the one carrying complete_sale_v3 — may have been edited
+    // to accommodate it.
     const migrationsDir = join(repoRoot, "supabase/migrations");
     const migrations = readdirSync(migrationsDir).filter((name) => name.endsWith(".sql"));
 
-    for (const name of migrations) {
-      const sql = readFileSync(join(migrationsDir, name), "utf-8");
+    const carriers = migrations.filter((name) =>
+      readFileSync(join(migrationsDir, name), "utf-8").includes("complete_sale_v4")
+    );
 
-      for (const premature of ["occurred_at", "complete_sale_v4", "offline_queued"]) {
-        expect(`${name} contains ${premature}`).toBe(`${name} contains ${premature}`);
-        expect(sql).not.toContain(premature);
-      }
+    expect(carriers).toEqual([
+      "20260819120000_offline_sale_contract_and_complete_sale_v4.sql",
+    ]);
+
+    // v3's own migration is untouched by the new contract.
+    const v3Migration = readFileSync(
+      join(migrationsDir, "20260810120000_modifier_contract_and_complete_sale_v3.sql"),
+      "utf-8"
+    );
+
+    for (const added of ["occurred_at", "offline_queued", "complete_sale_v4"]) {
+      expect(`v3 migration contains ${added}`).toBe(`v3 migration contains ${added}`);
+      expect(v3Migration).not.toContain(added);
     }
   });
 
   it("the client still calls complete_sale_v3 and nothing newer", () => {
     const deviceRpc = read("lib/device.rpc.ts");
 
+    // 24.5B built the server contract but wired NO client onto it. The device
+    // still calls v3, and that is the point of the phase boundary.
     expect(deviceRpc).toContain('rpc("complete_sale_v3"');
     expect(deviceRpc).not.toContain("complete_sale_v4");
   });

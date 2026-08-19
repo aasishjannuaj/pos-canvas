@@ -292,15 +292,27 @@ describe("Feature 24.5A stops at read-only startup", () => {
     }
   });
 
-  it("no migration was added for offline work", () => {
+  it("the server contract exists but NO client is wired onto it", () => {
+    // SUPERSEDED BY 24.5B. This asserted that no migration mentioned the
+    // offline contract at all; 24.5B created it. The phase boundary that
+    // matters now is different and stricter: the server is ready, and the
+    // client has not moved. 24.5A's read-only startup is still the only
+    // offline behaviour a till has.
     const migrationsDir = join(repoRoot, "supabase/migrations");
+    const withV4 = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .filter((f) => readFileSync(join(migrationsDir, f), "utf-8").includes("complete_sale_v4"));
 
-    for (const name of readdirSync(migrationsDir).filter((f) => f.endsWith(".sql"))) {
-      const sql = readFileSync(join(migrationsDir, name), "utf-8");
+    expect(withV4).toHaveLength(1);
 
-      for (const premature of ["occurred_at", "complete_sale_v4", "offline_queued"]) {
-        expect(`${name}: ${premature}`).toBe(`${name}: ${premature}`);
-        expect(sql).not.toContain(premature);
+    // Nothing in the shipped client may reference v4, occurred_at or the
+    // offline source until 24.5C/D adopt it.
+    for (const file of productSourceFiles()) {
+      const source = read(file);
+
+      for (const premature of ["complete_sale_v4", "occurredAt", "offline_queued"]) {
+        expect(`${file}: ${premature}`).toBe(`${file}: ${premature}`);
+        expect(source).not.toContain(premature);
       }
     }
   });

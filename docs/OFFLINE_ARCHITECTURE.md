@@ -5,11 +5,16 @@
 | Phase | Contents | Status |
 |---|---|---|
 | **24.5A** | IndexedDB foundation, cached pairing assertion, cached immutable config, integrity validation, 7-day lease, read-only offline startup, **offline checkout disabled** | **IMPLEMENTED** |
-| 24.5B | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **NOT IMPLEMENTED** |
+| **24.5B** | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **IMPLEMENTED** |
 | 24.5C | Durable sale queue + persisted idempotency key | **NOT IMPLEMENTED** |
 | 24.5D | Sync engine | **NOT IMPLEMENTED** |
 | 24.5E | Offline checkout, provisional receipts, inventory reporting, owner Devices UI | **NOT IMPLEMENTED** |
 | 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
+
+**The server is ready; no client uses it.** 24.5B added `complete_sale_v4` and
+its schema, and deliberately wired nothing onto it — the device still calls
+`complete_sale_v3`. Server readiness precedes client adoption so the contract can
+be reviewed and deployed on its own.
 
 **No sale can be completed offline today.** 24.5A lets a paired till reopen and
 browse its pinned menu during an outage; the Complete Sale action is fenced off
@@ -27,6 +32,101 @@ describes queued sales is still design, not behaviour.
 | Transport-failure vs server-rejection | `lib/deviceConnectivity.ts` (pure) |
 | Cold-start fallback decision | `decideOfflineFallback` in `lib/deviceSession.ts` (pure) |
 | Operator banner | `components/device/DeviceOfflineBanner.tsx` |
+
+### What 24.5B shipped
+
+`supabase/migrations/20260819120000_offline_sale_contract_and_complete_sale_v4.sql`
+— additive only, wrapped in an explicit transaction, with `complete_sale_v3`
+left byte-for-byte untouched and still callable.
+
+| Change | Detail |
+|---|---|
+| `orders.occurred_at timestamptz NOT NULL` | backfilled from `created_at`; `created_at` itself unchanged |
+| `orders.source text NOT NULL DEFAULT 'online'` | checked against `('online','offline_queued')`; historical rows backfill to `online` |
+| `orders.has_inventory_shortfall boolean` | order-level flag, partial index for reconciliation |
+| `order_items.inventory_shortfall integer` | per line, `0 <= shortfall <= quantity` |
+| `complete_sale_v4(...)` | v3's body plus `p_occurred_at` and `p_source`, both defaulted |
+
+**Exact `occurred_at` semantics.** Validated only for a NEW sale; a replay
+returns before the parameter is read, and `occurred_at` is deliberately **not**
+part of the canonical hash so a retry whose clock drifted is still the same sale.
+
+| Case | Server behaviour |
+|---|---|
+| `source = 'online'` with a non-null `p_occurred_at` | **reject** — `An online sale cannot declare its own sale time` |
+| `source = 'online'` | `occurred_at := now()` |
+| `source = 'offline_queued'` with null `p_occurred_at` | **reject** — `An offline sale must declare when it happened` |
+| later than `now() + 5 minutes` | **reject** — `Offline sale time is in the future` |
+| earlier than `paired_devices.created_at - 5 minutes` | **reject** — `Offline sale time predates this device` |
+| earlier than `now() - 7 days - 5 minutes` | **reject** — `Offline sale time is older than the offline limit` |
+| otherwise | `occurred_at := p_occurred_at` |
+
+In one line, a new offline sale must satisfy all three:
+
+```
+occurred_at >= paired_devices.created_at - 5 minutes
+occurred_at >= now() - 7 days - 5 minutes
+occurred_at <= now() + 5 minutes
+```
+
+**The 7-day server bound is the same number as the client lease.**
+`c_offline_max_age` in the migration and `OFFLINE_DEVICE_LEASE_MS` in
+`lib/deviceOfflineCache.ts` are both seven days, and a test pins them together.
+The client refuses to *open* offline past the lease; without the same bound on
+the server, a device could still *submit* a sale claiming to be from outside it,
+and the two halves of one owner-approved policy would disagree.
+
+**Why the pairing floor alone was not enough** (found in review of the first
+24.5B draft, and fixed): a till paired months ago satisfies
+`occurred_at >= paired_at` for *any* date since. Without an age ceiling, a
+submission created today could be backdated months — and slid in front of a
+`revoked_at` set last week. Because the revocation window below compares against
+`occurred_at`, an unbounded past was an unbounded bypass of revocation. With the
+7-day ceiling, anything old enough to precede a revocation older than a week is
+already refused, so backdating cannot reach it.
+
+The 5-minute skew allowance matches `OFFLINE_CLOCK_TOLERANCE_MS` in
+`lib/deviceOfflineCache.ts`, so client and server agree on "close enough". The
+pairing floor uses `paired_devices.created_at`, a **server** timestamp the
+device cannot move.
+
+**Nothing is clamped.** An excessively old timestamp is rejected, never quietly
+moved to the boundary — clamping would write a sale time nobody reported into
+the books to make a validation pass. The sale stays in the device queue.
+
+**All of this applies to a NEW sale only.** The idempotency lookup returns
+before any temporal check runs, so an already-committed sale replays
+successfully even when it is now older than seven days, the device has since
+been revoked, or the clock has moved far beyond the original sale. A replay
+allocates no order number, mutates no inventory and writes no audit row.
+
+**A change from §6.1, recorded rather than buried.** 24.4 proposed storing a
+null `occurred_at` and flagging the order when the clock could not be validated.
+24.5B **rejects the call instead**, per the owner's later direction not to write
+unverifiable financial history. The sale is not lost: a rejection leaves it in
+the device queue for 24.5D to surface as `needs_attention`. `occurred_at` is
+therefore `NOT NULL`. **24.5C/D must not discard a queued sale on these errors.**
+
+**Exact revocation semantics.** `complete_sale_v4` does **not** call
+`resolve_sale_owner` for a device, because that function filters
+`revoked_at is null` and would refuse a revoked device before the idempotency
+lookup could run. v4 resolves the pairing row itself, without that filter, and
+decides per case:
+
+| Case | Behaviour |
+|---|---|
+| no pairing row for this project | **reject** — `Project not found or access denied` (unchanged, non-probing) |
+| replay of an existing order, device now revoked | **succeeds** — allocates nothing, mutates nothing |
+| new sale, revoked, `source = 'online'` | **reject** |
+| new sale, revoked, `occurred_at < revoked_at` | **recorded** |
+| new sale, revoked, `occurred_at >= revoked_at` | **reject** — `Offline sale occurred after this device was revoked` |
+
+**Inventory.** Online is unchanged and still hard-rejects. An offline queued
+sale floors tracked stock at 0 and records the shortfall per line — the money is
+real and the record must survive. The `inventory_transactions` audit row records
+`stock_before - stock_after`, the **actual** decrement, because that table
+carries its own `quantity_after = quantity_before + quantity_change` check that
+the requested quantity would violate once stock can floor.
 
 The safety property that matters most: **a server that ANSWERED is never
 overridden by cache.** `permitsOfflineFallback` admits only a classified
