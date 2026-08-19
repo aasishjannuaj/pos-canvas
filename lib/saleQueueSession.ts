@@ -20,6 +20,7 @@
 import {
   SALE_QUEUE_SCHEMA_VERSION,
   SALE_REQUEST_PAYLOAD_VERSION,
+  isDueForAttempt,
   markQueuedSaleAttempt,
   readQueuedSale,
   recoverInterruptedSale,
@@ -135,6 +136,9 @@ export async function enqueueSale(input: EnqueueSaleInput): Promise<QueueResult<
     nextAttemptAt: null,
     lastErrorCode: null,
     lastErrorMessage: null,
+    serverOrderId: null,
+    serverOrderNumber: null,
+    serverCreatedAt: null,
   };
 
   // Validated BEFORE it is written, using the same reader that guards every
@@ -252,6 +256,63 @@ export async function listPendingSales(): Promise<QueueResult<QueuedSale[]>> {
   return listing.ok
     ? { ok: true, value: listing.value.sales.filter((sale) => sale.state === "pending") }
     : listing;
+}
+
+/**
+ * Feature 24.5D — pending sales whose backoff window has elapsed, FIFO.
+ *
+ * A record still inside its window is skipped, not reordered: it keeps its
+ * place in the queue and simply is not eligible yet. That is what lets one
+ * failing sale back off without holding up the sales behind it.
+ */
+export async function listDueSales(now: number): Promise<QueueResult<QueuedSale[]>> {
+  const listing = await listQueuedSales();
+
+  return listing.ok
+    ? { ok: true, value: listing.value.sales.filter((sale) => isDueForAttempt(sale, now)) }
+    : listing;
+}
+
+/**
+ * Feature 24.5D — records the server's identity for a synced sale.
+ *
+ * The state change and the order identity are written TOGETHER, so a record can
+ * never be `synced` without the order number that proves it. Retry metadata is
+ * normalised at the same time: there is nothing left to retry.
+ */
+export async function markSynced(
+  queueRecordId: string,
+  receipt: { orderId: string; orderNumber: string; createdAt: string | null },
+  now: string
+): Promise<QueueResult<QueuedSale>> {
+  return withDb(async (db) => {
+    const raw = await readQueuedSaleRecord(db, queueRecordId);
+
+    if (!raw.ok) return { ok: false, reason: "storage_unavailable" };
+    if (raw.value === null) return { ok: false, reason: "not_found" };
+
+    const parsed = readQueuedSale(raw.value);
+
+    if (!parsed.ok) return { ok: false, reason: "corrupt_record" };
+
+    const moved = transitionQueuedSale(parsed.record, "synced", now);
+
+    if (!moved.ok) return { ok: false, reason: "illegal_transition" };
+
+    const synced: QueuedSale = {
+      ...moved.record,
+      serverOrderId: receipt.orderId,
+      serverOrderNumber: receipt.orderNumber,
+      serverCreatedAt: receipt.createdAt,
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    };
+
+    const written = await putQueuedSale(db, synced);
+
+    return written.ok ? { ok: true, value: synced } : { ok: false, reason: "write_failed" };
+  });
 }
 
 export async function getQueueSummary(): Promise<QueueResult<QueueSummary>> {

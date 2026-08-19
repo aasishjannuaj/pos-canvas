@@ -319,14 +319,15 @@ describe("Feature 24.5A stops at read-only startup", () => {
 
     expect(withV4).toHaveLength(1);
 
-    // NARROWED BY 24.5C. The queue legitimately records `occurredAt` and
-    // `offline_queued` — that is the sale intent it exists to persist. What
-    // must still be true is that nothing CALLS the v4 RPC, and that the runtime
-    // checkout path has not adopted any of it.
-    for (const file of productSourceFiles()) {
-      expect(`${file}: complete_sale_v4`).toBe(`${file}: complete_sale_v4`);
-      expect(code(read(file))).not.toContain("complete_sale_v4");
-    }
+    // NARROWED AGAIN BY 24.5D. The queue records `occurredAt`/`offline_queued`,
+    // and the sync adapter now issues v4 — both are the approved work. The
+    // surviving property is where that call may live: exactly one adapter, and
+    // never the checkout path.
+    const v4Callers = productSourceFiles().filter((file) =>
+      code(read(file)).includes('rpc("complete_sale_v4"')
+    );
+
+    expect(v4Callers).toEqual(["lib/offlineSaleRpc.ts"]);
 
     for (const file of [RUNTIME, DEVICE_APP, "lib/device.rpc.ts", "lib/saleSubmission.ts"]) {
       const source = code(read(file));

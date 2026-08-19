@@ -7,7 +7,7 @@
 | **24.5A** | IndexedDB foundation, cached pairing assertion, cached immutable config, integrity validation, 7-day lease, read-only offline startup, **offline checkout disabled** | **IMPLEMENTED** |
 | **24.5B** | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **IMPLEMENTED** |
 | **24.5C** | Durable sale queue + persisted idempotency key, IndexedDB v2 | **IMPLEMENTED** |
-| 24.5D | Sync engine | **NOT IMPLEMENTED** |
+| **24.5D** | Sync engine — FIFO drain, single-flight, persisted backoff | **IMPLEMENTED** |
 | 24.5E | Offline checkout, provisional receipts, inventory reporting, owner Devices UI | **NOT IMPLEMENTED** |
 | 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
 
@@ -21,6 +21,104 @@ browse its pinned menu during an outage; the Complete Sale action is fenced off
 in `PosRuntime.completeSale` before anything can submit, and no sale, queue,
 receipt or idempotency key is written to disk. Everything below §20 that
 describes queued sales is still design, not behaviour.
+
+### What 24.5D actually shipped
+
+| Concern | Module |
+|---|---|
+| Error classification + backoff | `lib/saleSyncClassifier.ts` (pure) |
+| The **only** `complete_sale_v4` call | `lib/offlineSaleRpc.ts` |
+| Drain loop, single-flight, hooks | `lib/saleSyncEngine.ts` |
+
+**Sync lifecycle.** `recoverInterruptedSyncs` → list due (FIFO) → for each:
+`pending → syncing` → submit → `synced` | `pending` (backoff) |
+`needs_attention`. The state moves to `syncing` and the attempt is counted
+*before* the request leaves, so a process death mid-flight is recoverable by the
+same rule that recovered it at startup.
+
+**FIFO and one at a time.** Sales are submitted strictly oldest-first and
+strictly sequentially — a burst of concurrent financial writes buys nothing on a
+till with a handful of sales and makes failure attribution much harder. **The
+loop never breaks early**: a sale that needs attention must not strand the sales
+behind it.
+
+**Single-flight, scoped to an engine.** `createSaleSyncEngine()` holds its own
+in-flight promise; a second `run` on the SAME engine awaits the first and
+receives the same report, so "sync now" pressed five times is one pass. A shared
+singleton backs the module-level helpers, because there is one IndexedDB queue
+per origin.
+
+Two independent engines do not block each other, and cannot double-submit
+either: claiming a record is a `pending → syncing` transition read from storage,
+so whichever engine arrives second finds the transition illegal and skips. The
+queue is the arbiter; single-flight stops them competing in the first place.
+
+**Recovery runs on the STARTUP trigger only, never inside a drain.** Reclaiming
+a `syncing` record cannot distinguish "a dead process left this behind" from
+"another engine is submitting it right now", so doing it per-drain would
+un-claim work still on the wire. Startup is the one moment where that ambiguity
+does not exist. A reconnect or a manual press drains without reclaiming.
+
+**Backoff.** `5s → 15s → 45s → 2m15s → 6m45s`, capped at **15 minutes**
+(base 5s, ×3, max 15m). `nextAttemptAt` is persisted, so a restart resumes the
+schedule rather than resetting it, and a record still inside its window is
+skipped without losing its place. **No jitter** — deterministic tests matter more
+here than a thundering herd that one till cannot form. After
+**10 attempts** a record stops retrying and asks for a person.
+
+**Error classification.** Transport first: if nothing answered, message text is
+meaningless. Only a demonstrated server reply is treated as evidence.
+
+| Condition | Outcome |
+|---|---|
+| Transport failure — nothing answered | **retry** (→ `needs_attention` at the cap) |
+| Unknown outcome — lost response, timeout | **retry** (→ `needs_attention` at the cap) |
+| Known server message (24 catalogued) | **needs_attention**, with a stable code |
+| Server answered, message not catalogued | **needs_attention** *immediately* |
+| Locally unreadable record | **permanent_failure** |
+
+The last two rows are the distinction worth being precise about. An **unknown
+outcome** means we cannot tell whether the request landed, so retrying is right
+and free. An **uncatalogued server rejection** means PostgreSQL definitely
+answered and its answer is deterministic — resubmitting the identical request
+would produce the identical rejection, so it stops at once and waits for a
+person.
+
+**No server answer maps to `permanent_failure`.** "Retry and review cannot help"
+is a claim the server never actually makes — even a hash conflict is resolvable
+by someone confirming the original order exists. `permanent_failure` is reserved
+for a record that no longer parses: there is no request to make, and no review
+turns unreadable bytes back into a sale. It is still never deleted.
+
+**Unknown retries here, and fails closed in 24.5A** — deliberately opposite
+defaults. There, an unknown asked "may this device open a cached POS?" and
+guessing yes would let a revoked till trade. Here it asks "did that submission
+land?", and retrying is free because of the durable idempotency key. The
+expensive mistake is the other one: abandoning a sale that was never recorded.
+
+**Lost-response recovery.** The persisted `saleRequestId` is passed straight
+through on every retry. `complete_sale_v4` resolves it before allocating an
+order number, mutating inventory or writing an audit row, so a retry after a
+lost response returns the order already created. Tested end to end: two
+submissions, one server order, queue ends `synced`.
+
+**Success.** `serverOrderId`, `serverOrderNumber` and `serverCreatedAt` are
+written in the same operation as the `synced` transition, so a record can never
+be synced without the order number that proves it. Records are **kept** after
+sync — 24.5E reconciles a provisional receipt against the real order number.
+
+**Known limitation — message-text errors.** `complete_sale_v4` raises business
+errors as message strings rather than stable SQLSTATEs, so
+`KNOWN_SERVER_ERRORS` matches 24 messages **by equality**, never by substring.
+Several v4 messages interpolate a `%` placeholder and cannot be matched at all;
+those fall through to `needs_attention`, which is the safe direction. A stable
+server error-code contract would replace that table entirely and is the right
+fix when one exists.
+
+**Nothing runs it yet.** No caller invokes `runSaleSync`, nothing calls
+`enqueueSale`, offline checkout is still fenced, and online checkout still calls
+`complete_sale_v3`. The startup / reconnect / manual hooks are exported for
+24.5E to attach.
 
 ### What 24.5C actually shipped
 

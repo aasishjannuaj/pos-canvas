@@ -209,13 +209,25 @@ describe("24.5C stores intents and submits nothing", () => {
     expect(rpc).toContain('rpc("complete_sale_v3"');
     expect(rpc).not.toContain("complete_sale_v4");
 
-    // code(), not read(): the queue modules DOCUMENT that 24.5D will call v4.
-    // Naming it in a comment is not calling it.
+    // NARROWED BY 24.5D. The sync adapter now legitimately issues v4 — that is
+    // the whole feature. What must still be true is that the CHECKOUT path
+    // never touches it: an online sale goes to v3, and the runtime knows
+    // nothing about the offline RPC.
     const callers = productSourceFiles().filter((file) =>
-      code(read(file)).includes("complete_sale_v4")
+      code(read(file)).includes('rpc("complete_sale_v4"')
     );
 
-    expect(callers).toEqual([]);
+    expect(callers).toEqual(["lib/offlineSaleRpc.ts"]);
+
+    for (const file of [
+      "lib/device.rpc.ts",
+      "lib/saleSubmission.ts",
+      "components/runtime/PosRuntime.tsx",
+      "components/device/DeviceApp.tsx",
+    ]) {
+      expect(`${file}: complete_sale_v4`).toBe(`${file}: complete_sale_v4`);
+      expect(code(read(file))).not.toContain("complete_sale_v4");
+    }
   });
 
   it("no provisional receipt or owner queue UI was built", () => {

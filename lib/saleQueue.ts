@@ -123,6 +123,23 @@ export type QueuedSale = {
   nextAttemptAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
+
+  /**
+   * Feature 24.5D — the server's identity for this sale, once it has one.
+   *
+   * ADDITIVE AND OPTIONAL, so the envelope version does not move: a record
+   * written before these existed reads back with them null, which is exactly
+   * what "not synced yet" means anyway. Nothing has ever enqueued in
+   * production, so this costs no migration — but the shape is chosen so it
+   * would not have, either.
+   *
+   * Kept AFTER sync rather than discarded because 24.5E has to reconcile a
+   * provisional receipt against the real order number, and the operator holding
+   * a paper slip needs that mapping to exist somewhere.
+   */
+  serverOrderId: string | null;
+  serverOrderNumber: string | null;
+  serverCreatedAt: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -287,6 +304,23 @@ export function summarizeQueue(records: readonly QueuedSale[]): QueueSummary {
   };
 }
 
+/**
+ * Is this record due for another attempt?
+ *
+ * A persisted nextAttemptAt in the future is a backoff window the engine must
+ * respect — including across a restart, which is the whole reason it is stored
+ * rather than held in a timer. An unparseable value is treated as due, because
+ * refusing to ever retry a sale over a bad timestamp would strand money.
+ */
+export function isDueForAttempt(record: QueuedSale, now: number): boolean {
+  if (record.state !== "pending") return false;
+  if (record.nextAttemptAt === null) return true;
+
+  const due = Date.parse(record.nextAttemptAt);
+
+  return Number.isFinite(due) ? due <= now : true;
+}
+
 /** FIFO: oldest sale first, ties broken by record id so the order is total. */
 export function sortQueueFifo(records: readonly QueuedSale[]): QueuedSale[] {
   return [...records].sort((a, b) => {
@@ -379,6 +413,7 @@ export function readQueuedSale(value: unknown): QueueReadResult {
   const updatedAt = isoTimestamp(raw.updatedAt);
   const lastAttemptAt = nullableIsoTimestamp(raw.lastAttemptAt);
   const nextAttemptAt = nullableIsoTimestamp(raw.nextAttemptAt);
+  const serverCreatedAt = nullableIsoTimestamp(raw.serverCreatedAt);
 
   if (
     queueRecordId === null ||
@@ -390,7 +425,8 @@ export function readQueuedSale(value: unknown): QueueReadResult {
     queuedAt === null ||
     updatedAt === null ||
     !lastAttemptAt.ok ||
-    !nextAttemptAt.ok
+    !nextAttemptAt.ok ||
+    !serverCreatedAt.ok
   ) {
     return { ok: false, reason: "malformed" };
   }
@@ -463,6 +499,12 @@ export function readQueuedSale(value: unknown): QueueReadResult {
       nextAttemptAt: nextAttemptAt.value,
       lastErrorCode: nullableString(raw.lastErrorCode),
       lastErrorMessage: nullableString(raw.lastErrorMessage),
+      // Absent means "never synced", which is the ordinary case for every
+      // record until the engine confirms one.
+      serverOrderId: nullableString(raw.serverOrderId),
+      serverOrderNumber: nullableString(raw.serverOrderNumber),
+      // Held to the same bar as every other timestamp in this record.
+      serverCreatedAt: serverCreatedAt.value,
     },
   };
 }

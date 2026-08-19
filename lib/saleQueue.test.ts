@@ -45,6 +45,9 @@ function makeSale(overrides: Partial<QueuedSale> = {}): QueuedSale {
     nextAttemptAt: null,
     lastErrorCode: null,
     lastErrorMessage: null,
+    serverOrderId: null,
+    serverOrderNumber: null,
+    serverCreatedAt: null,
     ...overrides,
   };
 }
