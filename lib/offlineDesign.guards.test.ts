@@ -167,16 +167,19 @@ describe("Feature 24.4 implemented no offline runtime", () => {
   // ONE module and that the cache holds configuration and never a sale.
   //
   // What survives here is everything 24.5A was still not allowed to do.
-  it("no sale queue, sync engine or offline-sale module exists", () => {
+  it("no sync engine or offline-sale submission module exists", () => {
+    // SUPERSEDED IN PART BY 24.5C. lib/saleQueue.ts was on this list as a fence
+    // around the design phase; 24.5C implemented it. What survives is the next
+    // fence: 24.5D owns submission, and none of it exists yet.
     for (const premature of [
       "lib/offline.ts",
-      "lib/offlineQueue.ts",
       "lib/offlineSale.ts",
       "lib/syncEngine.ts",
-      "lib/saleQueue.ts",
+      "lib/offlineSync.ts",
+      "lib/saleSync.ts",
     ]) {
-      expect(`24.5C+ module exists early: ${premature}`).toBe(
-        `24.5C+ module exists early: ${premature}`
+      expect(`24.5D+ module exists early: ${premature}`).toBe(
+        `24.5D+ module exists early: ${premature}`
       );
       expect(exists(premature)).toBe(false);
     }

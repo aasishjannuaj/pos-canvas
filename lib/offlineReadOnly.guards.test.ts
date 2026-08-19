@@ -195,12 +195,23 @@ describe("a server that answered is never overridden by cache", () => {
 // ---------------------------------------------------------------------------
 
 describe("one shared implementation, no platform adapter", () => {
-  it("IndexedDB appears in exactly one module", () => {
-    const offenders = productSourceFiles().filter(
-      (file) => file !== STORE && /indexedDB|IDBDatabase|IDBFactory/.test(read(file))
+  it("exactly one module OPENS IndexedDB", () => {
+    // Reframed by 24.5C. The property that matters is that one adapter owns the
+    // connection — not that no other file may name IDBDatabase, which
+    // lib/saleQueueSession.ts now legitimately does as a parameter type without
+    // ever opening a database itself.
+    const openers = productSourceFiles().filter((file) =>
+      /indexedDB\.open\(|idb\.open\(/.test(code(read(file)))
     );
 
-    expect(offenders).toEqual([]);
+    expect(openers).toEqual([STORE]);
+
+    // And nobody reaches for the global except that adapter.
+    const globalUsers = productSourceFiles().filter(
+      (file) => file !== STORE && /globalThis\.indexedDB|window\.indexedDB/.test(code(read(file)))
+    );
+
+    expect(globalUsers).toEqual([]);
   });
 
   it("navigator.storage is requested from that same module only", () => {
@@ -264,23 +275,26 @@ describe("one shared implementation, no platform adapter", () => {
 // ---------------------------------------------------------------------------
 
 describe("Feature 24.5A stops at read-only startup", () => {
-  it("no sale queue exists, in code or in storage", () => {
-    for (const premature of [
-      "lib/offlineQueue.ts",
-      "lib/offlineSale.ts",
-      "lib/saleQueue.ts",
-      "lib/syncEngine.ts",
-    ]) {
+  it("no sync engine exists, and nothing submits a queued sale", () => {
+    // SUPERSEDED IN PART BY 24.5C, deliberately. This used to assert that no
+    // queue module and no queue object store existed at all — a fence around
+    // 24.5A. 24.5C built exactly that, so keeping the fence would mean a
+    // passing suite could only be bought by not doing the approved work.
+    //
+    // lib/offlineQueue.guards.test.ts now asserts the queue's own properties.
+    // What survives here is the part 24.5C still was not allowed to do: submit.
+    for (const premature of ["lib/syncEngine.ts", "lib/offlineSync.ts", "lib/saleSync.ts"]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);
       expect(exists(premature)).toBe(false);
     }
 
-    // No object store is reserved either — see the store module's comment.
-    const store = code(read(STORE));
+    for (const file of ["lib/saleQueue.ts", "lib/saleQueueSession.ts"]) {
+      const source = code(read(file));
 
-    expect(store).not.toContain("sale-queue");
-    expect(store).not.toContain("queueStore");
-    expect((store.match(/createObjectStore\(/g) ?? []).length).toBe(1);
+      expect(`${file} submits`).toBe(`${file} submits`);
+      expect(source).not.toContain("complete_sale");
+      expect(source).not.toContain("supabase");
+    }
   });
 
   it("the cache stores configuration only, never a sale", () => {
@@ -305,12 +319,19 @@ describe("Feature 24.5A stops at read-only startup", () => {
 
     expect(withV4).toHaveLength(1);
 
-    // Nothing in the shipped client may reference v4, occurred_at or the
-    // offline source until 24.5C/D adopt it.
+    // NARROWED BY 24.5C. The queue legitimately records `occurredAt` and
+    // `offline_queued` — that is the sale intent it exists to persist. What
+    // must still be true is that nothing CALLS the v4 RPC, and that the runtime
+    // checkout path has not adopted any of it.
     for (const file of productSourceFiles()) {
-      const source = read(file);
+      expect(`${file}: complete_sale_v4`).toBe(`${file}: complete_sale_v4`);
+      expect(code(read(file))).not.toContain("complete_sale_v4");
+    }
 
-      for (const premature of ["complete_sale_v4", "occurredAt", "offline_queued"]) {
+    for (const file of [RUNTIME, DEVICE_APP, "lib/device.rpc.ts", "lib/saleSubmission.ts"]) {
+      const source = code(read(file));
+
+      for (const premature of ["occurredAt", "offline_queued", "enqueueSale"]) {
         expect(`${file}: ${premature}`).toBe(`${file}: ${premature}`);
         expect(source).not.toContain(premature);
       }

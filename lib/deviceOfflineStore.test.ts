@@ -15,6 +15,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   CACHE_STORE,
+  SALE_QUEUE_STORE,
   OFFLINE_DB_NAME,
   OFFLINE_DB_VERSION,
   clearDeviceCache,
@@ -53,11 +54,15 @@ describe("the database is created with the expected shape", () => {
     db.close();
   });
 
-  it("reserves NO sale-queue store — 24.5C has not designed one", () => {
-    // An empty store would be a promise of a contract that does not exist yet,
-    // shipped to every till and never exercised.
+  it("holds exactly the two approved stores", () => {
+    // SUPERSEDED BY 24.5C. This used to assert that ONLY device-cache existed,
+    // on the grounds that an unused queue store would be an empty promise.
+    // 24.5C designed and built the queue, so the store is real now — but the
+    // list stays closed, so a third store cannot appear unnoticed.
     return open().then((db) => {
-      expect(Array.from(db.objectStoreNames)).toEqual([CACHE_STORE]);
+      expect(Array.from(db.objectStoreNames).sort()).toEqual(
+        [CACHE_STORE, SALE_QUEUE_STORE].sort()
+      );
       db.close();
     });
   });

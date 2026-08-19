@@ -6,7 +6,7 @@
 |---|---|---|
 | **24.5A** | IndexedDB foundation, cached pairing assertion, cached immutable config, integrity validation, 7-day lease, read-only offline startup, **offline checkout disabled** | **IMPLEMENTED** |
 | **24.5B** | Server contract — `occurred_at`, `source`, offline stock policy, revocation window, `complete_sale_v4` | **IMPLEMENTED** |
-| 24.5C | Durable sale queue + persisted idempotency key | **NOT IMPLEMENTED** |
+| **24.5C** | Durable sale queue + persisted idempotency key, IndexedDB v2 | **IMPLEMENTED** |
 | 24.5D | Sync engine | **NOT IMPLEMENTED** |
 | 24.5E | Offline checkout, provisional receipts, inventory reporting, owner Devices UI | **NOT IMPLEMENTED** |
 | 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
@@ -21,6 +21,71 @@ browse its pinned menu during an outage; the Complete Sale action is fenced off
 in `PosRuntime.completeSale` before anything can submit, and no sale, queue,
 receipt or idempotency key is written to disk. Everything below §20 that
 describes queued sales is still design, not behaviour.
+
+### What 24.5C actually shipped
+
+| Concern | Module |
+|---|---|
+| Record shape, state machine, validation, recovery rule | `lib/saleQueue.ts` (pure) |
+| Queue API — enqueue, read, transition, recover, summarize | `lib/saleQueueSession.ts` |
+| IndexedDB **v2** and the `sale-queue` store | `lib/deviceOfflineStore.ts` |
+
+**IndexedDB version 2.** The upgrade is purely additive: `device-cache` is not
+dropped, recreated or migrated, so a till already running 24.5A keeps its pinned
+config and pairing assertion. The new `sale-queue` store is keyed by
+`queueRecordId`, with three indexes — `saleRequestId` (**unique**), `state`, and
+`queuedAt`.
+
+The unique index is the load-bearing one: **two records can never claim the same
+sale**, and that is enforced by the storage engine rather than by a
+read-then-write in application code that a crash could interleave.
+
+**Queue record.** Everything `complete_sale_v4` needs and nothing else:
+identity (`deviceAuthUserId`, `deviceId`, `projectId`, `buildJobId`), the request
+(`paymentMethod`, `tipAmount` fixed at 0, `items`, `occurredAt`,
+`source: "offline_queued"`), and sync state (`state`, `queuedAt`, `updatedAt`,
+`attemptCount`, `lastAttemptAt`, `nextAttemptAt`, `lastErrorCode`,
+`lastErrorMessage`). Two envelope versions are carried: `queueSchemaVersion` for
+the storage shape and `requestPayloadVersion` for the server contract.
+
+**No prices are stored.** Not unit price, not line total, not order total.
+`complete_sale_v4` prices from the pinned build snapshot and ignores anything a
+client sends, so a stored amount would look authoritative, never be used, and
+eventually be believed. 24.5E's provisional receipt recomputes from the cached
+pinned config — the same single source of truth the server uses.
+
+**Transition table** (`QUEUE_TRANSITIONS`):
+
+| From | To |
+|---|---|
+| `pending` | `syncing` |
+| `syncing` | `pending`, `synced`, `needs_attention`, `permanent_failure` |
+| `needs_attention` | `pending`, `permanent_failure` |
+| `synced` | — terminal |
+| `permanent_failure` | — terminal |
+
+`synced → pending` is refused: the server owns that sale, and re-queueing it
+would invite a second submission of money already recorded. A transition to the
+*same* state is refused too, so a caller that believes it is advancing the
+machine always learns when it is not.
+
+**Interrupted-sync recovery.** On initialization, any record stranded in
+`syncing` returns to `pending`, preserving attempt metadata. Safe because of
+server-side idempotency, not optimism: the interrupted submission carried that
+record's `saleRequestId`, and `complete_sale_v4` resolves that key *before*
+allocating an order number, mutating inventory or writing an audit row. Retrying
+therefore either creates the sale or returns the one already created. Attempt
+history is kept deliberately — erasing it would let a record that keeps dying
+mid-sync retry forever without reaching a cap.
+
+**Corrupt records are quarantined, never dropped.** A row that fails validation
+is reported by `listQueuedSales` as `quarantined` and left on disk. It is money
+someone took; the honest response is "there is a row here I cannot understand",
+which 24.5D turns into a `needs_attention` item.
+
+**Nothing submits.** No client calls `enqueueSale`, offline checkout is still
+fenced in `PosRuntime.completeSale`, and online checkout still calls
+`complete_sale_v3`. 24.5C builds the durable floor; 24.5D stands on it.
 
 ### What 24.5A actually shipped
 
