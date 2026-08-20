@@ -18,6 +18,7 @@ import {
   PAIRING_ASSERTION_KEY,
   PINNED_CONFIG_KEY,
 } from "@/lib/deviceOfflineCache";
+import { UNCERTAIN_SALE_KEY } from "@/lib/uncertainSaleRecord";
 
 /** Database name and version. Bump the version to add or change a store. */
 export const OFFLINE_DB_NAME = "pos-canvas-device";
@@ -205,11 +206,67 @@ export async function writeCacheKey(
   return result.ok ? { ok: true, value: undefined } : result;
 }
 
-/** Removes every cached record. Used on unpair, re-pair and confirmed revocation. */
+/**
+ * Removes the cached CONFIGURATION. Used on unpair, re-pair and confirmed
+ * revocation.
+ *
+ * DELETES NAMED KEYS RATHER THAN CLEARING THE STORE — a Feature 24.5F
+ * correction, and the distinction is financial. This store now also holds the
+ * uncertain-online-sale record: the idempotency key of a request that was
+ * dispatched and never answered, which may be the only proof that an order
+ * exists on the server. `store.clear()` would take it out along with the menu.
+ *
+ * A revocation is exactly the moment that would have happened silently, because
+ * revocation is not gated on the reset-safety check the way an operator reset
+ * is. Configuration is disposable and is disposed of here; evidence of money is
+ * neither, and is left alone.
+ */
 export async function clearDeviceCache(
   db: IDBDatabase
 ): Promise<OfflineStoreResult<void>> {
-  const result = await withStore<undefined>(db, CACHE_STORE, "readwrite", (store) => store.clear());
+  for (const key of [PAIRING_ASSERTION_KEY, PINNED_CONFIG_KEY]) {
+    const result = await withStore<undefined>(db, CACHE_STORE, "readwrite", (store) =>
+      store.delete(key)
+    );
+
+    if (!result.ok) return result;
+  }
+
+  return { ok: true, value: undefined };
+}
+
+// ---------------------------------------------------------------------------
+// Feature 24.5F — the uncertain online sale
+//
+// One record, one key, in the store that already exists. No new database and no
+// new object store: this is a single typed record with a stable key, which is
+// exactly what device-cache is for. A dedicated store would have meant an
+// IndexedDB version bump and an upgrade path, for no gain.
+// ---------------------------------------------------------------------------
+
+export async function readUncertainSaleRecordRaw(
+  db: IDBDatabase
+): Promise<OfflineStoreResult<unknown>> {
+  return readCacheKey(db, UNCERTAIN_SALE_KEY);
+}
+
+export async function writeUncertainSaleRecordRaw(
+  db: IDBDatabase,
+  value: unknown
+): Promise<OfflineStoreResult<void>> {
+  return writeCacheKey(db, UNCERTAIN_SALE_KEY, value);
+}
+
+/**
+ * Removes the record. Called ONLY after a positive resolution — a receipt from
+ * the server. Never on a failure, never on a reset, never on a revocation.
+ */
+export async function deleteUncertainSaleRecordRaw(
+  db: IDBDatabase
+): Promise<OfflineStoreResult<void>> {
+  const result = await withStore<undefined>(db, CACHE_STORE, "readwrite", (store) =>
+    store.delete(UNCERTAIN_SALE_KEY)
+  );
 
   return result.ok ? { ok: true, value: undefined } : result;
 }

@@ -91,6 +91,8 @@ describe("the cashier's counts", () => {
       synced: 1,
       unsynced: 2,
       total: 3,
+      nextRetryAt: null,
+      uncertainOnlineSale: false,
     });
   });
 });

@@ -9,7 +9,7 @@
 | **24.5C** | Durable sale queue + persisted idempotency key, IndexedDB v2 | **IMPLEMENTED** |
 | **24.5D** | Sync engine — FIFO drain, single-flight, persisted backoff | **IMPLEMENTED** |
 | **24.5E** | Offline checkout, provisional receipts, startup/reconnect sync wiring, reconciliation, unpair block, cashier status | **IMPLEMENTED** (owner Devices UI deferred) |
-| 24.5F | Android + Windows failure testing | **NOT IMPLEMENTED** |
+| **24.5F** | Cross-platform failure/torture QA; DEF-01 mid-session offline fallback; DEF-02 scheduled backoff retry | **IN PROGRESS** — code fixes landed, hardware QA not started |
 
 **A paired till with a valid cache can now complete a sale offline.** 24.5E
 opened the fence 24.5A put up. What changed is narrow and stated exactly in
@@ -630,6 +630,205 @@ Scope: the two universal shells — Android (Capacitor WebView) and Windows
 (Electron) — both of which load the same hosted `/device` runtime over the
 network. Everything below is derived from the code as it exists at Feature 24.3,
 and every claim about current behaviour cites the file that establishes it.
+
+---
+
+### What 24.5F changed
+
+24.5F is a QA phase, and the two changes it made were both defects that QA
+design surfaced before any hardware was switched on.
+
+**DEF-01 — mid-session connectivity loss now falls back to cache.** Runtime mode
+is still never inferred from `navigator.onLine`; what changed is that a
+CLASSIFIED transport failure from an online `complete_sale_v3` attempt is now a
+reason to try the cached start. `completeDeviceSaleV3` returns the
+`DeviceFailureKind` it already computed, `PosRuntime` records a one-episode
+"the wire died" window, and `DeviceApp.enterOfflineFromTransportFailure` runs
+the SAME `loadOfflineFallback` a cold offline boot runs. It deliberately does
+not call `resolveDeviceState`, which would set `checking`, unmount the runtime
+and destroy the cashier's cart.
+
+**The duplicate-sale defence is the identity, not the transition.** A v3 attempt
+that died on the wire may already have created an order. The continued offline
+sale therefore carries **that attempt's own `sale_request_id`**, so its eventual
+`complete_sale_v4` submission is a REPLAY:
+
+| Fact | Consequence |
+|---|---|
+| v3 and v4 build a byte-identical canonical preimage (`posc.sale.v2\nproject=…\npayment=…\ntip=…\nitems=…`) | the hash matches, so v4 does not raise a hash conflict |
+| v4's idempotency lookup is `where project_id = … and sale_request_id = …`, with no filter on `source` | an order created by v3 IS found by v4 |
+| the lookup runs **before** counter allocation, order insert, inventory mutation and audit rows | a replay has no side effects |
+| §6b `occurred_at` validation is in the `else` branch — new sales only | a replay never reads `occurred_at`, which is also why it is not in the preimage |
+
+So the second press yields exactly one order: the one v3 created, or a new one
+if v3 never landed. Inheritance is gated on the cart still hashing the same and
+on the transport window being open, and the identity is released the moment a
+durable record owns it.
+
+**The failed online attempt is never auto-queued.** The cashier presses Pay
+again; the device does not silently convert an unknown-outcome request into a
+queued sale behind their back.
+
+#### The unknown-outcome lock
+
+A second 24.5F review found the hole this leaves. Inheriting the key protects a
+retry of the SAME cart — but nothing stopped the cashier changing the cart or
+the payment method first, and a changed request hashes differently, so
+`resolveSaleRequest` would mint a **second** idempotency key. A second key
+cannot replay anything. That is a duplicate order, which the 24.5F failure rule
+classifies as a release blocker.
+
+A dispatched-but-unanswered request is therefore recorded explicitly as an
+`UncertainSale` — its `saleRequestId`, project, payment method, tip, the items
+as submitted, and the fingerprint as submitted — and every subsequent press is
+gated on it:
+
+| Next press | Outcome |
+|---|---|
+| same request (fingerprint matches) | **resume** under the original key — v3 replays it, or v4 does from the queue |
+| anything hash-significant changed | **locked**: nothing is sent, no identity is minted, the cart is untouched |
+
+One comparison covers payment method, tip, product, quantity and modifiers,
+because `createSaleFingerprint` is the same preimage the server hashes and a
+line identity already folds in the canonical modifier selection. A `locked`
+decision has **nowhere to put a request id**, so a caller cannot accidentally
+send one.
+
+**The lock is not a dead end.** Restoring the order restores the fingerprint and
+the sale resumes — a real recovery, and a tested one.
+
+**Cancel does not clear it.** Closing a checkout abandons a local intention; it
+cannot un-send a request that already left the device. The offline draft is
+still discarded on close (24.5E's rule), which is safe because the identity
+lives in the `UncertainSale` and is re-inherited on the next press.
+
+**Only a POSITIVE resolution clears it** — a receipt from the server, or a
+durable queue record that will obtain one. Not a rejection, and the tempting
+argument for clearing on rejection is wrong: the idempotency lookup is *not*
+the first thing `complete_sale_v4` does. Authorization and the project lock come
+first (§6: "after authorization and the lock"), so a revoked device or an
+expired session is refused **before** the key is ever looked up, and such an
+answer says nothing about whether the original request committed. Rather than
+sort rejections into pre-lookup and post-lookup — a classification that would
+rot the next time the function is edited — the uncertainty simply survives.
+
+#### The uncertainty is durable
+
+A third 24.5F review closed the last hole: the record lived only in component
+state, so a kill between dispatch and response lost the one key capable of
+recognising an order the server may have committed — and the cashier's re-ring
+created a second one.
+
+It is now written to **IndexedDB, before the request is dispatched**, under the
+key `uncertain-online-sale` in the existing `device-cache` store. No new
+database, no new object store, no version bump.
+
+**The ordering is the fix, and the obvious alternative is not sufficient.**
+Writing the record when a failure is *observed* leaves the process free to die
+between `await rpc(...)` starting and its rejection being handled — with the
+request already on the wire. Arming first costs a row that is deleted the moment
+a receipt arrives, and fails in the safe direction: a spurious record blocks a
+changed sale until it resolves, whereas a missing one duplicates a real one.
+
+If the write does not land, the till **refuses to dispatch** (`SALE_UNPROTECTED
+_MESSAGE`) rather than take money it cannot protect — the same rule that already
+refuses offline checkout when the queue is unavailable. Hosts that supply no arm
+function (the owner runtime, the Builder preview) are unchanged.
+
+**A rejection is handled differently on a first dispatch than on a replay**, and
+conflating the two bricked the till. Keeping the arm after an ordinary
+"Insufficient inventory" left the cart unchangeable, the same request
+permanently refused, and reset permanently blocked — over a sale that never
+existed.
+
+| Event | First dispatch | Replay of an already-uncertain sale |
+|---|---|---|
+| pre-dispatch local refusal | never written | n/a |
+| arm fails | never written; sale refused | n/a |
+| receipt returned | **deleted** | **deleted** |
+| transport / unknown | **kept** | **kept** |
+| PostgreSQL raised (SQLSTATE) | **deleted** | **kept** |
+| answered without a SQLSTATE (502/504) | **kept** | **kept** |
+| durable offline enqueue of the same key | **deleted**; the queue owns it | **deleted** |
+
+The distinction is modelled explicitly (`wasAlreadyUncertain`, taken from the
+gate's own decision) and never inferred from message text.
+
+**Why a first-dispatch SQLSTATE is safe to release.** `complete_sale_v3` and
+`complete_sale_v4` contain no `COMMIT`, no `dblink`, no autonomous transaction
+and no broad handler — every `exception when` in either function is a narrow
+`invalid_text_representation` around a single cast. A business `raise exception`
+therefore aborts the enclosing transaction, PostgREST runs each RPC in exactly
+one transaction, and the order number comes from a transactional `UPDATE` rather
+than a sequence (deliberately, so a rolled-back sale leaves no gap). This
+invocation committed nothing, so its arm is protecting an order that does not
+exist.
+
+**Why the same answer does NOT release a replay.** The rejection may have been
+raised *before* the idempotency lookup — §6 runs "after authorization and the
+lock", so a revoked device or a lost session is refused without the key ever
+being consulted. That says nothing about a *different, earlier* invocation. Only
+a positive resolution proves what happened to that one.
+
+**Why a status alone is not enough.** `isDatabaseRejection` requires a five-char
+SQLSTATE. A proxy 502 or a gateway 504 answers without one and can arrive after
+a commit, so it is treated as unknown and kept.
+
+#### The queue handoff
+
+An offline enqueue and the marker delete are two writes; a crash between them
+leaves the sale durably queued and the marker stranded. That was never
+duplicate-unsafe — the queue record carries the same key, so v4 still creates or
+replays exactly one order — but the stale marker would keep blocking changed
+sales and reset.
+
+**Reconciled at startup on the exact `saleRequestId`, not made atomic.** One
+IndexedDB transaction across both stores was available and is the wrong trade:
+folding a cache delete into the enqueue's transaction means a failed DELETE
+aborts the INSERT, converting a cosmetic problem into a lost sale. Reconciliation
+releases a marker only when a queue record claims the very key it protects; an
+unrelated queued sale proves nothing and an unreadable marker is left alone.
+
+**Startup reads it before any new financial checkout**, and the durable copy
+outranks anything the component remembers. After a restart the cashier rings the
+same order again and presses Pay: the fingerprint matches, the original key goes
+back out, and the server creates or replays exactly one order. Any *changed*
+order is locked, as before.
+
+**It is evidence, so nothing destroys it.** `clearDeviceCache` was changed from
+`store.clear()` to targeted key deletes — a revocation or a re-pair clears the
+menu and the pairing assertion but leaves the outstanding key alone, which
+matters because revocation is not gated on the reset-safety check. Reset and
+unpair are blocked while any record is present, readable or not. A record
+belonging to a *different* pairing is neither applied to the new session nor
+deleted: it cannot resolve anything for the new project, and it is still proof
+of money that may have moved.
+
+**Stored:** the key, project/device/build/auth identity, payment-method label,
+tip, canonical items, the submitted fingerprint, `dispatchedAt`, schema version.
+**Never stored:** any price, any card data, any token or credential.
+
+**DEF-02 — a persisted backoff window now has something to fire it.** Previously
+a sale that failed while the device was already online got a `nextAttemptAt` and
+no future trigger: no further `online` event was coming, so it waited for a
+restart or for someone to press Sync now. `readOfflineSaleStatus` now reports
+`nextRetryAt` (the earliest persisted window, via the pure `earliestRetryAt`),
+and the device schedules **one `setTimeout` aimed at that instant** — not a
+polling interval, which would be a second, coarser schedule beside the real one.
+
+`earliestRetryAt` considers only `pending` records that already carry a readable
+`nextAttemptAt`. A freshly queued sale has none, and treating "no window" as
+"due now" would wake the engine the instant a sale is taken — on a till that is
+still offline, a guaranteed failed submission burning one of its ten attempts.
+Fresh records are reached by the startup, reconnect and manual triggers instead.
+A record in `syncing` is excluded too: a timer for one is a second submission.
+
+Because the effect keys on the instant itself, a status refresh that does not
+move it installs no new timer — the number of live timers is the number of
+distinct due instants, which makes both leaks and retry storms structural rather
+than merely unlikely. Across a restart the instant comes off disk, so a relaunch
+inside the window schedules only the remainder and one after it clamps to zero.
+`attemptCount` is never reset.
 
 ---
 
@@ -1646,6 +1845,36 @@ classification has failed and 24.5A is not shippable.
 2. Reset the device and pair to Business B.
 3. Go offline and relaunch.
 4. **Expected:** Business B's menu. Business A's must never appear.
+
+---
+
+## 19B. Evidence status for the offline server contract (24.5F correction)
+
+**What `complete_sale_v4` has already been validated against real PostgreSQL.**
+Feature 24.5B's staging validation executed the function, and the outcomes are
+what `KNOWN_SERVER_ERRORS` in `lib/saleSyncClassifier.ts` was built from — every
+message in that table was observed on a real server. That validation covered:
+
+- the revocation window, in both directions;
+- acceptance of an offline sale that occurred **before** `revoked_at`;
+- rejection of one claiming to have occurred **after** it;
+- backdating protection (both the pairing floor and the offline-age ceiling);
+- inventory shortfall recording;
+- tracked stock flooring at zero rather than going negative;
+- the exact per-line shortfall figure;
+- online sales still being hard-rejected for insufficient inventory.
+
+**None of that should be described as unexecuted.** The migration suite beside
+the function asserts SQL *text* and cannot run it, but that is a statement about
+`20260819120000_…test.ts`, not about the contract's validation history.
+
+**What remains genuinely unproven, and is what OF-14 and OF-15 are for:** the
+END-TO-END path — a real device queueing a sale in IndexedDB, the sync engine
+submitting it through `lib/offlineSaleRpc.ts`, `complete_sale_v4` accepting or
+rejecting it, and the reconciliation model joining the offline reference to the
+resulting order identity. The server half is validated; the client-to-server
+join is not. Both scenarios therefore stay assigned to **staging** for 24.5F
+end-to-end QA, and neither should be run against the shop's production till.
 
 ---
 

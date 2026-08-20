@@ -156,6 +156,65 @@ export function classifyDeviceFailure(error: unknown): DeviceFailureKind {
   return "unknown";
 }
 
+/**
+ * Feature 24.5F — did POSTGRESQL itself refuse this request?
+ *
+ * NARROWER THAN classifyDeviceFailure ON PURPOSE, and the gap between them is
+ * the whole point. "server_rejected" means something answered — which includes
+ * a proxy returning 502 or a gateway timing out at 504, and those can arrive
+ * AFTER the database has already committed. This asks a stricter question:
+ * is there a PostgreSQL SQLSTATE, i.e. did the database raise?
+ *
+ * WHY THAT ANSWER IS WORTH HAVING. complete_sale_v3 and complete_sale_v4 are
+ * plpgsql functions with no COMMIT, no dblink, no autonomous transaction, and
+ * no broad exception handler — every handler in either function is a narrow
+ * `exception when invalid_text_representation` around a single cast. A business
+ * `raise exception` therefore aborts the enclosing transaction, and PostgREST
+ * runs each RPC in exactly one transaction. Order numbers are allocated by a
+ * transactional UPDATE rather than a sequence, precisely so a rolled-back sale
+ * leaves no gap. So a SQLSTATE from these functions proves this invocation
+ * committed nothing at all.
+ *
+ * A status without a SQLSTATE proves no such thing, which is why it is excluded
+ * here even though classifyDeviceFailure treats it as a server answer.
+ */
+export function isDatabaseRejection(error: unknown): boolean {
+  if (error === null || typeof error !== "object") {
+    return false;
+  }
+
+  const code = (error as Record<string, unknown>).code;
+
+  if (typeof code !== "string") {
+    return false;
+  }
+
+  const normalized = code.trim().toUpperCase();
+
+  // undici and Node put OS socket codes in the same field. Those mean the
+  // opposite: nothing answered, so nothing is proven.
+  if (
+    [
+      "ENOTFOUND",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EPIPE",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ].includes(normalized)
+  ) {
+    return false;
+  }
+
+  // A SQLSTATE is exactly five alphanumerics — "P0001" for a bare raise,
+  // "23505" for a unique violation, "42501" for a permission denial.
+  return /^[0-9A-Z]{5}$/.test(normalized);
+}
+
 /** The one place that decides whether cached offline mode may be considered. */
 export function permitsOfflineFallback(kind: DeviceFailureKind): boolean {
   return kind === "transport";

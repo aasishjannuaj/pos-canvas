@@ -15,7 +15,8 @@
 // Second, NOTHING IS PRESENTED AS DONE UNTIL THE SERVER SAYS SO. A sale that
 // needs attention is never counted as synced, never folded into a reassuring
 // total, and never hidden — see docs/OFFLINE_ARCHITECTURE.md §17.
-import type { QueueSummary } from "@/lib/saleQueue";
+import type { QueueSummary, QueuedSale } from "@/lib/saleQueue";
+import { parseIsoTime } from "@/lib/deviceOfflineCache";
 
 export type OfflineSaleStatus = {
   /** Saved here, still on its way to the server. Nothing is wrong with these. */
@@ -27,6 +28,22 @@ export type OfflineSaleStatus = {
   /** Everything not yet in the books — the number that governs reset safety. */
   unsynced: number;
   total: number;
+  /**
+   * Feature 24.5F (DEF-02) — ISO instant of the earliest PERSISTED retry, or
+   * null when nothing is scheduled. What a host schedules one timer against.
+   */
+  nextRetryAt: string | null;
+  /**
+   * Feature 24.5F — an ONLINE request was dispatched and never answered, and
+   * its idempotency key is still on disk unresolved.
+   *
+   * Not a queue record and deliberately not counted as one: it is not waiting
+   * to sync, and telling a cashier "1 sale waiting" about a sale that may
+   * already be in the books would be a different lie from the one it prevents.
+   * It governs reset safety, because that key may be the only proof an order
+   * exists.
+   */
+  uncertainOnlineSale: boolean;
 };
 
 /**
@@ -40,7 +57,9 @@ export type OfflineSaleStatus = {
  */
 export function toOfflineSaleStatus(
   summary: QueueSummary,
-  quarantined: number = 0
+  quarantined: number = 0,
+  nextRetryAt: string | null = null,
+  uncertainOnlineSale: boolean = false
 ): OfflineSaleStatus {
   const waiting = summary.pending + summary.syncing;
   const needsAttention = summary.needsAttention + summary.permanentFailure + quarantined;
@@ -51,7 +70,51 @@ export function toOfflineSaleStatus(
     synced: summary.synced,
     unsynced: waiting + needsAttention,
     total: summary.total + quarantined,
+    nextRetryAt,
+    uncertainOnlineSale,
   };
+}
+
+/**
+ * The earliest moment a queued sale is due to be tried again.
+ *
+ * ONLY RECORDS THAT HAVE ALREADY FAILED COUNT, and that restriction is the
+ * whole design. A freshly queued sale has nextAttemptAt = null, meaning "try
+ * whenever you next drain" — it has no due time, and treating null as "due now"
+ * would wake the engine the instant a sale is taken. On a till that is still
+ * offline that is a guaranteed failed submission, burning one of the ten
+ * attempts against a network everyone knows is down. Fresh records are reached
+ * by the startup, reconnect and manual triggers, which is exactly right: those
+ * fire when something actually changed.
+ *
+ * `syncing` records are excluded too — one is in flight, and a timer for it
+ * would be a second submission of the same sale. needs_attention,
+ * permanent_failure and synced have nothing to retry by definition.
+ *
+ * Pure, so a host can schedule against it and a test can assert it without a
+ * clock, a timer or a database.
+ */
+export function earliestRetryAt(records: readonly QueuedSale[]): string | null {
+  let earliest: string | null = null;
+
+  for (const record of records) {
+    if (record.state !== "pending" || record.nextAttemptAt === null) {
+      continue;
+    }
+
+    // Unparseable is not scheduled here. isDueForAttempt already treats such a
+    // record as due, so a drain will pick it up; inventing a timer instant from
+    // a value nobody can read would be worse than leaving it to that.
+    if (parseIsoTime(record.nextAttemptAt) === null) {
+      continue;
+    }
+
+    if (earliest === null || record.nextAttemptAt < earliest) {
+      earliest = record.nextAttemptAt;
+    }
+  }
+
+  return earliest;
 }
 
 function pluralSales(count: number): string {
@@ -112,6 +175,25 @@ export type DeviceResetSafety =
  * function only ever refuses.
  */
 export function decideDeviceResetSafety(status: OfflineSaleStatus): DeviceResetSafety {
+  // Feature 24.5F — an unresolved online request blocks a reset on its own.
+  //
+  // It is not a queued sale and there is no count to quote, but it is the same
+  // category of thing: the only copy of an idempotency key for money that may
+  // already have moved. Resetting past it would leave a possibly-committed
+  // order with nothing on this device able to identify it, and the next sale
+  // free to duplicate it.
+  //
+  // Checked FIRST so its message is the one shown; a till in this state needs a
+  // connection, not a count.
+  if (status.uncertainOnlineSale) {
+    return {
+      allowed: false,
+      unsynced: status.unsynced,
+      message:
+        "A sale on this device may already have gone through, and this device still holds the only record of it. Connect to the internet and finish that sale before resetting.",
+    };
+  }
+
   if (status.unsynced === 0) {
     return { allowed: true };
   }

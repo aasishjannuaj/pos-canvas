@@ -38,7 +38,8 @@ import {
 } from "@/lib/saleQueueSession";
 import { summarizeQueue } from "@/lib/saleQueue";
 import type { QueuedSale } from "@/lib/saleQueue";
-import { toOfflineSaleStatus } from "@/lib/offlineSaleStatus";
+import { earliestRetryAt, toOfflineSaleStatus } from "@/lib/offlineSaleStatus";
+import { hasUncertainSaleEvidence } from "@/lib/uncertainSaleSession";
 import type { OfflineSaleStatus } from "@/lib/offlineSaleStatus";
 import {
   openOfflineDb,
@@ -283,12 +284,27 @@ export async function readOfflineSaleStatus(): Promise<OfflineSaleStatus> {
   const listing = await listQueuedSales();
 
   if (!listing.ok) {
-    return { waiting: 0, needsAttention: 0, synced: 0, unsynced: 0, total: 0 };
+    return {
+      waiting: 0,
+      needsAttention: 0,
+      synced: 0,
+      unsynced: 0,
+      total: 0,
+      nextRetryAt: null,
+      uncertainOnlineSale: await hasUncertainSaleEvidence(),
+    };
   }
 
   return toOfflineSaleStatus(
     summarizeQueue(listing.value.sales),
-    listing.value.quarantined.length
+    listing.value.quarantined.length,
+    // Feature 24.5F (DEF-02) — read from the SAME listing, so the count a
+    // cashier sees and the retry a host schedules can never describe two
+    // different queues.
+    earliestRetryAt(listing.value.sales),
+    // Feature 24.5F — evidence, not a queue row. Read alongside so the reset
+    // gate and the cashier's counts describe one consistent moment.
+    await hasUncertainSaleEvidence()
   );
 }
 

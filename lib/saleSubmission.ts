@@ -61,6 +61,37 @@ export const SALE_INSECURE_BROWSER_MESSAGE =
  * committed server-side, and pressing Pay again replays the same request id and
  * returns the original receipt.
  */
+/**
+ * Feature 24.5F — shown when an uncertain sale's details have been changed.
+ *
+ * THE SITUATION, stated plainly: a complete_sale_v3 request was dispatched and
+ * nothing came back, so an order may or may not exist on the server carrying
+ * that request's idempotency key. Every safe route out of that state goes
+ * through the SAME key — v3 replays it, and complete_sale_v4 replays it too.
+ * Submitting a different request would need a different key, and a different
+ * key cannot replay anything: it would create a second order for one customer.
+ *
+ * So the operator is told the truth and given the one action that works —
+ * restore the order and press Pay — rather than a dead end. Putting the cart
+ * back is a real recovery, not a formality: the fingerprint matches again and
+ * the sale resumes under its original identity.
+ */
+export const SALE_UNCERTAIN_LOCKED_MESSAGE =
+  "This sale may already have gone through, so its details cannot be changed yet. Put the order back exactly as it was and press Pay again, or wait until the connection is back.";
+
+/**
+ * Feature 24.5F — the device could not make this sale's identity durable, so it
+ * refuses to send it.
+ *
+ * Dispatching anyway would take money the till cannot protect: a process death
+ * in the next moment would lose the only key capable of recognising the order,
+ * and the re-ring would create a second one. Refusing before anything is sent
+ * keeps the cart intact and the books correct, which is the trade this whole
+ * feature exists to make.
+ */
+export const SALE_UNPROTECTED_MESSAGE =
+  "This sale could not be started safely on this device, so nothing has been sent. The items are still in the cart. Restart the app and try again.";
+
 export const SALE_UNCONFIRMED_MESSAGE =
   "The sale could not be confirmed. Press Pay again to retry — if it already went through, the original receipt will be shown.";
 
@@ -248,4 +279,103 @@ export function toCompletedOrder(receipt: CompletedSaleReceipt): CompletedOrder 
     paymentMethod: receipt.paymentMethod,
     createdAt: receipt.createdAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Feature 24.5F — an attempt whose outcome nobody knows
+// ---------------------------------------------------------------------------
+
+/**
+ * A complete_sale_v3 request that was DISPATCHED and never answered.
+ *
+ * WHY THIS EXISTS AS A RECORD rather than a boolean. "A request failed" and
+ * "a request may already have created an order" are different facts, and only
+ * the second one constrains what may happen next. The constraint is specific:
+ * the sale can only ever be resolved by re-sending THIS request identity, so
+ * anything that would force a new identity has to be refused until the server
+ * says what happened.
+ *
+ * WHAT IS STORED IS EVIDENCE, not just a key. The payload as submitted, the
+ * payment method, the tip and the project are all kept so the block can be
+ * justified, so a future resolution UI has something to show, and so a test can
+ * assert what was actually sent rather than what was later assumed.
+ *
+ * IT IS NOT A PRICE. Same rule as everywhere else in this codebase: identifiers
+ * and quantities only. The server prices the sale, on the original attempt and
+ * on the replay alike.
+ */
+export type UncertainSale = {
+  /** The idempotency key the dispatched request carried. Never regenerated. */
+  saleRequestId: string;
+  projectId: string;
+  paymentMethod: PaymentMethod;
+  tipAmount: number;
+  /** Exactly what crossed the wire. */
+  items: SaleSubmissionItem[];
+  /** The fingerprint AS SUBMITTED — the thing a later attempt is compared to. */
+  fingerprint: string;
+};
+
+export function createUncertainSale(input: {
+  saleRequestId: string;
+  projectId: string;
+  paymentMethod: PaymentMethod;
+  tipAmount: number;
+  items: SaleSubmissionItem[];
+  fingerprint: string;
+}): UncertainSale {
+  return {
+    saleRequestId: input.saleRequestId,
+    projectId: input.projectId,
+    paymentMethod: input.paymentMethod,
+    tipAmount: input.tipAmount,
+    items: input.items.map((item) => ({
+      itemId: item.itemId,
+      quantity: item.quantity,
+      modifiers: item.modifiers.map((group) => ({
+        groupId: group.groupId,
+        optionIds: [...group.optionIds],
+      })),
+    })),
+    fingerprint: input.fingerprint,
+  };
+}
+
+export type UncertainSaleDecision =
+  /** No dispatched request is outstanding. Ordinary checkout. */
+  | { status: "none" }
+  /** The same request, resumable under its original key. */
+  | { status: "resume"; saleRequestId: string }
+  /** A different request. Refused, because it would need a second key. */
+  | { status: "locked"; message: string };
+
+/**
+ * May this attempt proceed, given a request whose outcome is unknown?
+ *
+ * ONE COMPARISON, and it is the right one: createSaleFingerprint covers exactly
+ * the fields complete_sale_v3 and complete_sale_v4 hash — project, payment
+ * method, tip, and the sorted line identities, where a line identity already
+ * folds in the product and its canonical modifier selection. So "the fingerprint
+ * still matches" and "the server would compute the same sale_request_hash" are
+ * the same statement, which is why a cash-to-card switch, a quantity edit, a
+ * swapped modifier and a different product all land here as `locked` without
+ * this function needing to know about any of them individually.
+ *
+ * A MATCH RESUMES RATHER THAN RE-MINTS. That is the whole safety property: the
+ * original key goes back out, and whichever function receives it — v3 online, or
+ * v4 from the queue — resolves it to the existing order if there is one.
+ */
+export function decideUncertainSale(
+  uncertain: UncertainSale | null,
+  fingerprint: string
+): UncertainSaleDecision {
+  if (uncertain === null) {
+    return { status: "none" };
+  }
+
+  if (uncertain.fingerprint === fingerprint) {
+    return { status: "resume", saleRequestId: uncertain.saleRequestId };
+  }
+
+  return { status: "locked", message: SALE_UNCERTAIN_LOCKED_MESSAGE };
 }

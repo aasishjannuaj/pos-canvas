@@ -609,6 +609,415 @@ describe("the cashier is told the truth about what is waiting", () => {
     }
   });
 
+  it("DEF-01: only a classified TRANSPORT failure may open the cache", () => {
+    const app = code(read(DEVICE_APP));
+    const runtime = code(read(RUNTIME));
+    const rpc = code(read("lib/device.rpc.ts"));
+
+    // The classification is the EXISTING one, surfaced rather than re-derived.
+    expect(rpc).toContain("failure: classifyDeviceFailure(error)");
+    expect(rpc).toContain("failure: classifyDeviceFailure(thrown)");
+    // A malformed body proves the server answered; it must never read as
+    // transport.
+    expect(rpc).toContain('failure: "server_rejected"');
+
+    // The runtime records the unknown outcome ONLY on that verdict. (24.5F's
+    // second review replaced the original boolean with an UncertainSale record;
+    // the property guarded here is unchanged.)
+    expect(runtime).toContain('if (failure === "transport") {');
+    expect(runtime).toContain("setUncertainSale(");
+    // Never from a message, never from the browser's own hint.
+    expect(runtime).not.toContain("navigator.onLine");
+    expect(app).not.toContain("navigator.onLine");
+    expect(runtime).not.toContain("onlineTransportFailure");
+
+    // And the host acts on the verdict, not on the text.
+    const handler = app.slice(app.indexOf("const handleSaleRejected"));
+    const body = handler.slice(0, handler.indexOf("];"));
+    const transport = body.indexOf('rejection.failure === "transport"');
+    const revocation = body.indexOf("isPossibleRevocationError(");
+
+    expect(transport).toBeGreaterThan(-1);
+    expect(revocation).toBeGreaterThan(transport);
+    expect(body.slice(transport, revocation)).toContain("return;");
+  });
+
+  it("DEF-01: the transition reuses the validated cached start, and keeps the cart", () => {
+    const app = code(read(DEVICE_APP));
+    const transition = app.slice(
+      app.indexOf("const enterOfflineFromTransportFailure"),
+      app.indexOf("const handleSaleRejected")
+    );
+
+    expect(transition).not.toBe("");
+
+    // The SAME eligibility a cold offline boot runs — lease, integrity,
+    // identity, assertion. Not a hand-rolled subset.
+    expect(transition).toContain("loadOfflineFallback({");
+    expect(transition).toContain("if (!fallback.ok)");
+
+    // resolveDeviceState would set `checking`, unmount PosRuntime and destroy
+    // the cashier's cart — the one thing this path exists to protect.
+    expect(transition).not.toContain("resolveDeviceState");
+    expect(transition).not.toContain('status: "checking"');
+
+    // It may only ever move a LIVE POS, and never manufacture authorization.
+    expect(transition).toContain('if (previous.status !== "ready")');
+    expect(transition).toContain("offline: fallback.offline");
+    expect(transition).toContain("config: fallback.config");
+    for (const banned of ["revokedAt: null", "leaseMs", "OFFLINE_DEVICE_LEASE_MS"]) {
+      expect(`transition fabricates ${banned}`).toBe(`transition fabricates ${banned}`);
+      expect(transition).not.toContain(banned);
+    }
+  });
+
+  it("DEF-01: the continued sale inherits the failed attempt's identity", () => {
+    const runtime = code(read(RUNTIME));
+
+    // The duplicate-sale defence. Gated on the unknown-outcome decision, so a
+    // key is inherited only when the request is genuinely the same one — and a
+    // changed request is refused outright rather than given a second identity.
+    expect(runtime).toContain("inheritedRequest: resumed,");
+    expect(runtime).toContain('uncertainty.status === "resume"');
+
+    // And released the moment a durable record owns it.
+    const offline = runtime.slice(
+      runtime.indexOf("if (queueOfflineSale !== null)"),
+      runtime.indexOf("const plan = planSaleSubmission({")
+    );
+    const failure = offline.indexOf("if (!saved.ok)");
+    const release = offline.indexOf("setSaleRequest(null);");
+    const resolve = offline.indexOf("setUncertainSale(null);");
+    const clear = offline.indexOf("clearCart();");
+
+    expect(failure).toBeGreaterThan(-1);
+    expect(release).toBeGreaterThan(failure);
+    expect(resolve).toBeGreaterThan(failure);
+    expect(clear).toBeGreaterThan(release);
+    // The failure branch keeps BOTH the identity and the uncertainty, so a
+    // retry is still the same sale and a changed one is still refused.
+    const failureBranch = offline.slice(failure, release);
+
+    expect(failureBranch).not.toContain("setSaleRequest(null)");
+    expect(failureBranch).not.toContain("setUncertainSale(null)");
+  });
+
+  it("the unknown-outcome gate runs before ANY identity is resolved", () => {
+    const runtime = code(read(RUNTIME));
+    const gate = runtime.indexOf("const uncertainty = decideUncertainSale(");
+    const locked = runtime.indexOf('if (uncertainty.status === "locked")');
+    const queue = runtime.indexOf("await queueOfflineSale({");
+    const plan = runtime.indexOf("planSaleSubmission({");
+    const submit = runtime.indexOf("await submitSale({");
+
+    for (const index of [gate, locked, queue, plan, submit]) {
+      expect(index).toBeGreaterThan(-1);
+    }
+
+    // Governs BOTH paths: nothing offline and nothing online can start first.
+    expect(queue).toBeGreaterThan(gate);
+    expect(plan).toBeGreaterThan(gate);
+    expect(submit).toBeGreaterThan(gate);
+    expect(locked).toBeGreaterThan(gate);
+
+    // And a lock RETURNS rather than falling through.
+    expect(runtime.slice(locked, queue)).toContain("return;");
+  });
+
+  it("a locked attempt mints nothing and sends nothing", () => {
+    const runtime = code(read(RUNTIME));
+    const locked = runtime.indexOf('if (uncertainty.status === "locked")');
+    const body = runtime.slice(locked, runtime.indexOf("const resumed ="));
+
+    for (const banned of ["createSaleRequestId", "randomUUID", "planSaleSubmission", "submitSale", "queueOfflineSale"]) {
+      expect(`locked branch reaches ${banned}`).toBe(`locked branch reaches ${banned}`);
+      expect(body).not.toContain(banned);
+    }
+  });
+
+  it("both paths resume the outstanding key rather than minting one", () => {
+    const runtime = code(read(RUNTIME));
+
+    expect(runtime).toContain("inheritedRequest: resumed,");
+    expect(runtime).toContain("current: saleRequest ?? resumed,");
+    expect(runtime).toContain('uncertainty.status === "resume"');
+  });
+
+  it("closing a checkout does NOT erase an unknown outcome", () => {
+    // A cancel abandons a local intention; it cannot un-send a request that
+    // already left the device.
+    const runtime = code(read(RUNTIME));
+    const close = runtime.slice(runtime.indexOf("function closeCheckout()"));
+    const body = close.slice(0, close.indexOf("\n  }"));
+
+    expect(body).not.toBe("");
+    expect(body).toContain("discardOfflineSaleDraft?.();");
+    expect(body).not.toContain("setUncertainSale");
+  });
+
+  it("uncertainty is created ONLY by a dispatched-and-unanswered request", () => {
+    const runtime = code(read(RUNTIME));
+
+    expect(runtime).toContain('if (failure === "transport") {');
+
+    const create = runtime.indexOf("setUncertainSale(\n          createUncertainSale({");
+    const transport = runtime.indexOf('if (failure === "transport") {');
+
+    expect(create).toBeGreaterThan(transport);
+    // It carries the key that was actually sent, not a fresh one.
+    expect(runtime).toContain("saleRequestId: plan.request.id,");
+    expect(runtime).toContain("fingerprint: plan.request.fingerprint,");
+  });
+
+  it("only a POSITIVE resolution clears it", () => {
+    const runtime = code(read(RUNTIME));
+    const clears = runtime.split("setUncertainSale(null)").length - 1;
+
+    // Exactly two: an online receipt, and a durable offline enqueue.
+    expect(clears).toBe(2);
+
+    // Never on a rejection — authorization is checked before the idempotency
+    // lookup, so a refusal proves nothing about the original request.
+    const failure = runtime.indexOf("if (error || !receipt) {");
+    const rejectReturn = runtime.indexOf("onSaleRejected?.({ message: error, failure });");
+
+    expect(failure).toBeGreaterThan(-1);
+    expect(runtime.slice(failure, rejectReturn)).not.toContain("setUncertainSale(null)");
+  });
+
+  it("the gate compares the SAME fingerprint the server hashes", () => {
+    const submission = code(read("lib/saleSubmission.ts"));
+    const decide = submission.slice(submission.indexOf("export function decideUncertainSale"));
+
+    expect(decide).toContain("uncertain.fingerprint === fingerprint");
+    // One comparison, not a per-field list that could miss a field.
+    for (const banned of ["paymentMethod ===", "tipAmount ===", "items ==="]) {
+      expect(`decide compares ${banned}`).toBe(`decide compares ${banned}`);
+      expect(decide).not.toContain(banned);
+    }
+
+    // The runtime feeds it the real fingerprint, built from the live cart.
+    const runtime = code(read(RUNTIME));
+
+    expect(runtime).toContain("const fingerprint = createSaleFingerprint({");
+  });
+
+  it("the identity is made DURABLE before the request is dispatched", () => {
+    // The ordering IS the fix. A record written only after a failure is
+    // observed does not exist during the window where the process can die with
+    // the request already on the wire.
+    const runtime = code(read(RUNTIME));
+    const arm = runtime.indexOf("await armOnlineSale(");
+    const refuse = runtime.indexOf("if (!armed) {");
+    const dispatch = runtime.indexOf("await submitSale({");
+
+    for (const index of [arm, refuse, dispatch]) {
+      expect(index).toBeGreaterThan(-1);
+    }
+
+    expect(dispatch).toBeGreaterThan(arm);
+    expect(dispatch).toBeGreaterThan(refuse);
+
+    // A failed arm REFUSES the sale — no memory-only fallback for an identity.
+    const refusal = runtime.slice(refuse, dispatch);
+
+    expect(refusal).toContain("SALE_UNPROTECTED_MESSAGE");
+    expect(refusal).toContain("return;");
+  });
+
+  it("the durable copy outranks the component's own memory", () => {
+    const runtime = code(read(RUNTIME));
+
+    expect(runtime).toContain("persistedUncertainSale ?? uncertainSale");
+  });
+
+  it("the record is cleared only when the outcome is definitively KNOWN", () => {
+    const runtime = code(read(RUNTIME));
+    const clears = runtime.split("resolveOnlineSale?.()").length - 1;
+
+    // Exactly three, each a known outcome: an online receipt, a durable offline
+    // enqueue that takes over the key, and a first dispatch PostgreSQL provably
+    // rolled back.
+    expect(clears).toBe(3);
+
+    // The rollback release is guarded on BOTH conditions — never on a rejection
+    // alone, and never for a sale that was already uncertain beforehand.
+    expect(runtime).toContain("} else if (!wasAlreadyUncertain && rolledBack === true) {");
+    expect(runtime).toContain('const wasAlreadyUncertain = uncertainty.status === "resume";');
+
+    // Nothing clears it between observing a failure and reporting it, other
+    // than that one explicitly-guarded branch.
+    const failure = runtime.indexOf("if (error || !receipt) {");
+    const rollbackBranch = runtime.indexOf("} else if (!wasAlreadyUncertain && rolledBack === true) {");
+    const reject = runtime.indexOf("onSaleRejected?.({ message: error, failure });");
+
+    expect(rollbackBranch).toBeGreaterThan(failure);
+    expect(runtime.slice(rollbackBranch, reject).split("resolveOnlineSale?.()").length - 1).toBe(1);
+
+    // And the session layer deletes only through the one function.
+    const session = code(read("lib/uncertainSaleSession.ts"));
+
+    expect((session.match(/deleteUncertainSaleRecordRaw\(/g) ?? [])).toHaveLength(1);
+    expect(session).toContain("export async function resolveUncertainSale");
+  });
+
+  it("a rollback release requires PostgreSQL to have raised, not merely answered", () => {
+    // A proxy 502 or a gateway 504 can arrive AFTER a commit. Only a SQLSTATE
+    // proves this invocation committed nothing.
+    const connectivity = code(read("lib/deviceConnectivity.ts"));
+    const fn = connectivity.slice(connectivity.indexOf("export function isDatabaseRejection"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+
+    expect(body).toContain("/^[0-9A-Z]{5}$/.test(normalized)");
+    // A status alone is deliberately NOT evidence here.
+    expect(body).not.toContain("error.status");
+    expect(body).not.toContain("details");
+    expect(body).not.toContain("hint");
+
+    const rpc = code(read("lib/device.rpc.ts"));
+
+    expect(rpc).toContain("rolledBack: isDatabaseRejection(error)");
+  });
+
+  it("the queue handoff is reconciled on an exact key, never on queue depth", () => {
+    const session = code(read("lib/uncertainSaleSession.ts"));
+    const fn = session.slice(session.indexOf("export async function reconcileUncertainSaleWithQueue"));
+
+    expect(fn).toContain("getSaleByRequestId(parsed.record.saleRequestId)");
+    // Never "the queue has something in it".
+    expect(fn).not.toContain("listQueuedSales");
+    expect(fn).not.toContain("countQueuedSales");
+    // An unreadable marker has no key to match and is left alone.
+    expect(fn).toContain("if (!parsed.ok) {");
+
+    // And it runs before the session reads its outstanding request.
+    const app = code(read(DEVICE_APP));
+    const reconcile = app.indexOf("await reconcileUncertainSaleWithQueue();");
+    const readBack = app.indexOf("const outstanding = await readUncertainSale({");
+
+    expect(reconcile).toBeGreaterThan(-1);
+    expect(readBack).toBeGreaterThan(reconcile);
+  });
+
+  it("evidence survives a cache clear, a revocation and a re-pair", () => {
+    // clearDeviceCache used to be store.clear(), which would have taken the
+    // outstanding key out along with the menu — silently, on revocation, which
+    // is not gated on the reset-safety check.
+    const store = code(read("lib/deviceOfflineStore.ts"));
+    const clear = store.slice(store.indexOf("export async function clearDeviceCache"));
+    const body = clear.slice(0, clear.indexOf("\n}"));
+
+    expect(body).not.toContain("store.clear()");
+    expect(body).toContain("PAIRING_ASSERTION_KEY");
+    expect(body).toContain("PINNED_CONFIG_KEY");
+    expect(body).not.toContain("UNCERTAIN_SALE_KEY");
+  });
+
+  it("a reset is blocked while the evidence exists", () => {
+    const status = code(read("lib/offlineSaleStatus.ts"));
+    const decide = status.slice(status.indexOf("export function decideDeviceResetSafety"));
+    const gate = decide.indexOf("status.uncertainOnlineSale");
+    const allow = decide.indexOf("return { allowed: true }");
+
+    expect(gate).toBeGreaterThan(-1);
+    // Checked BEFORE the "nothing unsynced, go ahead" branch.
+    expect(allow).toBeGreaterThan(gate);
+  });
+
+  it("a mismatched or unreadable record is never deleted", () => {
+    const session = code(read("lib/uncertainSaleSession.ts"));
+    const read_ = session.slice(session.indexOf("export async function readUncertainSale"));
+    const body = read_.slice(0, read_.indexOf("export async function resolveUncertainSale"));
+
+    expect(body).toContain('status: "unusable", reason: "identity_mismatch"');
+    expect(body).toContain('status: "unusable", reason: "unreadable"');
+    // The read path deletes nothing, ever.
+    expect(body).not.toContain("delete");
+  });
+
+  it("the persisted record holds no price, no card data and no credential", () => {
+    const record = code(read("lib/uncertainSaleRecord.ts"));
+
+    for (const banned of [
+      "unitPrice",
+      "lineTotal",
+      "subtotal",
+      "taxAmount",
+      "cardNumber",
+      "cvv",
+      "expiry",
+      "cardholder",
+      "access_token",
+      "refresh_token",
+      "service_role",
+      "apiKey",
+    ]) {
+      expect(`record carries ${banned}`).toBe(`record carries ${banned}`);
+      expect(record).not.toContain(banned);
+    }
+
+    // And it never reaches for a second storage technology.
+    for (const file of ["lib/uncertainSaleRecord.ts", "lib/uncertainSaleSession.ts"]) {
+      const source = code(read(file));
+
+      expect(`${file}: localStorage`).toBe(`${file}: localStorage`);
+      expect(source).not.toContain("localStorage");
+      expect(source).not.toContain("sessionStorage");
+      expect(source).not.toContain("indexedDB.open");
+    }
+  });
+
+  it("it lives in the existing database, not a new one", () => {
+    const store = code(read("lib/deviceOfflineStore.ts"));
+
+    // No second database, no version bump, no third object store.
+    expect(store).toContain('export const OFFLINE_DB_NAME = "pos-canvas-device"');
+    expect(store).toContain("export const OFFLINE_DB_VERSION = 2");
+    expect((store.match(/createObjectStore\(/g) ?? [])).toHaveLength(2);
+    expect(store).toContain("UNCERTAIN_SALE_KEY");
+  });
+
+  it("DEF-02: one timer, aimed at the persisted instant, with a teardown", () => {
+    const app = code(read(DEVICE_APP));
+    const effect = app.slice(app.indexOf("const dueAt = saleStatus.nextRetryAt;"));
+    const body = effect.slice(0, effect.indexOf("}, [syncSessionKey, saleStatus.nextRetryAt, runSync]);"));
+
+    expect(body).not.toBe("");
+    // A real instant, not a poll.
+    expect(body).toContain("setTimeout(");
+    expect(app).not.toContain("setInterval");
+    expect(body).toContain("Math.max(0, due - Date.now())");
+    // Nothing scheduled -> no timer at all.
+    expect(body).toContain("if (syncSessionKey === null || dueAt === null)");
+    expect(body).toContain("return () => clearTimeout(timer);");
+    // Keyed so an unchanged instant installs no second timer.
+    expect(app).toContain("}, [syncSessionKey, saleStatus.nextRetryAt, runSync]);");
+    // A scheduled retry is not a person pressing anything.
+    expect(body).toContain('runSync("retry")');
+    // The engine, not a second copy of the backoff curve.
+    expect(app).not.toContain("backoffDelayMs");
+    expect(app).not.toContain("SYNC_BACKOFF");
+  });
+
+  it("DEF-02: only a persisted, readable window is ever scheduled", () => {
+    const status = code(read("lib/offlineSaleStatus.ts"));
+    const fn = status.slice(status.indexOf("export function earliestRetryAt"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+
+    // Fresh pending records have no due time; treating null as "due now" would
+    // wake the engine the instant a sale is taken.
+    expect(body).toContain('record.state !== "pending" || record.nextAttemptAt === null');
+    // A record in flight must not get a timer — that is a second submission.
+    expect(body).not.toContain('"syncing"');
+    // Unparseable is left to the drain rather than turned into an instant.
+    expect(body).toContain("parseIsoTime(record.nextAttemptAt) === null");
+    // Pure: no clock, no storage, no engine.
+    for (const banned of ["Date.now()", "setTimeout", "indexedDB", "openOfflineDb"]) {
+      expect(`earliestRetryAt uses ${banned}`).toBe(`earliestRetryAt uses ${banned}`);
+      expect(body).not.toContain(banned);
+    }
+  });
+
   it("the startup latch is keyed by device session, not by process", () => {
     // A process can outlive a pairing: unpair and re-pair happen without a
     // reload. A bare boolean would deny the second session its startup pass

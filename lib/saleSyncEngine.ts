@@ -327,7 +327,16 @@ async function syncOne(record: QueuedSale, deps: SyncDeps): Promise<SyncedOutcom
  * library; 24.5E decides where they attach. Registering the `online` listener
  * from here would start draining a queue before anything is allowed to fill it.
  */
-export type SyncTrigger = "startup" | "reconnect" | "manual";
+/**
+ * Why a drain is happening.
+ *
+ * Feature 24.5F (DEF-02) adds "retry": a persisted backoff window elapsed and
+ * the host woke the engine for it. Named separately from "manual" because it is
+ * not a person pressing anything, and separately from "reconnect" because
+ * connectivity did not change — the schedule did. Like every trigger except
+ * "startup" it drains without reclaiming orphans.
+ */
+export type SyncTrigger = "startup" | "reconnect" | "manual" | "retry";
 
 export async function triggerSaleSync(
   trigger: SyncTrigger,

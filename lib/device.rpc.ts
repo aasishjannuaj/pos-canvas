@@ -19,7 +19,7 @@
 // EXISTING getRedeemErrorMessage table and never surfaces a raw Postgres
 // message, so the UI cannot reintroduce the distinction the backend removed.
 import { getDeviceSupabaseClient } from "@/lib/supabase/deviceClient";
-import { classifyDeviceFailure } from "@/lib/deviceConnectivity";
+import { classifyDeviceFailure, isDatabaseRejection } from "@/lib/deviceConnectivity";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
   getRedeemErrorMessage,
@@ -281,9 +281,28 @@ export type DeviceSaleV3Request = {
   saleRequestId: string;
 };
 
+/**
+ * Feature 24.5F (DEF-01) — the failure KIND travels with the message.
+ *
+ * The classification already existed; it was simply thrown away here, leaving
+ * the host with display text and no way to tell "the shop's internet died" from
+ * "the server refused this sale". That is exactly the distinction that decides
+ * whether a till may fall back to its cache, so it is now returned rather than
+ * re-derived from the message by whoever needs it. No new classification logic:
+ * this is the same classifyDeviceFailure every other call in this module uses.
+ */
 export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promise<{
   receipt: CompletedSaleReceipt | null;
   error: string | null;
+  failure?: DeviceFailureKind;
+  /**
+   * Feature 24.5F — PostgreSQL raised, so THIS invocation committed nothing.
+   *
+   * Strictly narrower than `failure === "server_rejected"`, which also covers a
+   * proxy 502 or a gateway 504 — either of which can arrive after the database
+   * has already committed. See isDatabaseRejection.
+   */
+  rolledBack?: boolean;
 }> {
   try {
     const { data, error } = await getDeviceSupabaseClient().rpc("complete_sale_v3", {
@@ -305,18 +324,30 @@ export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promis
     });
 
     if (error) {
-      return { receipt: null, error: error.message };
+      return {
+        receipt: null,
+        error: error.message,
+        failure: classifyDeviceFailure(error),
+        rolledBack: isDatabaseRejection(error),
+      };
     }
 
     if (!isCompletedSaleReceipt(data)) {
-      return { receipt: null, error: "The sale response could not be read." };
+      // A malformed body is proof the server ANSWERED. It is never a transport
+      // failure, and must never unlock the cache.
+      return {
+        receipt: null,
+        error: "The sale response could not be read.",
+        failure: "server_rejected",
+      };
     }
 
     return { receipt: data, error: null };
-  } catch {
+  } catch (thrown) {
     return {
       receipt: null,
       error: "The sale could not be completed. Check the connection and try again.",
+      failure: classifyDeviceFailure(thrown),
     };
   }
 }

@@ -21,8 +21,19 @@ import type {
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
-import { SALE_UNCONFIRMED_MESSAGE, planSaleSubmission } from "@/lib/saleSubmission";
-import { OFFLINE_RECEIPT_UNAVAILABLE_NOTE } from "@/lib/provisionalReceipt";
+import {
+  SALE_UNCONFIRMED_MESSAGE,
+  SALE_UNPROTECTED_MESSAGE,
+  createUncertainSale,
+  decideUncertainSale,
+  planSaleSubmission,
+} from "@/lib/saleSubmission";
+import type { UncertainSale } from "@/lib/saleSubmission";
+import { createSaleFingerprint } from "@/lib/saleRequest";
+import {
+  OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST,
+  OFFLINE_RECEIPT_UNAVAILABLE_NOTE,
+} from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
@@ -33,7 +44,9 @@ import type {
   PosRuntimeCompleteSale,
   PosRuntimeHomeLink,
   PosRuntimeLogoBaseUrl,
+  PosRuntimeArmOnlineSale,
   PosRuntimeDiscardOfflineSaleDraft,
+  PosRuntimeResolveOnlineSale,
   PosRuntimeOnSaleRejected,
   PosRuntimeQueueOfflineSale,
   PosRuntimeRefreshStock,
@@ -113,6 +126,19 @@ type PosRuntimeProps = {
    * would record a later customer's sale at an earlier customer's time.
    */
   discardOfflineSaleDraft?: PosRuntimeDiscardOfflineSaleDraft | null;
+
+  /**
+   * Feature 24.5F — durable protection for an online request's identity.
+   *
+   * Supplied together by a host that has storage. `armOnlineSale` must make the
+   * identity durable before the request is dispatched and report whether it
+   * did; `resolveOnlineSale` clears it after a receipt. `persistedUncertainSale`
+   * is what was found on disk at startup — the copy that survives a process
+   * kill, and the one that wins over anything this component remembers.
+   */
+  armOnlineSale?: PosRuntimeArmOnlineSale | null;
+  resolveOnlineSale?: PosRuntimeResolveOnlineSale | null;
+  persistedUncertainSale?: UncertainSale | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -134,6 +160,9 @@ export default function PosRuntime({
   checkoutBlockedReason = null,
   queueOfflineSale = null,
   discardOfflineSaleDraft = null,
+  armOnlineSale = null,
+  resolveOnlineSale = null,
+  persistedUncertainSale = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
@@ -172,6 +201,23 @@ export default function PosRuntime({
   // One id per logical checkout attempt; reused across retries of the same
   // intent so a lost response replays instead of double-selling.
   const [saleRequest, setSaleRequest] = useState<SaleRequestState | null>(null);
+
+  /**
+   * Feature 24.5F — a complete_sale_v3 request was dispatched and never
+   * answered, so an order carrying its key MAY exist on the server.
+   *
+   * A RECORD, NOT A BOOLEAN, and not scoped to a checkout episode either — both
+   * were review corrections. The earlier boolean was cleared by closeCheckout,
+   * which meant cancelling a checkout silently discarded the fact that money
+   * might already have been recorded; and being a boolean it could not say
+   * WHICH request was outstanding, so a cashier who changed the payment method
+   * would mint a second identity and create a second order.
+   *
+   * It is cleared ONLY by a definitive resolution — see clearUncertainSale
+   * below. Until then it both authorises a resume under the original key and
+   * refuses anything that would need a new one.
+   */
+  const [uncertainSale, setUncertainSale] = useState<UncertainSale | null>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
 
   // Feature 14.3 — seeded from the server-loaded starting count
@@ -189,6 +235,25 @@ export default function PosRuntime({
   // (the Builder-preview-only 3 in EditorShell.tsx) can ever reach this
   // real, persisted checkout path.
   const cartSummary = calculateCartSummary(cart, config.tax, 0);
+
+  /**
+   * Feature 24.5F (DEF-01) — what the cashier reads after a lost connection.
+   *
+   * DERIVED, never assigned from an effect. The host's re-resolve happens
+   * asynchronously after onSaleRejected, so the moment offline checkout becomes
+   * available is a prop change, not an event this component can observe. Read
+   * at render time it is simply true or false; written from an effect it would
+   * be an extra render and the set-state-in-effect lint rule besides.
+   *
+   * The generic "could not be confirmed" message stays for every other failure,
+   * including a lost connection on a till that has NO usable cache — there is
+   * nothing better to offer there, and promising offline mode that cannot open
+   * would be worse than the plain truth.
+   */
+  const displayedSaleError =
+    uncertainSale !== null && queueOfflineSale !== null && saleSaveStatus === "error"
+      ? OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST
+      : saleSaveError;
 
   const shownReceipt = receiptOpen ? lastCompletedReceipt : null;
   const shownProvisionalReceipt = receiptOpen ? lastProvisionalReceipt : null;
@@ -300,6 +365,14 @@ export default function PosRuntime({
     setSaleSaveStatus("idle");
     setSaleSaveError(null);
 
+    // Feature 24.5F — uncertainSale is DELIBERATELY NOT cleared here.
+    //
+    // Closing a checkout abandons a local intention; it cannot un-send a
+    // request that already left the device. If an order may exist on the
+    // server, that remains true whether or not the cashier pressed Cancel, and
+    // forgetting it here is precisely how the next identical-looking sale would
+    // become a second order for the same customer.
+
     // Feature 24.5E — THE ATTEMPT IS OVER, whether it succeeded, failed, or was
     // cancelled. Any sale identity the host is still holding for a retry is
     // void from here: the next Complete Sale is a different sale, even if the
@@ -357,6 +430,60 @@ export default function PosRuntime({
       return;
     }
 
+    // Feature 24.5F — THE UNKNOWN-OUTCOME GATE.
+    //
+    // Placed before the offline/online branch and before any identity is
+    // resolved, because it governs BOTH paths: whatever this press does next,
+    // it must do it under the outstanding request's own key or not at all.
+    //
+    // The fingerprint is computed here rather than inside either branch so the
+    // two cannot drift — it is the same value complete_sale_v3 and
+    // complete_sale_v4 hash, so comparing it answers "would the server see this
+    // as the same sale?" exactly.
+    const fingerprint = createSaleFingerprint({
+      projectId: config.project.projectId,
+      paymentMethod: selectedPaymentMethod,
+      tipAmount: cartSummary.tip,
+      items: cart,
+    });
+
+    // Feature 24.5F — THE DURABLE COPY WINS.
+    //
+    // `persistedUncertainSale` came off disk and survives a process kill;
+    // `uncertainSale` is this component's own memory of the same event and is
+    // gone the moment the app is. Preferring the durable one means a restart
+    // resumes exactly where the previous process left off, and it also fails in
+    // the safe direction if the two ever disagree: a record that is still on
+    // disk keeps blocking even if local state has forgotten it.
+    const uncertainty = decideUncertainSale(
+      persistedUncertainSale ?? uncertainSale,
+      fingerprint
+    );
+
+    if (uncertainty.status === "locked") {
+      // NOTHING IS SENT and no identity is minted. The sale that may already
+      // exist keeps its key, the cart is untouched, and the operator is told
+      // how to get back to a state that can be resolved.
+      setSaleSaveStatus("error");
+      setSaleSaveError(uncertainty.message);
+      return;
+    }
+
+    // The identity an outstanding request must be resumed under, if there is
+    // one. Null for an ordinary sale.
+    const resumed =
+      uncertainty.status === "resume"
+        ? { id: uncertainty.saleRequestId, fingerprint }
+        : null;
+
+    // Feature 24.5F — WAS this sale already uncertain before this press?
+    //
+    // Modelled explicitly from the gate's own decision, never inferred from a
+    // message. It is the difference between "we armed this a moment ago purely
+    // to protect the dispatch window" and "an earlier attempt genuinely went
+    // unanswered", and those two demand opposite handling of a rejection.
+    const wasAlreadyUncertain = uncertainty.status === "resume";
+
     setSaleSaveStatus("saving");
     setSaleSaveError(null);
 
@@ -380,6 +507,12 @@ export default function PosRuntime({
         // tip-entry UI, and complete_sale_v4 rejects a device tip outright.
         tipAmount: cartSummary.tip,
         cart,
+        // Feature 24.5F (DEF-01) — ONLY when this very checkout just lost an
+        // online attempt on the wire. Outside that window the offline sale is
+        // an ordinary new sale and mints its own identity; inheriting a stale
+        // id from an unrelated earlier episode would be the duplicate bug in
+        // reverse.
+        inheritedRequest: resumed,
       });
 
       if (!saved.ok) {
@@ -392,6 +525,22 @@ export default function PosRuntime({
       }
 
       // Past this line the sale is on disk.
+      //
+      // The online identity is released HERE, not earlier: if the enqueue had
+      // failed, the cart and that identity both had to survive so the next
+      // press was still the same sale. Now that a durable record owns it, the
+      // next sale must mint its own — otherwise a later identical cart would
+      // inherit this key and replay this sale instead of making its own.
+      setSaleRequest(null);
+      // RESOLVED. A durable record now owns this key, and the sync engine will
+      // submit it exactly once: complete_sale_v4 either creates the order or
+      // replays the one complete_sale_v3 already created. Either way there is
+      // no longer an unknown outcome for this device to protect.
+      setUncertainSale(null);
+      // The queue record now owns this key durably, so the outbound-attempt
+      // record has nothing left to protect: complete_sale_v4 will create the
+      // order or replay the one complete_sale_v3 made, exactly once.
+      void resolveOnlineSale?.();
       setLastCompletedReceipt(null);
       setLastProvisionalReceipt(saved.receipt);
       clearCart();
@@ -414,7 +563,11 @@ export default function PosRuntime({
       tipAmount: cartSummary.tip,
       cart,
       menuItems,
-      current: saleRequest,
+      // resolveSaleRequest reuses an id whose fingerprint matches, so this is
+      // already the replay path. `resumed` is belt-and-braces: if component
+      // state ever lost the request while the uncertainty survived, the
+      // outstanding key is still what goes back out — never a fresh one.
+      current: saleRequest ?? resumed,
     });
 
     if (!plan.ok) {
@@ -425,7 +578,38 @@ export default function PosRuntime({
 
     setSaleRequest(plan.request);
 
-    const { receipt, error } = await submitSale({
+    // Feature 24.5F — ARM BEFORE DISPATCH, and nothing may come between.
+    //
+    // From the next statement onwards the request may reach the server, and the
+    // process may die before its answer is handled. If the key is not already
+    // on disk at that instant it is lost, and the sale becomes unrecognisable
+    // to any later attempt — which is how one customer gets two orders.
+    //
+    // A host without storage (the owner runtime, the Builder preview) supplies
+    // no arm function and is unchanged. A host that DOES supply one is
+    // promising durability, so a failed write means the sale must not be taken:
+    // there is no memory-only fallback for a financial identity, exactly as
+    // there is none for a queued sale.
+    if (armOnlineSale !== null) {
+      const armed = await armOnlineSale(
+        createUncertainSale({
+          saleRequestId: plan.request.id,
+          projectId: config.project.projectId,
+          paymentMethod: selectedPaymentMethod,
+          tipAmount: cartSummary.tip,
+          items: plan.items,
+          fingerprint: plan.request.fingerprint,
+        })
+      );
+
+      if (!armed) {
+        setSaleSaveStatus("error");
+        setSaleSaveError(SALE_UNPROTECTED_MESSAGE);
+        return;
+      }
+    }
+
+    const { receipt, error, failure, rolledBack } = await submitSale({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
       tipAmount: cartSummary.tip,
@@ -444,17 +628,73 @@ export default function PosRuntime({
       setSaleSaveStatus("error");
       setSaleSaveError(error ?? SALE_UNCONFIRMED_MESSAGE);
 
+      // Feature 24.5F — the request was DISPATCHED and nothing answered, so an
+      // order carrying this key may exist. Recorded ONLY on a classified
+      // transport failure: a server that answered is a definite outcome, and a
+      // host that does not classify at all is not proof of one.
+      if (failure === "transport") {
+        // The DURABLE record was already written before dispatch; this is the
+        // in-memory mirror, so the gate below reacts without waiting for the
+        // host to re-read storage. It is never the only copy.
+        setUncertainSale(
+          createUncertainSale({
+            saleRequestId: plan.request.id,
+            projectId: config.project.projectId,
+            paymentMethod: selectedPaymentMethod,
+            tipAmount: cartSummary.tip,
+            items: plan.items,
+            fingerprint: plan.request.fingerprint,
+          })
+        );
+      } else if (!wasAlreadyUncertain && rolledBack === true) {
+        // A FIRST DISPATCH THAT POSTGRESQL DEFINITIVELY REFUSED.
+        //
+        // The arm written moments ago was protecting a window that has now
+        // closed with a known answer: this invocation committed nothing, so
+        // there is no order for its key to identify and nothing to resolve. The
+        // record is released, and an ordinary "insufficient inventory" goes back
+        // to being an ordinary rejection the cashier can fix by editing the cart.
+        //
+        // Keeping it would brick the till: the same request would keep being
+        // refused, the cart could not be changed, and reset would stay blocked
+        // forever over a sale that never existed.
+        //
+        // `rolledBack` REQUIRES A SQLSTATE, so a proxy 502 or a gateway 504 —
+        // which can arrive after a commit — does not qualify and is kept.
+        void resolveOnlineSale?.();
+      }
+
+      // A REJECTION NEVER CLEARS A PRE-EXISTING UNCERTAINTY, and the tempting
+      // argument that it should is wrong. It runs: this attempt carried the
+      // outstanding key, the sale function resolves that key before doing
+      // anything else, so a rejection proves the original never landed.
+      //
+      // It does not hold, because the idempotency lookup is NOT the first thing
+      // that runs. Authorization and the project lock come before it (section 6
+      // of complete_sale_v4: "after authorization and the lock"), so a revoked
+      // device or a lost session is refused BEFORE the key is ever looked up.
+      // Such an answer says nothing about whether the ORIGINAL request — a
+      // different invocation entirely — committed.
+      //
+      // Hence the asymmetry above: a rejection releases only an arm created by
+      // THIS dispatch, whose entire history we witnessed. Anything older is kept
+      // until a positive resolution proves what happened to it.
+
       // Feature 16.4A — the host decides what a rejection means for its own
       // authorization. A paired device re-resolves its pairing state here, so a
       // revocation that landed mid-shift moves it to the revoked screen instead
       // of leaving a dead Pay button. The engine itself draws no conclusion.
-      onSaleRejected?.(error);
+      onSaleRejected?.({ message: error, failure });
       return;
     }
 
     // Success: the authoritative payload is the ONLY record kept. The cart is
     // discarded and the request id cleared, so the next sale gets a new id.
     setLastCompletedReceipt(receipt);
+    // The server answered. Nothing is unknown any more — clear the durable
+    // record as well as this component's copy, in that order of importance.
+    setUncertainSale(null);
+    void resolveOnlineSale?.();
     // Feature 24.5E — a device that reconnects mid-shift must not be able to
     // reopen the previous offline sale's provisional receipt from the success
     // screen of an online one.
@@ -607,7 +847,7 @@ export default function PosRuntime({
             onCompleteSale={completeSale}
             checkoutBlockedReason={checkoutBlockedReason}
             saleSaveStatus={saleSaveStatus}
-            saleSaveError={saleSaveError}
+            saleSaveError={displayedSaleError}
             recentOrders={[]}
             lastCompletedOrderId={
               lastCompletedReceipt?.orderId ??

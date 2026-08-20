@@ -68,6 +68,25 @@ export const OFFLINE_RECEIPT_EXPLANATION =
  * Informational, never an error: the sale IS saved, and the one thing that
  * failed is the printout.
  */
+/**
+ * Feature 24.5F (DEF-01) — shown when an online sale died on the wire and the
+ * till has just come up in offline mode holding the same cart.
+ *
+ * THREE THINGS IT MUST DO, and the wording is load-bearing for each. It must
+ * not claim the sale failed: the request may have reached the server, and the
+ * customer may already be recorded. It must tell the cashier what to do, which
+ * is simply to press Pay again. And it must answer the question that press
+ * raises — "will they be charged twice?" — because a cashier who fears that
+ * will not press, and will hand over goods with no record at all.
+ *
+ * The last sentence is TRUE by construction, not reassurance: the retry carries
+ * the failed attempt's own sale_request_id, so complete_sale_v4 resolves it to
+ * the order v3 already created rather than making a second one. See
+ * PosRuntimeQueueOfflineSale.inheritedRequest.
+ */
+export const OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST =
+  "The internet connection was lost, so this sale is not confirmed. Press Pay again to save it on this device — if it already reached the server, pressing Pay again will not create a second sale.";
+
 export const OFFLINE_RECEIPT_UNAVAILABLE_NOTE =
   "This sale is saved on this device. A printed receipt could not be produced for it.";
 

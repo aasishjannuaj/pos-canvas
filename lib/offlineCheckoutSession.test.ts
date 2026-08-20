@@ -479,6 +479,8 @@ describe("a queued sale survives a restart", () => {
       synced: 0,
       unsynced: 1,
       total: 1,
+      nextRetryAt: null,
+      uncertainOnlineSale: false,
     });
     expect(decideDeviceResetSafety(status).allowed).toBe(false);
   });

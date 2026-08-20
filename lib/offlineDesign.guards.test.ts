@@ -99,13 +99,31 @@ describe("Feature 24.4 produced a design document", () => {
   });
 
   it("it records which phases are implemented and which are not", () => {
-    // 24.4 said "nothing is implemented". 24.5A implemented the first phase, so
-    // the document must now say which, or it stops describing reality.
+    // 24.4 said "nothing is implemented". Each phase since has had to say which
+    // of them is true, or the document stops describing reality.
+    //
+    // NARROWED BY 24.5F, deliberately. This used to require the literal string
+    // "NOT IMPLEMENTED", which worked while some phase still had that status.
+    // 24.5F is the last phase, and its honest status is neither "implemented"
+    // nor "not implemented" — the code fixes landed and the hardware QA has not
+    // run. Keeping the old assertion would have forced the table to overstate
+    // OR understate the state of the only phase left. What must remain true is
+    // that every phase carries a status and that the unfinished work is still
+    // visibly unfinished.
     const doc = read(DESIGN_DOC);
+    const table = doc.slice(doc.indexOf("## Implementation status"), doc.indexOf("### What 24.5"));
 
-    expect(doc).toContain("24.5A");
-    expect(doc).toContain("IMPLEMENTED");
-    expect(doc).toContain("NOT IMPLEMENTED");
+    expect(table).not.toBe("");
+
+    for (const phase of ["24.5A", "24.5B", "24.5C", "24.5D", "24.5E", "24.5F"]) {
+      expect(`phase ${phase} has a row`).toBe(`phase ${phase} has a row`);
+      expect(table).toContain(phase);
+    }
+
+    expect(table).toContain("IMPLEMENTED");
+    // The remaining work is still named as remaining.
+    expect(table).toMatch(/IN PROGRESS|NOT IMPLEMENTED/);
+    expect(doc).toContain("hardware QA not started");
   });
 
   it("the owner's seven decisions are recorded as decided, not still open", () => {

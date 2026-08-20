@@ -12,6 +12,9 @@
 // owner code path inside the device bundle to reach — the engine literally
 // cannot call the cookie client because it never imports it.
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
+import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
+import type { SaleRequestState } from "@/lib/saleRequest";
+import type { UncertainSale } from "@/lib/saleSubmission";
 import type { MenuItem } from "@/lib/projectConfig";
 import type { CartItem, PaymentMethod } from "@/lib/cart";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
@@ -42,7 +45,22 @@ export type PosRuntimeCompleteSale = (input: {
     modifiers: { groupId: string; optionIds: string[] }[];
   }[];
   saleRequestId: string;
-}) => Promise<{ receipt: CompletedSaleReceipt | null; error: string | null }>;
+}) => Promise<{
+  receipt: CompletedSaleReceipt | null;
+  error: string | null;
+  /**
+   * Feature 24.5F (DEF-01) — OPTIONAL, so the owner and Builder hosts are
+   * unchanged. A device host reports whether the request reached a server at
+   * all, which is the only signal that may unlock a cached offline runtime.
+   */
+  failure?: DeviceFailureKind;
+  /**
+   * Feature 24.5F — OPTIONAL. True when PostgreSQL itself raised, which proves
+   * this invocation committed nothing. Absent means "not proven", never "did
+   * not commit".
+   */
+  rolledBack?: boolean;
+}>;
 
 /**
  * Re-reads live stock after a completed sale.
@@ -87,7 +105,20 @@ export type PosRuntimeLogoBaseUrl = string | null;
  * authorized. The host re-resolves authoritative state; the engine never
  * decides this for itself.
  */
-export type PosRuntimeOnSaleRejected = (message: string | null) => void;
+export type PosRuntimeOnSaleRejected = (rejection: {
+  message: string | null;
+  /**
+   * Feature 24.5F (DEF-01) — how the attempt failed, when the host knows.
+   *
+   * An OBJECT rather than a second positional argument, because the two values
+   * mean opposite things and a transposition would be silent: `message` is
+   * display text that may say anything, while `failure` is the classification
+   * that decides whether a till may open its cache. Absent means the host does
+   * not classify, and the receiver must treat it as "not proven to be a
+   * transport failure" — never as one.
+   */
+  failure?: DeviceFailureKind;
+}) => void;
 
 /**
  * Feature 24.5E — completes a sale WITHOUT a server, by making it durable here.
@@ -121,6 +152,23 @@ export type PosRuntimeQueueOfflineSale = (input: {
   paymentMethod: PaymentMethod;
   tipAmount: number;
   cart: readonly CartItem[];
+  /**
+   * Feature 24.5F (DEF-01) — the identity of an online attempt that just died
+   * on the wire, when this queued sale is that same attempt continuing.
+   *
+   * THIS IS THE DUPLICATE-SALE DEFENCE, and it is not an optimisation. If an
+   * online complete_sale_v3 call reached the server and its response was lost,
+   * the order EXISTS. Queuing the retry under a fresh idempotency key would ask
+   * complete_sale_v4 to create a second one. Passing the original key instead
+   * makes the queued submission a REPLAY: v4 resolves the key before allocating
+   * an order number, mutating inventory or writing an audit row, and returns
+   * the order v3 already created.
+   *
+   * Null whenever this is an ordinary offline sale with no online attempt
+   * behind it. The host only honours it when the cart still hashes the same,
+   * so a changed cart can never inherit an identity it does not match.
+   */
+  inheritedRequest: SaleRequestState | null;
 }) => Promise<
   | {
       ok: true;
@@ -149,3 +197,31 @@ export type PosRuntimeQueueOfflineSale = (input: {
  * PosRuntimeQueueOfflineSale by the same host, under the same condition.
  */
 export type PosRuntimeDiscardOfflineSaleDraft = () => void;
+
+/**
+ * Feature 24.5F — makes an outbound sale identity durable BEFORE the request is
+ * dispatched, returning whether it landed.
+ *
+ * WHY THE RUNTIME CANNOT JUST REMEMBER IT. The window between a request leaving
+ * the device and its answer being handled is exactly where a process can die,
+ * and the sale_request_id it carried is the only thing that can later prove —
+ * or safely replay — an order the server may have created. Held in component
+ * state that key dies with the process, and the cashier rings the customer up
+ * again under a new one, which the server cannot recognise as the same sale.
+ *
+ * A HOST THAT DOES NOT SUPPLY THIS IS UNCHANGED. The owner runtime and the
+ * Builder preview run in a browser tab against a live connection and have no
+ * offline story at all; they keep the existing behaviour. A host that DOES
+ * supply it is promising durability, so a `false` return means the runtime must
+ * not dispatch — see PosRuntime, which refuses the sale rather than taking
+ * money it could not protect.
+ */
+export type PosRuntimeArmOnlineSale = (sale: UncertainSale) => Promise<boolean>;
+
+/**
+ * Feature 24.5F — clears the durable record after a POSITIVE resolution.
+ *
+ * Called only with a server receipt in hand, or once a durable queue record has
+ * taken ownership of the same key. Never on a rejection.
+ */
+export type PosRuntimeResolveOnlineSale = () => Promise<void>;

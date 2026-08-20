@@ -25,6 +25,7 @@ import { createSaleFingerprint, createSaleRequestId } from "@/lib/saleRequest";
 import type { CartItem, PaymentMethod } from "@/lib/cart";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
 import type { EnqueueSaleInput } from "@/lib/saleQueueSession";
+import type { SaleRequestState } from "@/lib/saleRequest";
 import type { QueuedSale, QueuedSaleItem } from "@/lib/saleQueue";
 
 // ---------------------------------------------------------------------------
@@ -300,6 +301,16 @@ export function resolveOfflineSaleDraft(input: {
   tipAmount: number;
   cart: readonly CartItem[];
   now: number;
+  /**
+   * Feature 24.5F (DEF-01) — an online attempt that died on the wire and is now
+   * continuing offline. See PosRuntimeQueueOfflineSale.inheritedRequest for why
+   * reusing its key is what PREVENTS a duplicate rather than causing one.
+   *
+   * Honoured only when the fingerprint still matches, so a cart that changed
+   * after the failed attempt gets a new identity — which is correct, because a
+   * changed cart is a different request that v3 never sent.
+   */
+  inherited?: SaleRequestState | null;
   /** Injected only by tests; production uses createSaleRequestId. */
   generate?: () => string;
 }): OfflineSaleDraftResult {
@@ -317,7 +328,18 @@ export function resolveOfflineSaleDraft(input: {
   const generate = input.generate ?? createSaleRequestId;
 
   try {
-    const saleRequestId = generate();
+    // The inherited key is used for the SERVER's identity only. A fresh
+    // queueRecordId is still minted below: that is this device's local handle
+    // on a row, it has never been sent anywhere, and reusing one would collide
+    // with the record the failed attempt may already have written.
+    const inherited =
+      input.inherited !== null &&
+      input.inherited !== undefined &&
+      input.inherited.fingerprint === fingerprint
+        ? input.inherited.id
+        : null;
+
+    const saleRequestId = inherited ?? generate();
     // A separate local key, so this device's handle on the row stays distinct
     // from the server's identity for the sale. Both are minted here, in this
     // one place, and neither is ever regenerated.

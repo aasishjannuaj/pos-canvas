@@ -79,8 +79,17 @@ import {
 import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
+import {
+  armUncertainSale,
+  readUncertainSale,
+  reconcileUncertainSaleWithQueue,
+  resolveUncertainSale,
+} from "@/lib/uncertainSaleSession";
+import type { UncertainSale } from "@/lib/saleSubmission";
 import type {
+  PosRuntimeArmOnlineSale,
   PosRuntimeCompleteSale,
+  PosRuntimeResolveOnlineSale,
   PosRuntimeDiscardOfflineSaleDraft,
   PosRuntimeQueueOfflineSale,
 } from "@/lib/posRuntimeHost";
@@ -95,6 +104,8 @@ const EMPTY_SALE_STATUS: OfflineSaleStatus = {
   synced: 0,
   unsynced: 0,
   total: 0,
+  nextRetryAt: null,
+  uncertainOnlineSale: false,
 };
 
 export default function DeviceApp() {
@@ -160,6 +171,20 @@ export default function DeviceApp() {
    */
   const offlineDraftRef = useRef<OfflineSaleDraft | null>(null);
 
+  /**
+   * Feature 24.5F — the outstanding online request read back from disk.
+   *
+   * The copy that survives a process kill. Loaded once the session and pairing
+   * are known, refreshed whenever it is armed or resolved, and handed to
+   * PosRuntime, which prefers it over anything it remembers itself.
+   *
+   * `unusable` means something IS stored that this session cannot act on — a
+   * record left by a different pairing, or one that no longer reads back. It is
+   * never applied to this session's checkout and never deleted; it still blocks
+   * a reset through the status read.
+   */
+  const [uncertainSale, setUncertainSale] = useState<UncertainSale | null>(null);
+
   const refreshSaleStatus = useCallback(async () => {
     const status = await readOfflineSaleStatus();
 
@@ -177,7 +202,7 @@ export default function DeviceApp() {
    * connection alike.
    */
   const runSync = useCallback(
-    async (trigger: "reconnect" | "manual") => {
+    async (trigger: "reconnect" | "manual" | "retry") => {
       setSyncing(true);
 
       try {
@@ -410,6 +435,66 @@ export default function DeviceApp() {
   }, [syncSessionKey, runSync]);
 
   /**
+   * Feature 24.5F (DEF-02) — wake the engine when a persisted retry falls due.
+   *
+   * THE DEFECT THIS CLOSES: a sale that failed while the device was already
+   * online got a nextAttemptAt and then nothing to fire it. No further `online`
+   * event was coming — the device never went offline — so the sale waited for a
+   * restart or for a cashier to notice the "Sync now" button.
+   *
+   * ONE TIMER, AIMED AT A REAL INSTANT, not an interval. The queue already
+   * persists exactly when each record becomes eligible and already computes the
+   * backoff curve; a polling interval would be a second, coarser schedule
+   * running beside the real one, and would either fire uselessly for hours on
+   * an idle till or arrive late. This effect keys on the earliest persisted
+   * retry instant, so:
+   *
+   *   * nothing scheduled       -> no timer at all (the idle case is free)
+   *   * only fresh pending      -> no timer; startup/reconnect/manual own those
+   *   * only needs_attention,
+   *     permanent_failure,
+   *     syncing or synced       -> no timer; none of them is due for anything
+   *   * a status refresh that
+   *     does not move the
+   *     instant                 -> the dep is unchanged, so NO new timer
+   *
+   * That last line is what makes leaks and storms structurally impossible
+   * rather than merely unlikely: the number of timers is the number of distinct
+   * due instants, and React clears the previous one before installing the next.
+   *
+   * ACROSS A RESTART the instant comes off disk, so a relaunch inside a window
+   * schedules only the REMAINING delay and a relaunch after it clamps to zero
+   * and fires promptly. attemptCount is never reset by any of this.
+   *
+   * navigator.onLine is deliberately not consulted. If the retry fires while
+   * the network is still down the submission fails as a transport error and
+   * backs off further, which is the correct and already-tested behaviour — and
+   * a great deal safer than letting a browser hint decide when money syncs.
+   */
+  useEffect(() => {
+    const dueAt = saleStatus.nextRetryAt;
+
+    if (syncSessionKey === null || dueAt === null) {
+      return;
+    }
+
+    const due = Date.parse(dueAt);
+
+    if (!Number.isFinite(due)) {
+      return;
+    }
+
+    const timer = setTimeout(
+      () => {
+        void runSync("retry");
+      },
+      Math.max(0, due - Date.now())
+    );
+
+    return () => clearTimeout(timer);
+  }, [syncSessionKey, saleStatus.nextRetryAt, runSync]);
+
+  /**
    * Feature 24.5E — decide whether this till may sell while running from cache.
    *
    * Re-resolved on every state change rather than computed once: the answer
@@ -447,6 +532,56 @@ export default function DeviceApp() {
     };
 
     void resolve();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  /**
+   * Feature 24.5F — read the outstanding online request back from disk.
+   *
+   * RUNS BEFORE ANY NEW FINANCIAL CHECKOUT CAN HAPPEN, which is the whole
+   * requirement: a till that restarts after a request went unanswered must not
+   * open for business as though nothing had happened. It keys on the resolved
+   * `state`, so it settles as part of reaching `ready` rather than after it.
+   *
+   * A record belonging to a DIFFERENT pairing is not applied here — its key
+   * belongs to another project and could not resolve anything for this one —
+   * and it is not deleted either. It keeps blocking a reset through
+   * readOfflineSaleStatus, which reads the raw presence of the record rather
+   * than this session's view of it.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const sessionUserId = sessionUserIdRef.current;
+
+      if (state.status !== "ready" || sessionUserId === null) {
+        if (!cancelled) setUncertainSale(null);
+        return;
+      }
+
+      // Feature 24.5F — release a marker the queue already owns, BEFORE reading.
+      //
+      // Closes the crash window between a durable offline enqueue and the
+      // marker delete: the sale is safe either way, but a stale marker would
+      // keep blocking changed sales and blocking reset. Matched on the exact
+      // saleRequestId, never on "the queue is non-empty".
+      await reconcileUncertainSaleWithQueue();
+
+      const outstanding = await readUncertainSale({
+        deviceAuthUserId: sessionUserId,
+        deviceId: state.pairing.deviceId,
+        projectId: state.pairing.projectId,
+        buildJobId: state.pairing.buildJobId,
+      });
+
+      if (!cancelled) {
+        setUncertainSale(outstanding.status === "outstanding" ? outstanding.sale : null);
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -673,16 +808,142 @@ export default function DeviceApp() {
     offlineDraftRef.current = null;
   }, []);
 
+  /**
+   * Feature 24.5F (DEF-01) — a live session falls back to its cache.
+   *
+   * WHY THIS IS NOT resolveDeviceState(). That function starts by setting
+   * `checking`, which unmounts PosRuntime and destroys the cart the cashier is
+   * standing in front of — the one thing this path exists to protect. This
+   * transitions the EXISTING `ready` state in place, so the runtime keeps its
+   * cart, its selected payment method and its open checkout overlay while the
+   * mode changes underneath it.
+   *
+   * WHAT MAKES IT SAFE is that it reuses loadOfflineFallback — the exact same
+   * validated cached start a cold offline boot performs. Pairing assertion,
+   * integrity digest, auth-user identity and the 7-day lease all have to pass
+   * here for the same reasons they do at startup, and a device whose cache was
+   * cleared by a confirmed revocation has nothing to load. Nothing about this
+   * path is more permissive than the cold one; it is the cold one, run later.
+   *
+   * The remaining eligibility — queue/storage usable, pinned identity matching
+   * the running app — is re-checked by decideOfflineCheckoutSession on the very
+   * next Pay, so it is deliberately not duplicated here.
+   *
+   * If the cache does not validate, NOTHING changes: the till stays online,
+   * checkout stays exactly as blocked as it was, and the cashier keeps the
+   * generic "could not be confirmed" message. A failed fallback must never be
+   * an escalation.
+   */
+  const enterOfflineFromTransportFailure = useCallback(async () => {
+    const sessionUserId = sessionUserIdRef.current;
+
+    if (sessionUserId === null) {
+      return;
+    }
+
+    const fallback = await loadOfflineFallback({
+      now: Date.now(),
+      sessionUserId,
+    });
+
+    if (!fallback.ok) {
+      return;
+    }
+
+    setState((previous) => {
+      // Only a live POS may switch modes. If the app moved to revoked,
+      // reconnect_required or an error while this was in flight, that answer is
+      // newer than ours and must not be overwritten.
+      if (previous.status !== "ready") {
+        return previous;
+      }
+
+      // Already offline: nothing to do, and rebuilding the state object would
+      // hand PosRuntime a new config identity for no reason.
+      if (previous.offline) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        pairing: fallback.pairing,
+        config: fallback.config,
+        offline: fallback.offline,
+      };
+    });
+  }, []);
+
+  /**
+   * Feature 24.5F — make an outbound sale identity durable before it is sent.
+   *
+   * Returns false when the write did not land, and PosRuntime then refuses to
+   * dispatch. That is the deliberate trade: a till whose storage is broken
+   * cannot promise not to duplicate a sale, and the same till already refuses
+   * OFFLINE checkout for the identical reason (`queue_unavailable`).
+   *
+   * The identity written is the RUNNING session's, so a record can always be
+   * matched back to the pairing that made it.
+   */
+  const armOnlineSale: PosRuntimeArmOnlineSale = useCallback(
+    async (sale) => {
+      const sessionUserId = sessionUserIdRef.current;
+
+      if (sessionUserId === null || state.status !== "ready") {
+        return false;
+      }
+
+      const armed = await armUncertainSale({
+        sale,
+        identity: {
+          deviceAuthUserId: sessionUserId,
+          deviceId: state.pairing.deviceId,
+          projectId: state.pairing.projectId,
+          buildJobId: state.pairing.buildJobId,
+        },
+        dispatchedAt: new Date().toISOString(),
+      });
+
+      if (armed) {
+        // Mirror it locally straight away, so a process death between here and
+        // the response still leaves the runtime gating on the same request.
+        setUncertainSale(sale);
+      }
+
+      return armed;
+    },
+    [state]
+  );
+
+  /** Feature 24.5F — clears the durable record after a POSITIVE resolution. */
+  const resolveOnlineSale: PosRuntimeResolveOnlineSale = useCallback(async () => {
+    await resolveUncertainSale();
+    setUncertainSale(null);
+    await refreshSaleStatus();
+  }, [refreshSaleStatus]);
+
   const handleSaleRejected = useCallback(
-    (message: string | null) => {
+    (rejection: { message: string | null; failure?: DeviceFailureKind }) => {
+      // Feature 24.5F (DEF-01) — NOTHING ANSWERED, so the shop's internet is
+      // down and this till may open its cache.
+      //
+      // Checked FIRST and by classification, never by message text and never by
+      // navigator.onLine: a server that replied is an authoritative answer, and
+      // ignoring it to trade from cache is the one failure this whole feature
+      // is built to prevent. classifyDeviceFailure already made this decision
+      // upstream in lib/device.rpc.ts; this only acts on it.
+      if (rejection.failure === "transport") {
+        void enterOfflineFromTransportFailure();
+        return;
+      }
+
       // A rejection that looks like lost authorization triggers a full
       // re-resolve; the authoritative answer comes from get_device_pairing_state,
       // never from the message itself.
-      if (isPossibleRevocationError(message)) {
+      if (isPossibleRevocationError(rejection.message)) {
         void resolveDeviceState();
       }
     },
-    [resolveDeviceState]
+    [enterOfflineFromTransportFailure, resolveDeviceState]
   );
 
   switch (state.status) {
@@ -829,6 +1090,13 @@ export default function DeviceApp() {
           // one capability, and a host that persisted sales without ever
           // reporting an attempt over would let one sale's identity outlive it.
           discardOfflineSaleDraft={offlineSaleAllowed ? discardOfflineSaleDraft : null}
+          // Feature 24.5F — durable protection for the ONLINE path's identity.
+          // Supplied unconditionally, not gated on offline eligibility: the
+          // request this protects is an online one, and it is exactly the till
+          // that never goes offline which would otherwise lose the key.
+          armOnlineSale={armOnlineSale}
+          resolveOnlineSale={resolveOnlineSale}
+          persistedUncertainSale={uncertainSale}
         />
           </div>
         </div>
