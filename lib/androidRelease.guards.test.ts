@@ -228,20 +228,35 @@ describe("the release URL is pinned in tracked code", () => {
     expect(() => readAndroidServerUrl({})).toThrow(ANDROID_SERVER_URL_ENV_VAR);
   });
 
-  it("a release sync script exists and sets the flag", () => {
-    const scripts = (JSON.parse(read("package.json")) as { scripts: Record<string, string> })
-      .scripts;
-    expect(scripts["android:release:sync"]).toContain(`${ANDROID_RELEASE_ENV_VAR}=1`);
+  it("the release sync builds the runtime that ships in the APK", () => {
+    // SUPERSEDED BY 24.5G. This used to assert that the release sync sets
+    // POS_CANVAS_ANDROID_RELEASE, a flag whose only job was to pin the REMOTE
+    // server URL for a release build. There is no remote server URL any more —
+    // the app carries its own runtime — so the flag has nothing left to pin.
+    //
+    // What must be true now is stronger: the sync that produces a release APK
+    // BUILDS the device runtime first, so an APK can never be assembled around
+    // a stale or missing bundle.
+    const manifest = JSON.parse(read("package.json"));
+
+    expect(manifest.scripts["android:runtime"]).toContain("android-shell/vite.config.mts");
+    expect(manifest.scripts["android:sync"]).toContain("android:runtime");
+    expect(manifest.scripts["android:sync"]).toContain("cap sync android");
+    expect(manifest.scripts["android:release:sync"]).toContain("android:sync");
   });
 });
 
 describe("WebView debugging is off for release", () => {
-  it("is tied to the release flag, not hardcoded true", () => {
-    // On a released till this would expose a live POS session, including the
-    // paired device's stored auth session, to anyone who can reach it via adb.
-    const config = code(read(CAP_CONFIG));
-    expect(config).toContain("webContentsDebuggingEnabled: !isRelease");
+  it("is off unconditionally", () => {
+    // NARROWED BY 24.5G. It was previously tied to the release flag derived
+    // from the server URL; with no server URL there is no flag. Off in every
+    // build is strictly safer than off in release builds, and a till now
+    // carries both its whole runtime and a live paired session.
+    const config = read("capacitor.config.ts");
+
+    expect(config).toContain("webContentsDebuggingEnabled: false");
     expect(config).not.toContain("webContentsDebuggingEnabled: true");
+    expect(config).not.toMatch(/webContentsDebuggingEnabled:\s*!/);
   });
 });
 
@@ -488,12 +503,23 @@ describe("network security", () => {
     expect(debugConfig).not.toContain("<debug-overrides>");
   });
 
-  it("the sync-time cleartext check validates the DEBUG config", () => {
-    // Otherwise it would read the now-strict src/main file and reject every
-    // legitimate emulator URL.
-    const generator = code(read("android-shell/generateWww.mjs"));
-    expect(generator).toContain('"debug"');
-    expect(generator).not.toMatch(/"src",\s*\n?\s*"main"/);
+  it("no cleartext origin can reach the runtime, because there is no remote origin", () => {
+    // SUPERSEDED BY 24.5G. The old check guarded a sync-time validation in
+    // android-shell/generateWww.mjs, which existed to stop a release pointing
+    // at an http:// dev server. That file is gone: the runtime is bundled, so
+    // there is no configurable origin to get wrong and no cleartext exposure to
+    // validate. The release config's HTTPS-only posture is unchanged.
+    expect(existsSync(join(repoRoot, "android-shell/generateWww.mjs"))).toBe(false);
+
+    const config = read("capacitor.config.ts");
+
+    expect(config).not.toContain("cleartext");
+    expect(config).not.toContain("server:");
+
+    // The main (release) network-security config stays HTTPS-only.
+    const mainConfig = read("android/app/src/main/res/xml/network_security_config.xml");
+
+    expect(mainConfig).not.toContain("cleartextTrafficPermitted=\"true\"");
   });
 });
 

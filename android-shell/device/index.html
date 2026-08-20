@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" class="h-full antialiased">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <title>POS Canvas — Device</title>
+    <!--
+      Feature 24.5G — the native runtime's own document.
+
+      NOT a copy of app/layout.tsx and not a second POS. It supplies only the
+      two things the Next.js root layout supplied that a bundler cannot: the
+      document shell, and the font custom properties app/globals.css reads.
+
+      The hosted app fills those from next/font/google. A locally packaged app
+      must not fetch fonts from Google at boot — that is a network dependency,
+      which is the entire defect this feature exists to remove — so the values
+      are system stacks resolved by the device itself. The MONOSPACE one is not
+      cosmetic: AuthoritativeReceipt and OfflineReceipt lay receipt columns out
+      with `font-mono`, and losing it would misalign every printed total.
+    -->
+    <style>
+      :root {
+        --font-geist-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        --font-geist-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+      }
+      /* The approved brand ground, matched to capacitor.config.ts's
+         android.backgroundColor so the splash -> runtime handoff is one colour. */
+      html, body { background: #FBF8F3; }
+    </style>
+  </head>
+  <body class="min-h-full flex flex-col">
+    <div id="pos-canvas-device" class="min-h-full flex flex-1 flex-col"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

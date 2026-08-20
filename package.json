@@ -10,9 +10,9 @@
     "test": "vitest run",
     "worker:once": "node --env-file=.env.local --import tsx worker/once.ts",
     "worker:run": "node --import tsx worker/once.ts",
-    "android:www": "node android-shell/generateWww.mjs",
-    "android:sync": "npm run android:www && cap sync android",
-    "android:release:sync": "POS_CANVAS_ANDROID_RELEASE=1 npm run android:sync"
+    "android:sync": "npm run android:runtime && cap sync android",
+    "android:release:sync": "npm run android:sync",
+    "android:runtime": "vite build --config android-shell/vite.config.mts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",

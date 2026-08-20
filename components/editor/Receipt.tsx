@@ -1,6 +1,24 @@
-import { CURRENCY_SYMBOLS } from "./EditorShell";
+// Feature 24.5G — imported from lib/, not from EditorShell.
+//
+// EditorShell only ever RE-EXPORTED these three: CURRENCY_SYMBOLS and
+// ProjectConfig live in lib/projectConfig.ts and CompletedOrder in lib/cart.ts.
+// Reaching them through the Builder shell was incidental coupling left over
+// from before they moved, and it was not free: PosCheckoutPanel imports this
+// component, so every consumer of the shared checkout panel — including the
+// paired device — transitively imported the entire Builder, its server actions
+// and, through those, the "server-only" package.
+//
+// Next.js hid the cost, because it compiles a "use server" module into a client
+// RPC stub and never sends its imports to the browser. A general-purpose
+// bundler has no such concept and follows the import literally, which is how
+// the Android device bundle ended up containing a top-level `throw` from
+// server-only. Pointing at the canonical modules removes the edge entirely.
+//
+// Behaviour is unchanged: same symbols, same values, one less hop.
+import { CURRENCY_SYMBOLS } from "@/lib/projectConfig";
 import { describeCartModifiers } from "@/lib/cart";
-import type { CompletedOrder, ProjectConfig } from "./EditorShell";
+import type { CompletedOrder } from "@/lib/cart";
+import type { ProjectConfig } from "@/lib/projectConfig";
 
 type ReceiptProps = {
   order: CompletedOrder;

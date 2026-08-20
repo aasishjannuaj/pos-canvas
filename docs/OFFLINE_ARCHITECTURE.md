@@ -1675,8 +1675,64 @@ adapter, no second code path to keep in sync.
   10,000-sale backlog is ~20 MB, far inside any realistic quota. Quota
   exhaustion is therefore an error path to handle, not a design constraint.
 
-**Decision: IndexedDB, one shared implementation in the hosted app, plus a
+**Decision: IndexedDB, one shared implementation, plus a
 `navigator.storage.persist()` request. No platform-specific adapters.**
+
+### CORRECTION (Feature 24.5G) — "one implementation" never meant "one hosted origin"
+
+**The key insight above was half wrong, and real hardware QA proved it.** Both
+shells did load the same remote origin — and that is precisely why neither could
+start without a network. With no connection the WebView could not fetch
+`/device`, so `DeviceApp` never executed, `openOfflineDb` was never called, and
+every capability built in 24.5A–F sat behind a static "needs an internet
+connection" page. The offline POS was only ever offline-*capable* once it had
+already booted online.
+
+| | Before 24.5G | After 24.5G (Android) |
+|---|---|---|
+| Entry point | `server.url` → hosted `/device` | bundled assets in the APK |
+| Zero-network cold start | static error page | the real POS |
+| Origin | `https://pos-canvas.vercel.app` | **`https://localhost`** |
+| Runtime source | Vercel deployment | the installed binary |
+
+**One implementation still holds — it is the same `DeviceApp`, the same
+`PosRuntime`, the same `lib/` financial modules, built from the same source.**
+What changed is that the native app carries that implementation instead of
+fetching it. `android-shell/device/main.tsx` is a three-line mount, the local
+equivalent of `app/device/page.tsx`; a guard asserts it contains no POS logic
+and that nothing under `android-shell/` duplicates any.
+
+**Android's permanent native origin is `https://localhost`** (Capacitor's
+default `androidScheme`). It is permanent for two reasons, both load-bearing:
+
+1. **Storage is origin-scoped.** IndexedDB *and* the localStorage auth session
+   belong to the origin. Changing it later strands a till's pairing, its pinned
+   config and its queued sales — and because a new origin also means a new
+   anonymous auth user, even a perfect data copy would be refused by
+   `readPairingAssertion`'s identity check.
+2. **It must be a secure context.** `digestConfig` uses `crypto.subtle`, which
+   is unavailable outside one; without it `buildPinnedConfigRecord` returns null
+   and **no cache is ever written**, so offline mode would silently never arm
+   while looking perfectly healthy online. `https://localhost` is
+   potentially-trustworthy by specification. `file://` is not, which is why it
+   was rejected along with `http://localhost` and `capacitor://`.
+
+**Windows is NOT implemented.** It has the identical defect —
+`loadURL(server.url)` with `loadFile(offline.html)` on failure — and its
+approved next-stage origin is **`app://poscanvas`**, registered via
+`protocol.registerSchemeAsPrivileged({ secure: true, standard: true })` so it is
+a secure context too. Design only; no code has changed in `windows-shell/`.
+
+**Migration is not automatic and must never be pretended.** A device moving from
+the hosted origin to a local one starts with empty storage and no session: it
+must drain its queue to zero *before* the switch and re-pair after it. The
+existing reset-safety gate already refuses to proceed while anything is unsynced,
+and that is the protection to lean on.
+
+**Update model is unchanged:** one universal binary per platform, business
+configuration still server-driven and pinned per device. Runtime changes now ship
+as ordinary app updates rather than as a Vercel deploy. No remote code download,
+no OTA JavaScript bundle.
 
 ---
 
