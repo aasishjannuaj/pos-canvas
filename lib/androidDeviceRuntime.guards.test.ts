@@ -284,6 +284,122 @@ describe("the packaged bundle contains a POS and no server", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Feature 24.5G — the offline cold start
+// ---------------------------------------------------------------------------
+
+describe("a transport failure reaches the cache, not a dead end", () => {
+  const APP = "components/device/DeviceApp.tsx";
+
+  it("the auth gate consults the cache BEFORE the terminal offline error", () => {
+    // The defect: `createDeviceError("offline")` returned before
+    // loadOfflineFallback was ever reached, so a paired till with a perfect
+    // cache could not open without a network.
+    const app = code(read(APP));
+    const gate = app.indexOf("if (!session.ok) {");
+    const recover = app.indexOf("readPersistedDeviceUserId()");
+    const fallback = app.indexOf("await openOfflineOrFail(persistedUserId, failure);");
+
+    for (const index of [gate, recover, fallback]) {
+      expect(index).toBeGreaterThan(-1);
+    }
+
+    expect(recover).toBeGreaterThan(gate);
+    expect(fallback).toBeGreaterThan(recover);
+
+    // The terminal error survives, but ONLY for a device with no identity.
+    const terminal = app.indexOf('setState(createDeviceError("offline"));', gate);
+
+    expect(terminal).toBeGreaterThan(recover);
+    expect(terminal).toBeLessThan(fallback);
+    expect(app.slice(recover, terminal)).toContain("if (persistedUserId === null)");
+  });
+
+  it("offline authorization still runs the one shared validator", () => {
+    // No second offline path: the same openOfflineOrFail the pairing-state
+    // branch uses, which admits only a transport failure and then runs the
+    // whole cached-start validator.
+    const app = code(read(APP));
+
+    expect((app.match(/openOfflineOrFail\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(app).toContain("permitsOfflineFallback(failure)");
+    expect(app).not.toContain("decideOfflineFallback(");
+    expect(app).not.toContain("evaluateLease(");
+  });
+
+  it("the identity helper makes no network call and returns no token", () => {
+    const rpc = code(read("lib/device.rpc.ts"));
+    const fn = rpc.slice(rpc.indexOf("export function readPersistedDeviceUserId"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+
+    expect(body).toContain("DEVICE_AUTH_STORAGE_KEY");
+    expect(body).toContain("storage.getItem(");
+
+    for (const banned of [
+      "await",
+      "fetch",
+      "rpc(",
+      "getDeviceSupabaseClient",
+      "access_token",
+      "refresh_token",
+      "removeItem",
+      "setItem",
+    ]) {
+      expect(`identity helper uses ${banned}`).toBe(`identity helper uses ${banned}`);
+      expect(body).not.toContain(banned);
+    }
+
+    // Its return type has nowhere to put a token.
+    expect(rpc).toContain("): string | null {");
+  });
+
+  it("a session failure is classified, not collapsed", () => {
+    const rpc = code(read("lib/device.rpc.ts"));
+    const fn = rpc.slice(rpc.indexOf("export async function getDeviceSession"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+
+    expect(body).toContain("failure: classifyAuthFailure(error)");
+    // "No session stored" is still not a failure — there is nothing to fall
+    // back to, and giving it a kind would invite treating it as one.
+    expect(body).toContain("if (!data.session?.user?.id) {");
+    expect(rpc).toContain("isAuthRetryableFetchError(error) ? \"transport\"");
+  });
+
+  it("the durable cache write is awaited before the device is called ready", () => {
+    const app = code(read(APP));
+
+    expect(app).toContain("const persisted = await persistDeviceCache({");
+    expect(app).not.toContain("void persistDeviceCache(");
+    // A failed write is surfaced, never assumed successful.
+    expect(app).toContain("setOfflinePrepared(persisted.stored)");
+    expect(app).toContain("offlinePrepared === false");
+  });
+
+  it("online startup still validates through Supabase", () => {
+    const app = code(read(APP));
+
+    expect(app).toContain("await getDeviceSession()");
+    expect(app).toContain("await signInDeviceAnonymously()");
+    expect(app).toContain("await fetchDevicePairingState()");
+    expect(app).toContain("await fetchDeviceConfig()");
+  });
+
+  it("no localStorage fallback was added for financial data", () => {
+    // The identity read is the ONE localStorage touch, and it reads an id.
+    for (const file of ["lib/saleQueueSession.ts", "lib/uncertainSaleSession.ts", "lib/offlineCheckoutSession.ts"]) {
+      const source = code(read(file));
+
+      expect(`${file}: localStorage`).toBe(`${file}: localStorage`);
+      expect(source).not.toContain("localStorage");
+      expect(source).not.toContain("sessionStorage");
+    }
+
+    const app = code(read(APP));
+
+    expect(app).not.toContain("localStorage");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression — the money path is untouched
 // ---------------------------------------------------------------------------
 

@@ -32,6 +32,7 @@ import {
   fetchDevicePairingState,
   getDeviceSession,
   isPossibleRevocationError,
+  readPersistedDeviceUserId,
   redeemDevicePairingCode,
   resetDeviceSession,
   signInDeviceAnonymously,
@@ -185,6 +186,16 @@ export default function DeviceApp() {
    */
   const [uncertainSale, setUncertainSale] = useState<UncertainSale | null>(null);
 
+  /**
+   * Feature 24.5G — did the durable offline cache actually land on this start?
+   *
+   * `true` after a confirmed write, `false` when the write failed, and null
+   * before any authoritative start has completed. Only an explicit `false`
+   * warns: an undecided device says nothing, because "we have not written it
+   * yet" is not the same claim as "this till cannot go offline".
+   */
+  const [offlinePrepared, setOfflinePrepared] = useState<boolean | null>(null);
+
   const refreshSaleStatus = useCallback(async () => {
     const status = await readOfflineSaleStatus();
 
@@ -224,6 +235,7 @@ export default function DeviceApp() {
    */
   const openOfflineOrFail = useCallback(
     async (sessionUserId: string, failure: DeviceFailureKind | undefined) => {
+
       if (failure === undefined || !permitsOfflineFallback(failure)) {
         setState(createDeviceError("offline"));
         return;
@@ -277,12 +289,43 @@ export default function DeviceApp() {
       }
 
       if (!session.ok) {
-        // Feature 24.5A — no session means no RPC is even possible. If the
-        // sign-in failed for a TRANSPORT reason there may still be a usable
-        // cached session id from a previous run; there is not, because the
-        // session itself is what failed, so this stays the existing offline
-        // error. A device that has never signed in has nothing cached either.
-        setState(createDeviceError("offline"));
+        // Feature 24.5G — THE COLD-START FIX.
+        //
+        // 24.5A stopped here with a terminal "this device is offline", on the
+        // reasoning that a failed session means nothing can be cached either.
+        // That is true of a device which has never paired and false of every
+        // device which has: supabase-js refuses to hand back a session once the
+        // access token has expired and it cannot reach the server to refresh
+        // it, so a paired till with a perfect cache landed on an error screen
+        // every morning. Real hardware QA found exactly that.
+        //
+        // The identity needed to open the cache does not require a valid token
+        // — it is an ownership selector for evidence this device already holds,
+        // and every other gate still applies underneath it.
+        // `existing` is the pre-sign-in read; narrowing keeps TypeScript aware
+        // that a successful result carries no failure kind.
+        const failure =
+          session.failure ?? (existing.ok ? undefined : existing.failure);
+        const persistedUserId = readPersistedDeviceUserId();
+
+        if (persistedUserId === null) {
+          // Genuinely nothing to fall back to: this device has never held a
+          // session, so it has never been paired and has nothing cached.
+          setState(createDeviceError("offline"));
+          return;
+        }
+
+        // The sync engine and the uncertain-sale reader key on this, so they
+        // must see the same identity the cache was opened with.
+        sessionUserIdRef.current = persistedUserId;
+        setSyncSessionKey(persistedUserId);
+
+        // DELIBERATELY THE SAME FUNCTION the pairing-state path uses. It admits
+        // only a transport failure, so a server that ANSWERED — an invalid or
+        // revoked session — still cannot become offline authorization; and it
+        // runs the whole cached-start validator, so the assertion, the digest,
+        // the identity match and the 7-day lease all still have to pass.
+        await openOfflineOrFail(persistedUserId, failure);
         return;
       }
 
@@ -345,13 +388,32 @@ export default function DeviceApp() {
       // Feature 24.5A — refresh the durable cache on EVERY authoritative start,
       // so `lastVerifiedAt` tracks the last time the server actually vouched for
       // this device and the snapshot follows an authoritative build change.
+      //
+      // Feature 24.5G — AWAITED, where it used to be fire-and-forget.
+      //
+      // `void persistDeviceCache(...)` let the POS render while the write was
+      // still in flight: open the database, hash the config, write two records.
+      // A till closed promptly after pairing — which is exactly what a tester
+      // does — could be killed mid-write and come back with no cache at all.
+      // Awaiting costs a few milliseconds once per authoritative start and
+      // removes the race entirely.
       if (resolved.status === "ready") {
-        void persistDeviceCache({
+        const persisted = await persistDeviceCache({
           deviceAuthUserId: sessionUserId,
           pairing: resolved.pairing,
           config: resolved.config,
           verifiedAt: new Date().toISOString(),
         });
+
+        // A FAILED WRITE DOES NOT BLOCK THE TILL, and does not pretend either.
+        //
+        // The device is online and authoritative: it can take payments right
+        // now, and refusing to open would turn a storage problem into an outage.
+        // What it cannot do is survive a restart without a network, so that is
+        // stated plainly instead of being discovered at 6am. There is no spinner
+        // and no retry loop — the next authoritative start tries again, which is
+        // the same cadence the cache has always refreshed on.
+        setOfflinePrepared(persisted.stored);
       }
 
       if (resolved.status === "revoked") {
@@ -1040,6 +1102,25 @@ export default function DeviceApp() {
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
           {offline !== null && <DeviceOfflineBanner offline={offline} />}
+
+          {/* Feature 24.5G — the cache write failed on this start. The till is
+              online and fully usable; what it cannot do is reopen without a
+              network, and an operator who is told that now can act on it. Amber
+              and one sentence, matching DeviceOfflineBanner: this is a state,
+              not an error, and nothing has gone wrong with the sale path. */}
+          {offlinePrepared === false && (
+            <div
+              role="status"
+              className="border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-center text-xs text-amber-900"
+            >
+              <span className="font-semibold">Offline use unavailable</span>
+              <span aria-hidden="true"> · </span>
+              <span>
+                This till could not save its setup for offline use. It works normally
+                while connected.
+              </span>
+            </div>
+          )}
 
           {/* Feature 24.5E — the cashier's count. Renders nothing when the
               queue is empty, which is the normal case. Sync now is offered

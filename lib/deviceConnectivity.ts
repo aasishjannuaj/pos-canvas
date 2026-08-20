@@ -60,12 +60,64 @@ const TRANSPORT_MESSAGE_FRAGMENTS = [
   "timeout",
 ];
 
-/** Anything with one of these has demonstrably reached a server. */
+/**
+ * Anything with one of these has demonstrably reached a server.
+ *
+ * FEATURE 24.5G — NARROWED, after this function silently broke offline startup
+ * on real hardware for the entire life of the offline feature.
+ *
+ * It used to accept `typeof error.details === "string" || typeof error.hint ===
+ * "string"` as proof of a reply. That is not proof of anything.
+ * @supabase/postgrest-js SYNTHESIZES an error object when `fetch` itself
+ * rejects, and it always populates both fields:
+ *
+ *     { message: "TypeError: fetch failed",
+ *       details: "<the fetch error's stack>",
+ *       hint: "",
+ *       code: "" }
+ *
+ * Verified by executing a real offline RPC, not read from documentation. Note
+ * `hint: ""` — an EMPTY string still satisfied `typeof x === "string"`, so the
+ * old test fired on every offline call regardless of content. Every device RPC
+ * made with no network was therefore classified `server_rejected`, which is the
+ * one kind permitsOfflineFallback refuses, so a paired till with a perfect
+ * cache could never reach its cache. The offline gate was right; its input was
+ * a fabrication.
+ *
+ * WHAT COUNTS AS EVIDENCE NOW — only things a client cannot manufacture without
+ * an answer:
+ *
+ *   1. a POSITIVE HTTP status. A real response has one; postgrest reports
+ *      `status: 0` for a synthesized fetch failure, and 0 is explicitly not
+ *      evidence.
+ *   2. a NON-EMPTY Postgres/PostgREST error code — P0001, 42501, 23505,
+ *      PGRST301 — excluding OS socket codes, which mean the opposite.
+ *
+ * `details` and `hint` remain useful for diagnostics and are deliberately no
+ * longer consulted here: they can no longer upgrade a transport-shaped failure
+ * on their own.
+ *
+ * THE ASYMMETRY IS INTENTIONAL. Failing to recognise a reply strands a till
+ * that could have opened; wrongly recognising one lets a revoked device trade
+ * from cache. So this stays strict about what counts, and everything it cannot
+ * prove falls through to the message table and then to `unknown` — which
+ * permitsOfflineFallback also refuses.
+ */
 function hasServerResponseEvidence(error: Record<string, unknown>): boolean {
   const status = error.status;
 
-  if (typeof status === "number" && Number.isFinite(status) && status > 0) {
-    return true;
+  if (typeof status === "number" && Number.isFinite(status)) {
+    // A real HTTP response, whatever it says — 401, 403, 409, 500, 503. Each is
+    // an ANSWER, and an answered rejection must never unlock the cache merely
+    // because it happens to be retryable.
+    if (status > 0) {
+      return true;
+    }
+
+    // Explicitly NOT evidence: postgrest's synthesized fetch failure.
+    // Deliberately does not return false here — an absent code is not proof of
+    // a reply either, but the code check below is still worth running for a
+    // shape that carries one alongside a zero status.
   }
 
   // PostgREST returns a Postgres SQLSTATE ("P0001" for a raise, "42501" for a
@@ -76,28 +128,45 @@ function hasServerResponseEvidence(error: Record<string, unknown>): boolean {
     // undici/Node put OS-level socket codes in the same field. Those are the
     // opposite conclusion, so they are excluded explicitly rather than being
     // mistaken for a database answer.
-    const normalized = code.trim().toUpperCase();
-    const socketCodes = [
-      "ENOTFOUND",
-      "ECONNREFUSED",
-      "ECONNRESET",
-      "ETIMEDOUT",
-      "EAI_AGAIN",
-      "EHOSTUNREACH",
-      "ENETUNREACH",
-      "EPIPE",
-      "UND_ERR_CONNECT_TIMEOUT",
-      "UND_ERR_SOCKET",
-    ];
-
-    return !socketCodes.includes(normalized);
+    return !SOCKET_FAILURE_CODES.includes(code.trim().toUpperCase());
   }
 
-  // A PostgREST error body carries these even when a code is absent.
-  return (
-    typeof error.details === "string" ||
-    typeof error.hint === "string"
-  );
+  return false;
+}
+
+/** OS-level socket failures, as undici/Node/Electron report them. */
+const SOCKET_FAILURE_CODES = [
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+];
+
+function hasSocketFailureCode(error: Record<string, unknown>): boolean {
+  const code = error.code;
+
+  if (typeof code === "string" && SOCKET_FAILURE_CODES.includes(code.trim().toUpperCase())) {
+    return true;
+  }
+
+  const cause = error.cause;
+
+  if (cause !== null && typeof cause === "object") {
+    const causeCode = (cause as Record<string, unknown>).code;
+
+    return (
+      typeof causeCode === "string" &&
+      SOCKET_FAILURE_CODES.includes(causeCode.trim().toUpperCase())
+    );
+  }
+
+  return false;
 }
 
 function messageOf(error: Record<string, unknown>): string {
@@ -139,6 +208,16 @@ export function classifyDeviceFailure(error: unknown): DeviceFailureKind {
   // contain the word "network" is still a rejection.
   if (hasServerResponseEvidence(record)) {
     return "server_rejected";
+  }
+
+  // Feature 24.5G — an OS socket code is POSITIVE evidence of a transport
+  // failure, not merely the absence of a database answer. undici, Node and
+  // Electron's net stack all report these in the same `code` field PostgREST
+  // uses for SQLSTATEs, and they mean precisely the opposite. Checked before the
+  // message table so a host whose wording this file has never seen still
+  // classifies correctly.
+  if (hasSocketFailureCode(record)) {
+    return "transport";
   }
 
   const message = messageOf(record);

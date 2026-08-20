@@ -633,6 +633,68 @@ and every claim about current behaviour cites the file that establishes it.
 
 ---
 
+### 24.5G — the native shells needed the runtime, and the runtime needed a fix
+
+**Hardware QA, Android, PASS** (real phone, airplane mode, 2026-08-20). A
+previously paired till cold-starts with zero network and opens the real POS:
+cached pairing, config, identity, lease and integrity all validate; an offline
+sale is taken and durably queued; the queue survives close/reopen; reconnect
+drains it to `waiting 0 · attention 0 · synced 1`.
+
+Getting there took three defects, and the order matters because each hid the
+next:
+
+1. **The app was not on the device.** The shells loaded `/device` from a hosted
+   URL, so with no network nothing from this repository ever executed — see the
+   §16 correction above. Fixed by packaging the runtime locally.
+2. **The cold-start gate had no cache fallback.** With the runtime finally
+   running, `resolveDeviceState` still returned a terminal "This device is
+   offline" whenever a session could not be established, without ever calling
+   `loadOfflineFallback`. supabase-js will not return a session once the access
+   token has expired and it cannot reach the server to refresh it, so this fired
+   on every morning start. Fixed by recovering the persisted device auth user id
+   locally — an ownership selector for evidence the device already holds, never
+   a credential — and routing through the same `openOfflineOrFail` the
+   pairing-state path uses.
+3. **A real offline RPC was classified as a server rejection.** This is the one
+   worth remembering. `hasServerResponseEvidence` accepted `typeof
+   error.details === "string" || typeof error.hint === "string"` as proof a
+   server had replied. `@supabase/postgrest-js` SYNTHESIZES an error object when
+   `fetch` itself rejects and always populates both — including `hint: ""`,
+   which still satisfies a `typeof` check. Every offline device RPC therefore
+   classified as `server_rejected`, the one kind `permitsOfflineFallback`
+   refuses, so a valid cache was unreachable.
+
+**Why automation never caught (3):** every test constructed its own error
+object — `{ message: "Failed to fetch" }` — while the library produced something
+quite different. The fixtures and the library disagreed and the fixtures won.
+`lib/deviceConnectivity.test.ts` now pins the shapes transcribed from executing
+real failing calls, so library drift cannot silently reintroduce it.
+
+**The evidence rule now** is only what a client cannot manufacture without an
+answer: a positive HTTP status (`status: 0` is explicitly not evidence), or a
+non-empty Postgres/PostgREST error code. `details` and `hint` inform humans and
+decide nothing. OS socket codes (`ENOTFOUND`, `ECONNREFUSED`, …) are positive
+evidence of transport rather than merely "not a database answer". Device RPCs
+now pass the HTTP status through, which the `PostgrestError` object does not
+carry on its own.
+
+**The security gate was never the problem and was not touched.** An answered
+rejection still refuses the cache: `P0001`, 401, 403 and 503 are all
+`server_rejected`, and an unrecognisable answer falls to `unknown`, which also
+refuses. Offline authorization remains the integrity-checked assertion plus the
+7-day lease.
+
+**One race fixed alongside:** `persistDeviceCache` was fire-and-forget, so a
+till closed promptly after pairing could be killed mid-write and come back with
+no cache. It is awaited; a failed write shows an amber "Offline use unavailable"
+notice rather than silently claiming offline readiness.
+
+**Windows is unchanged and still has defect (1).** Its approved origin remains
+`app://poscanvas`; design only.
+
+---
+
 ### What 24.5F changed
 
 24.5F is a QA phase, and the two changes it made were both defects that QA

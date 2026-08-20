@@ -18,8 +18,9 @@
 // error as an oracle for whether a code exists. This module maps through the
 // EXISTING getRedeemErrorMessage table and never surfaces a raw Postgres
 // message, so the UI cannot reintroduce the distinction the backend removed.
-import { getDeviceSupabaseClient } from "@/lib/supabase/deviceClient";
+import { getDeviceSupabaseClient, DEVICE_AUTH_STORAGE_KEY } from "@/lib/supabase/deviceClient";
 import { classifyDeviceFailure, isDatabaseRejection } from "@/lib/deviceConnectivity";
+import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
   getRedeemErrorMessage,
@@ -35,6 +36,31 @@ import type {
   DeviceIdentity,
   PairingStateResult,
 } from "@/lib/deviceSession";
+
+/**
+ * Feature 24.5G — attaches the HTTP status supabase-js reports alongside the error.
+ *
+ * WHY THIS IS NEEDED. `.rpc()` resolves to `{ data, error, status, statusText }`,
+ * and every call site here destructured `{ data, error }` — throwing the status
+ * away. But the PostgrestError object carries NO status of its own (verified by
+ * executing a real failing call), so the classifier was left judging a reply on
+ * `details`/`hint`, which postgrest fabricates during a pure fetch failure.
+ *
+ * Passing the status through gives the classifier the one signal that genuinely
+ * separates the two cases: a real response has a positive status, and a
+ * synthesized fetch failure reports 0. It also makes a non-JSON gateway error —
+ * a bare 502/503 HTML page, which arrives as `{ message }` and nothing else —
+ * correctly readable as an answer rather than as an unknown.
+ *
+ * Purely additive: the original error's own fields are untouched.
+ */
+function withStatus(error: unknown, status: number | undefined): unknown {
+  if (error === null || typeof error !== "object" || typeof status !== "number") {
+    return error;
+  }
+
+  return { ...(error as Record<string, unknown>), status };
+}
 
 const REDEEM_ERROR_CODES: RedeemErrorCode[] = [
   "not_authenticated",
@@ -64,20 +90,127 @@ export type DeviceSessionResult =
   // A simple "no session stored" is not a failure and carries nothing.
   | { ok: false; failure?: DeviceFailureKind };
 
-/** Returns the existing anonymous session, if the browser still holds one. */
+/**
+ * Returns the existing anonymous session, if the browser still holds a usable one.
+ *
+ * Feature 24.5G — THE FAILURE IS NOW CLASSIFIED, and that is the whole fix.
+ *
+ * This used to collapse every outcome into `{ ok: false }`, which threw away the
+ * one distinction that matters at cold start: "this device has never signed in"
+ * versus "the network stopped us validating a session we already have". Those
+ * demand opposite behaviour, and conflating them is why a paired till with a
+ * perfect offline cache showed "This device is offline" on a zero-network start.
+ *
+ * WHY THIS CALL TOUCHES THE NETWORK AT ALL. supabase-js reads the session from
+ * storage, but once the access token is inside its 90s expiry margin it attempts
+ * a token refresh before answering. Offline that refresh fails, and past the
+ * token's real expiry getSession returns `session: null` — so on any cold start
+ * more than an access-token lifetime after the last online contact, an offline
+ * device has no session here. That is expected and safe; what the caller must
+ * not do is treat it as "this device cannot operate".
+ */
 export async function getDeviceSession(): Promise<DeviceSessionResult> {
   try {
     const { data, error } = await getDeviceSupabaseClient().auth.getSession();
 
-    if (error || !data.session?.user?.id) {
+    if (error) {
+      return { ok: false, failure: classifyAuthFailure(error) };
+    }
+
+    // No error and no session means nothing was ever stored. NOT a failure, and
+    // deliberately carries no failure kind: there is nothing to fall back to.
+    if (!data.session?.user?.id) {
       return { ok: false };
     }
 
     return { ok: true, userId: data.session.user.id };
-  } catch {
-    return { ok: false };
+  } catch (thrown) {
+    return { ok: false, failure: classifyAuthFailure(thrown) };
   }
 }
+
+/**
+ * Classifies an auth-js error, using the SAME vocabulary every other call here
+ * uses rather than a second parallel classifier.
+ *
+ * The one addition is `isAuthRetryableFetchError`, which is auth-js's own public
+ * predicate for "this did not reach the server". It is consulted FIRST because
+ * auth-js wraps a fetch failure in an AuthError whose status is 0 and whose
+ * message varies by engine — classifyDeviceFailure would usually still reach
+ * "transport" through its message table, but "usually" is not good enough when
+ * the answer decides whether a till can open in the morning.
+ */
+function classifyAuthFailure(error: unknown): DeviceFailureKind {
+  return isAuthRetryableFetchError(error) ? "transport" : classifyDeviceFailure(error);
+}
+
+/**
+ * Feature 24.5G — the previously persisted device auth user id, read LOCALLY.
+ *
+ * WHAT IT IS FOR, and just as importantly what it is not. Offline authorization
+ * in this design is the cached pairing assertion plus the 7-day lease; it has
+ * never been the auth token. But `decideOfflineFallback` still has to know WHICH
+ * device the cached evidence belongs to, and until now that identity could only
+ * come from a validated session — which is exactly what a device with no network
+ * cannot obtain. This returns that identity, and nothing else.
+ *
+ * IT IS NOT A CREDENTIAL. It is an ownership selector for evidence this device
+ * already holds, and it can authorize nothing on its own: the assertion must
+ * still match it, the pinned config must still pass its digest, and the lease
+ * must still be inside 7 days. Every online path still validates through
+ * Supabase, and the offline sync RPC still enforces the revocation window when
+ * a queued sale is finally submitted.
+ *
+ * NO NETWORK, NO TOKENS. It reads one key, extracts one field, and returns a
+ * string. The access token and refresh token in that same blob are never read,
+ * never returned and never logged.
+ *
+ * MALFORMED STORAGE FAILS SAFE AND IS LEFT ALONE. Anything unparseable returns
+ * null — the device then behaves exactly as it did before, requiring the
+ * network — and the stored value is NOT deleted. It may be the only remaining
+ * trace of a session, and destroying evidence to tidy up a parse failure is the
+ * opposite of what this feature is for.
+ */
+export function readPersistedDeviceUserId(
+  // Injected for tests; production reads the browser's own storage.
+  storage: Pick<Storage, "getItem"> | null | undefined = globalThis.localStorage
+): string | null {
+  if (!storage || typeof storage.getItem !== "function") {
+    return null;
+  }
+
+  try {
+    const raw = storage.getItem(DEVICE_AUTH_STORAGE_KEY);
+
+    if (raw === null) {
+      return null;
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+
+    if (parsed === null || typeof parsed !== "object") {
+      return null;
+    }
+
+    const user = (parsed as { user?: unknown }).user;
+
+    if (user === null || typeof user !== "object") {
+      return null;
+    }
+
+    const id = (user as { id?: unknown }).id;
+
+    // Shape-checked so a truncated or hand-edited blob cannot supply an
+    // identity that would then be compared against a cached assertion.
+    return typeof id === "string" && DEVICE_USER_ID_PATTERN.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A Supabase auth user id is a UUID. Format only; proves nothing about trust. */
+const DEVICE_USER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Creates the device's anonymous session.
@@ -146,11 +279,11 @@ export async function fetchDevicePairingState(): Promise<
   { ok: true; state: PairingStateResult } | { ok: false; failure: DeviceFailureKind }
 > {
   try {
-    const { data, error } =
+    const { data, error, status } =
       await getDeviceSupabaseClient().rpc("get_device_pairing_state");
 
     if (error) {
-      return { ok: false, failure: classifyDeviceFailure(error) };
+      return { ok: false, failure: classifyDeviceFailure(withStatus(error, status)) };
     }
 
     return { ok: true, state: parsePairingState(data) };
@@ -242,13 +375,13 @@ export async function fetchDeviceConfig(): Promise<
   DeviceConfigResult & { failure?: DeviceFailureKind }
 > {
   try {
-    const { data, error } = await getDeviceSupabaseClient().rpc("get_device_config");
+    const { data, error, status } = await getDeviceSupabaseClient().rpc("get_device_config");
 
     if (error) {
       return {
         ok: false,
         reason: "config_unavailable",
-        failure: classifyDeviceFailure(error),
+        failure: classifyDeviceFailure(withStatus(error, status)),
       };
     }
 
@@ -305,7 +438,7 @@ export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promis
   rolledBack?: boolean;
 }> {
   try {
-    const { data, error } = await getDeviceSupabaseClient().rpc("complete_sale_v3", {
+    const { data, error, status } = await getDeviceSupabaseClient().rpc("complete_sale_v3", {
       p_project_id: request.projectId,
       p_payment_method: request.paymentMethod,
       // Still hardcoded: complete_sale_v3 rejects any nonzero tip from a device,
@@ -324,10 +457,14 @@ export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promis
     });
 
     if (error) {
+      const withHttpStatus = withStatus(error, status);
+
       return {
         receipt: null,
         error: error.message,
-        failure: classifyDeviceFailure(error),
+        failure: classifyDeviceFailure(withHttpStatus),
+        // Unchanged input on purpose: a rollback is proven by a SQLSTATE, and an
+        // HTTP status neither adds to nor detracts from that.
         rolledBack: isDatabaseRejection(error),
       };
     }
