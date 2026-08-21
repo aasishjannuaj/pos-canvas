@@ -472,6 +472,118 @@ export default function DeviceApp() {
   }, [syncSessionKey]);
 
   /**
+   * Feature 24.5F — a live POS returns to authoritative online mode.
+   *
+   * WHY runSync("reconnect") ALONE WAS NOT ENOUGH. Draining the queue is only
+   * half of what regaining connectivity means. The runtime mode is set once, at
+   * the moment the POS opens, and nothing cleared it — so a till whose internet
+   * came back kept believing it was offline, kept routing every new sale into
+   * the queue instead of complete_sale_v3, and hid its own Sync now button
+   * because it "knew" it was offline. Hardware showed exactly that: the queue
+   * only drained after a restart, and a sale taken after reconnection was still
+   * queued.
+   *
+   * THIS IS THE MIRROR OF enterOfflineFromTransportFailure, and deliberately so.
+   * It transitions the EXISTING `ready` state in place rather than calling
+   * resolveDeviceState, which begins by setting `checking` — that would unmount
+   * PosRuntime and destroy the cashier's cart and any checkout in progress. The
+   * cart, the selected payment method, the open checkout overlay and any
+   * uncertain-sale identity all live inside PosRuntime and are untouched here.
+   *
+   * IT IS STILL FULLY AUTHORITATIVE. The pairing state and the config come from
+   * the server, so a revocation that landed during the outage is applied rather
+   * than skipped, and a transport failure leaves the till exactly as it was.
+   * Nothing here trusts navigator.onLine for anything.
+   */
+  const returnOnlineFromReconnect = useCallback(async (): Promise<void> => {
+    const sessionUserId = sessionUserIdRef.current;
+
+    if (sessionUserId === null || resolving.current) {
+      return;
+    }
+
+    // Held for the whole episode: it excludes a concurrent cold-start resolve
+    // AND a second overlapping reconnect, without a second flag to keep in sync.
+    resolving.current = true;
+
+    try {
+      const pairingState = await fetchDevicePairingState();
+
+      if (!pairingState.ok) {
+        // Still unreachable. The `online` event is a hint, not proof, and a
+        // captive portal produces exactly this. Stay offline, change nothing.
+        return;
+      }
+
+      const next = decidePairingState(pairingState.state);
+
+      if (next.status === "revoked") {
+        readyPairingRef.current = null;
+        void clearOfflineCache();
+        setState(next);
+        return;
+      }
+
+      if (next.status !== "loading_config") {
+        // unpaired / signing_in / unavailable — the server's answer wins.
+        setState(next);
+        return;
+      }
+
+      const configResult = await fetchDeviceConfig();
+
+      if (!configResult.ok && configResult.failure !== undefined) {
+        // The connection dropped again mid-refresh. Remain offline.
+        return;
+      }
+
+      const resolved = decideConfigState(configResult, next.pairing);
+
+      if (resolved.status !== "ready") {
+        if (resolved.status === "revoked") {
+          readyPairingRef.current = null;
+          void clearOfflineCache();
+        }
+
+        setState(resolved);
+        return;
+      }
+
+      // The server has vouched for this device again, so the lease restarts
+      // from now — the same rule every authoritative start follows. Awaited, so
+      // the device is not called offline-ready before the write lands.
+      const persisted = await persistDeviceCache({
+        deviceAuthUserId: sessionUserId,
+        pairing: resolved.pairing,
+        config: resolved.config,
+        verifiedAt: new Date().toISOString(),
+      });
+
+      setOfflinePrepared(persisted.stored);
+      readyPairingRef.current = resolved.pairing;
+
+      setState((previous) => {
+        // Only a live POS may switch modes, and only one that is actually
+        // offline. Anything else is a newer answer than ours.
+        if (previous.status !== "ready" || !previous.offline) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          pairing: resolved.pairing,
+          config: resolved.config,
+          // THE LATCH RELEASES HERE. getDeviceRuntimeMode reads this, so the
+          // next sale takes the online complete_sale_v3 path.
+          offline: null,
+        };
+      });
+    } finally {
+      resolving.current = false;
+    }
+  }, []);
+
+  /**
    * Feature 24.5E — the reconnect trigger.
    *
    * SUBSCRIBED ONCE and unsubscribed on unmount: `runSync` is a stable callback
@@ -492,9 +604,18 @@ export default function DeviceApp() {
     }
 
     return subscribeToReconnect(() => {
-      void runSync("reconnect");
+      // SERIALIZED, AND THE ORDER MATTERS. The authoritative refresh runs
+      // first so a revocation confirmed during the outage is applied before
+      // anything else — a successful queue drain must never be able to leave a
+      // withdrawn till looking healthy. The drain follows either way, because
+      // sales taken before a revocation are real money and complete_sale_v4
+      // decides which of them it accepts.
+      void (async () => {
+        await returnOnlineFromReconnect();
+        await runSync("reconnect");
+      })();
     });
-  }, [syncSessionKey, runSync]);
+  }, [syncSessionKey, runSync, returnOnlineFromReconnect]);
 
   /**
    * Feature 24.5F (DEF-02) — wake the engine when a persisted retry falls due.
@@ -1126,10 +1247,22 @@ export default function DeviceApp() {
               queue is empty, which is the normal case. Sync now is offered
               only while the device believes it is online: offering it during
               an outage would be a button that visibly does nothing. */}
+          {/* Feature 24.5F — OFFERED WHENEVER THERE IS QUEUED WORK, including
+              offline. It used to be hidden in offline mode, on the reasoning
+              that a sync button during an outage would visibly do nothing.
+              Hardware found the hole in that: when the reconnect signal never
+              arrived, the till was still in offline mode, so the one manual
+              recovery the cashier had was the one thing hidden from them, and
+              only a restart worked.
+
+              A press that fails while genuinely offline is harmless — the
+              submission fails as a transport error, every record is preserved,
+              and the backoff is unchanged. Availability keys on the queue's own
+              counts, never on navigator.onLine. */}
           <DeviceSyncStatus
             status={saleStatus}
             syncing={syncing}
-            onSyncNow={offlineMode ? null : () => void runSync("manual")}
+            onSyncNow={saleStatus.unsynced > 0 ? () => void runSync("manual") : null}
           />
 
           <div className="min-h-0 flex-1">

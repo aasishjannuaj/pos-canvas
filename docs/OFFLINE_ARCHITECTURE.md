@@ -1861,6 +1861,68 @@ Two smaller defects were fixed alongside:
   cannot summon one — with `autoHideMenuBar` as a second barrier. The window
   frame is untouched; `frame: false` is deliberately not used.
 
+#### Reconnect recovery (24.5F, after Android A-3)
+
+Android hardware found that a till which regains connectivity **while the app
+stays open** did not recover: three queued sales sat undrained, a fourth sale
+taken after reconnection was queued too, and only restarting the app fixed it.
+Three causes had to be true at once, and each disabled one recovery route:
+
+1. **`ACCESS_NETWORK_STATE` was not declared**, so Chromium's
+   NetworkChangeNotifier could not observe the change and the `online` event
+   never fired. Windows drained fine on identical JavaScript, which is what
+   isolated this to the platform rather than the app.
+2. **The retry timer skips rows with no persisted `nextAttemptAt`** — which
+   fresh sales are — so nothing else was scheduled to wake the engine. That
+   exclusion is correct and unchanged; it exists so an offline till does not
+   burn attempts.
+3. **The runtime mode was latched offline.** Nothing cleared `state.offline`
+   except a full re-resolve, so new sales kept routing to the queue *and* the
+   Sync now button was hidden, because it was gated on `offlineMode`.
+
+**The reconnect episode now does two things, in this order:** refresh
+authoritative state, then drain. The order matters — a successful drain must
+never be able to leave a revoked till looking healthy.
+
+`returnOnlineFromReconnect` is the mirror of `enterOfflineFromTransportFailure`:
+it re-reads pairing state and config from the server and transitions the
+existing `ready` state **in place**. It never calls `resolveDeviceState`, which
+begins with `checking` and would unmount `PosRuntime`, destroying the cashier's
+cart and any checkout in progress. A still-unreachable server changes nothing; a
+revocation confirmed during the outage is applied.
+
+**Sync now is now offered whenever `unsynced > 0`**, including offline. A press
+that fails offline is harmless — transport error, every record preserved,
+backoff untouched — and hiding it removed the only manual recovery at exactly
+the moment it was needed. Availability keys on the queue's own counts, never on
+`navigator.onLine`.
+
+**Backoff semantics are unchanged.** A reconnect is a wake-up, not permission to
+hammer a server: a row inside its persisted window is not retried early and its
+`attemptCount` is not reset. No polling was added and no Capacitor plugin was
+introduced.
+
+**Android hardware QA — PASS.** Confirmed on a real phone:
+
+| Step | Observed |
+|---|---|
+| offline POS opens, 3 sales queued | yes |
+| Sync now visible **while offline** | yes |
+| network restored, app left open, **no restart** | — |
+| queue drains automatically to 0 | yes |
+| amber Offline banner clears | yes |
+| runtime returns to online mode | yes |
+| next sale completes as a normal online sale with an `ORD` number | yes |
+| next sale does **not** enter the offline queue | yes |
+| duplicate orders | none |
+
+**Windows is NOT separately hardware-proven for this fix.** The reconnect
+episode, the mode latch and the Sync now gate all live in shared `DeviceApp`
+code, so Windows is covered by the same automated tests and by its earlier
+hardware pass on the reconnect *signal* — but the state-refresh and
+next-sale-goes-online behaviour has not been observed on a real PC. That retest
+is still outstanding.
+
 #### Windows hardware QA — PASS
 
 Confirmed on a real Windows PC after the three fixes above:

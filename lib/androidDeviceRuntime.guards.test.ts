@@ -400,6 +400,93 @@ describe("a transport failure reaches the cache, not a dead end", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Feature 24.5F — regaining connectivity without a restart
+// ---------------------------------------------------------------------------
+
+describe("a reconnect both refreshes state and wakes the queue", () => {
+  const APP = "components/device/DeviceApp.tsx";
+
+  it("the Android manifest can observe connectivity changes", () => {
+    // Without ACCESS_NETWORK_STATE the WebView never fires `online`, so the
+    // reconnect listener is correct and never called. Hardware proved it.
+    const manifest = read("android/app/src/main/AndroidManifest.xml");
+
+    expect(manifest).toContain('android:name="android.permission.INTERNET"');
+    expect(manifest).toContain('android:name="android.permission.ACCESS_NETWORK_STATE"');
+  });
+
+  it("the reconnect episode refreshes state BEFORE it drains", () => {
+    // Order matters: a successful drain must never leave a revoked till
+    // looking healthy.
+    const app = code(read(APP));
+    const handler = app.slice(app.indexOf("return subscribeToReconnect(("));
+    const body = handler.slice(0, handler.indexOf("}, [syncSessionKey"));
+
+    const refresh = body.indexOf("await returnOnlineFromReconnect();");
+    const drain = body.indexOf('await runSync("reconnect");');
+
+    expect(refresh).toBeGreaterThan(-1);
+    expect(drain).toBeGreaterThan(refresh);
+  });
+
+  it("the refresh is authoritative and in place, never a remount", () => {
+    const app = code(read(APP));
+    // Bounded to the callback itself: the next statement after it is the
+    // reconnect useEffect, and slicing past that would sweep in unrelated code.
+    const fn = app.slice(app.indexOf("const returnOnlineFromReconnect = useCallback"));
+    const body = fn.slice(0, fn.indexOf("useEffect("));
+
+    expect(body).not.toBe("");
+    expect(body.length).toBeLessThan(fn.length);
+
+    // The server decides, not navigator.onLine.
+    expect(body).toContain("await fetchDevicePairingState()");
+    expect(body).toContain("await fetchDeviceConfig()");
+    expect(body).not.toContain("navigator.onLine");
+
+    // In place: resolveDeviceState would set `checking` and unmount PosRuntime,
+    // destroying the cashier's cart and any checkout in progress.
+    expect(body).not.toContain("resolveDeviceState");
+    expect(body).not.toContain('status: "checking"');
+    expect(body).toContain('if (previous.status !== "ready" || !previous.offline)');
+
+    // The latch releases only on a confirmed authoritative start.
+    expect(body).toContain("offline: null,");
+
+    // A revocation confirmed during the outage is applied, not skipped.
+    expect(body).toContain('if (next.status === "revoked")');
+    // A still-unreachable server changes nothing.
+    expect(body).toContain("if (!pairingState.ok) {");
+  });
+
+  it("Sync now is offered on queued work, not on runtime mode", () => {
+    const app = code(read(APP));
+
+    expect(app).toContain(
+      'onSyncNow={saleStatus.unsynced > 0 ? () => void runSync("manual") : null}'
+    );
+    // The gate that hid the only manual recovery exactly when it was needed.
+    expect(app).not.toContain("onSyncNow={offlineMode ?");
+  });
+
+  it("no polling was added, and the backoff curve is untouched", () => {
+    const app = code(read(APP));
+
+    expect(app).not.toContain("setInterval");
+    expect(app).not.toContain("backoffDelayMs");
+    // The one timer remains the DEF-02 scheduler, aimed at a persisted instant.
+    expect(app).toContain("saleStatus.nextRetryAt");
+  });
+
+  it("no Capacitor network plugin was added", () => {
+    const manifest = JSON.parse(read("package.json"));
+    const all = { ...manifest.dependencies, ...manifest.devDependencies };
+
+    expect(all["@capacitor/network"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression — the money path is untouched
 // ---------------------------------------------------------------------------
 

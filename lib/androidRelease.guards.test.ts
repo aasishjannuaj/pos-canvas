@@ -449,11 +449,25 @@ describe("the manifest", () => {
     expect(manifest).not.toContain('android:allowBackup="true"');
   });
 
-  it("requests INTERNET and nothing else", () => {
+  it("requests INTERNET and ACCESS_NETWORK_STATE, and nothing else", () => {
+    // WIDENED BY 24.5F, by exactly one permission and for a proven reason.
+    //
+    // ACCESS_NETWORK_STATE is what lets Chromium's NetworkChangeNotifier see
+    // connectivity return; without it the WebView never fires `online`, and
+    // hardware showed a till with three queued sales failing to drain for
+    // thirty seconds while the identical code on Windows drained fine.
+    //
+    // It grants no ability to open connections — that is INTERNET — and Android
+    // classifies it as a normal permission, so no runtime prompt appears. The
+    // list stays exhaustive and ordered, so a third permission cannot arrive
+    // without this test being edited deliberately.
     const permissions = [...manifest.matchAll(/<uses-permission[^>]*android:name="([^"]+)"/g)]
       .map((match) => match[1]);
 
-    expect(permissions).toEqual(["android.permission.INTERNET"]);
+    expect(permissions).toEqual([
+      "android.permission.INTERNET",
+      "android.permission.ACCESS_NETWORK_STATE",
+    ]);
   });
 
   it("declares no cleartext escape hatch", () => {

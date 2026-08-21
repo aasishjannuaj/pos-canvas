@@ -53,4 +53,26 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Feature 24.5F — REQUIRED FOR RECONNECT, not for network access.
+
+      Chromium's NetworkChangeNotifier observes connectivity through Android's
+      ConnectivityManager, which needs this permission. Without it the WebView
+      never learns that Wi-Fi or mobile data came back: navigator.onLine stays
+      stale and the `online` event never fires.
+
+      Real hardware proved the cost. A till with three queued offline sales had
+      its connection restored while the app stayed open, and nothing drained for
+      thirty seconds — the reconnect listener was registered and correct, but no
+      event was ever delivered. Only restarting the app (which runs the startup
+      sync) recovered it. The identical JavaScript on Windows drained fine,
+      because desktop Chromium gets the notification without help.
+
+      READ-ONLY AND NORMAL: this grants no ability to open connections — that is
+      INTERNET, above — and Android classifies it as a normal permission, so it
+      raises no runtime prompt. It is the smallest fix available and needs no
+      Capacitor plugin.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 </manifest>
