@@ -12,7 +12,8 @@
     "worker:run": "node --import tsx worker/once.ts",
     "android:sync": "npm run android:runtime && cap sync android",
     "android:release:sync": "npm run android:sync",
-    "android:runtime": "vite build --config android-shell/vite.config.mts"
+    "android:runtime": "vite build --config native-device/vite.config.mts",
+    "windows:runtime": "POS_CANVAS_DEVICE_OUT_DIR=windows-shell/runtime vite build --config native-device/vite.config.mts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.3",

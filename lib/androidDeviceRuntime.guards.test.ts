@@ -35,8 +35,8 @@ function code(source: string): string {
 }
 
 const CAPACITOR = "capacitor.config.ts";
-const VITE = "android-shell/vite.config.mts";
-const ENTRY = "android-shell/device/main.tsx";
+const VITE = "native-device/vite.config.mts";
+const ENTRY = "native-device/main.tsx";
 const PACKAGED = "android/app/src/main/assets/public";
 
 /** The built runtime, when one is present. Absent on a clean checkout. */
@@ -130,7 +130,7 @@ describe("the local entry is the real device application", () => {
     }
   });
 
-  it("android-shell holds no copy of the POS", () => {
+  it("neither native shell holds a copy of the POS", () => {
     // Everything under android-shell/ must be entry, config or shim — never a
     // second cart, price, queue or receipt.
     const walk = (relative: string): string[] => {
@@ -139,7 +139,7 @@ describe("the local entry is the real device application", () => {
       for (const name of readdirSync(join(repoRoot, relative))) {
         const next = `${relative}/${name}`;
 
-        if (name === "www" || name === "node_modules") continue;
+        if (name === "www" || name === "runtime" || name === "node_modules") continue;
         if (statSync(join(repoRoot, next)).isDirectory()) {
           out.push(...walk(next));
           continue;
@@ -150,7 +150,7 @@ describe("the local entry is the real device application", () => {
       return out;
     };
 
-    const sources = walk("android-shell");
+    const sources = [...walk("android-shell"), ...walk("native-device")];
 
     expect(sources.length).toBeGreaterThan(0);
 

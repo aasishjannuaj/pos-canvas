@@ -1,4 +1,11 @@
-// Feature 24.5G — the device runtime's own build.
+// Feature 24.5G / 24.5F — the device runtime's own build, ONE SOURCE FOR BOTH
+// NATIVE SHELLS.
+//
+// Android loads the output from https://localhost (Capacitor's asset loader) and
+// Windows serves the same output from app://poscanvas (an Electron privileged
+// scheme). Only the OUTPUT DIRECTORY differs; the entry, the modules and every
+// byte of financial logic are identical, which is the entire point — there is no
+// android copy and no windows copy of the POS.
 //
 // WHY VITE RATHER THAN next build --output export, which was the obvious first
 // idea: `output: "export"` is an APPLICATION-WIDE setting. This repo has three
@@ -19,6 +26,33 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
+
+/**
+ * Where the built runtime goes. The one thing that differs per shell.
+ *
+ * Defaults to the Android shell's webDir so `npm run android:runtime` needs no
+ * environment at all; the Windows script sets it to the Electron package's own
+ * runtime directory. A path outside the repository is refused rather than
+ * written to — a mistyped variable should fail, not scatter a POS across the
+ * filesystem.
+ */
+function readOutDir(): string {
+  const requested = process.env.POS_CANVAS_DEVICE_OUT_DIR;
+
+  if (!requested || requested.trim() === "") {
+    return resolve(repoRoot, "android-shell/www");
+  }
+
+  const absolute = resolve(repoRoot, requested);
+
+  if (!absolute.startsWith(`${repoRoot}/`)) {
+    throw new Error(
+      `POS_CANVAS_DEVICE_OUT_DIR must resolve inside the repository. Got: ${absolute}`
+    );
+  }
+
+  return absolute;
+}
 
 /**
  * Reads the two PUBLIC Supabase values, exactly the pair Next.js inlines into
@@ -73,7 +107,7 @@ function readPublicEnv(): { url: string; anonKey: string } {
 const publicEnv = readPublicEnv();
 
 export default defineConfig({
-  root: resolve(here, "device"),
+  root: here,
   // Relative asset URLs. The runtime is served from the root of
   // https://localhost by Capacitor's asset loader, but relative paths keep the
   // bundle independent of where it is mounted and make it trivially servable
@@ -97,7 +131,7 @@ export default defineConfig({
       // import would still drag Next's client router into an app that has no
       // Next.js. The shim is an <a>: inert for this target, and identical in
       // behaviour if a future host ever does pass a link.
-      { find: /^next\/link$/, replacement: resolve(here, "device/nextLinkShim.tsx") },
+      { find: /^next\/link$/, replacement: resolve(here, "nextLinkShim.tsx") },
     ],
   },
   esbuild: {
@@ -112,7 +146,7 @@ export default defineConfig({
     "process.env.NODE_ENV": JSON.stringify("production"),
   },
   build: {
-    outDir: resolve(here, "www"),
+    outDir: readOutDir(),
     emptyOutDir: true,
     // Deterministic and inspectable. No sourcemaps: they would ship the entire
     // readable source of the POS inside a customer-installable APK.

@@ -56,7 +56,12 @@ yarn-error.log*
 next-env.d.ts
 
 # Feature 16.2 — Android shell.
-# android-shell/www is regenerated from POS_CANVAS_ANDROID_SERVER_URL on every
+# Feature 24.5F — the Windows shell's packaged device runtime, built by
+# `npm run windows:runtime` from native-device/. Generated output, exactly like
+# android-shell/www below: one source, two package directories, neither tracked.
+/windows-shell/runtime/
+
+# android-shell/www is regenerated from the native-device build on every
 # `npm run android:sync`, so it is build output, not source. The generator
 # (android-shell/*.mjs) and capacitor.config.ts ARE tracked.
 /android-shell/www/

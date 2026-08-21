@@ -364,14 +364,23 @@ describe("the main process carries the locked security defaults", () => {
     expect(main).toContain("app.quit()");
   });
 
-  it("loads the runtime URL through one resolved value", () => {
-    // Feature 23.4 threads app.isPackaged in; the resolution is still a single
-    // call whose result is the only destination this process ever loads.
+  it("loads the packaged runtime through one constant destination", () => {
+    // SUPERSEDED BY 24.5F. This asserted the destination came from a single
+    // RESOLVED REMOTE URL — the architecture that made a zero-network cold
+    // start impossible, because the window could not load anything without a
+    // network. The property that matters is unchanged and now stronger: there
+    // is exactly ONE destination and it is a compile-time constant, so no
+    // environment value can influence where a till points.
+    //
+    // readDesktopServerUrl survives for the release flag it derives from
+    // app.isPackaged, which still governs DevTools.
     expect(main).toContain("readDesktopServerUrl(process.env, {");
     expect(main).toContain("isPackaged: app.isPackaged,");
-    expect(main).toContain("window.loadURL(resolvedServer.url)");
-    // No second, divergent source of the destination.
+    expect(main).toContain("window.loadURL(RUNTIME_ENTRY)");
+    expect(main).toContain("const RUNTIME_ENTRY = `${APP_ORIGIN}/index.html`");
+    // No second, divergent source of the destination — and no hosted one.
     expect(main).not.toMatch(/loadURL\(["'`]http/);
+    expect(main).not.toContain("loadURL(resolvedServer.url)");
   });
 });
 

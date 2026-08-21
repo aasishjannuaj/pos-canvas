@@ -331,13 +331,20 @@ describe("the splash and the offline fallback stay separate", () => {
     expect(code(read(OFFLINE))).toContain("posCanvasShell");
   });
 
-  it("the splash is shown first and never blocks the runtime", () => {
-    // .finally, not .then: a branded screen must never become the reason a till
-    // does not start.
+  it("the splash is shown first, held briefly, and never blocks the runtime", () => {
+    // UPDATED BY 24.5F. The property is unchanged — a branded screen must never
+    // become the reason a till does not start — but the mechanism moved: the
+    // runtime is now local and resolves in milliseconds, so without a minimum
+    // hold the 1.4s animation was replaced before a single cycle could play.
+    //
+    // `.catch(() => undefined)` replaces `.finally(...)` and keeps the same
+    // guarantee: a splash that fails to load still lets the runtime through.
     const main = code(read(MAIN));
 
-    expect(main).toContain("window.loadFile(SPLASH_PAGE).finally(() => {");
+    expect(main).toContain("window.loadFile(SPLASH_PAGE).catch(() => undefined)");
+    expect(main).toContain("delay(SPLASH_MINIMUM_VISIBLE_MS)");
     expect(main).toContain("loadDeviceRuntime(window);");
+    expect(main).not.toContain("loadFile(SPLASH_PAGE).finally(");
   });
 
   it("adds no second BrowserWindow", () => {
@@ -405,7 +412,9 @@ describe("the splash weakens no Feature 23 control", () => {
   });
 
   it("still pins the production URL and the DevTools rule", () => {
-    expect(main).toContain("window.loadURL(resolvedServer.url)");
+    // Feature 24.5F — the window now loads the PACKAGED runtime, not a hosted
+    // URL. The DevTools rule is untouched and still keyed on the release flag.
+    expect(main).toContain("window.loadURL(RUNTIME_ENTRY)");
     expect(main).toContain("devTools: !resolvedServer.isRelease");
     expect(main).not.toContain("devTools: true");
     expect(main).not.toContain("openDevTools");

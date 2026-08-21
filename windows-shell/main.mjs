@@ -22,10 +22,11 @@
 //
 // DELIBERATELY NOT HERE — the desktop identity bridge for DevicePlatform is
 // Feature 23.3, and installer/packaging work is 23.4.
-import { app, BrowserWindow, ipcMain } from "electron";
-import { fileURLToPath } from "node:url";
+import { app, BrowserWindow, ipcMain, Menu, net, protocol } from "electron";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readDesktopServerUrl } from "./serverUrl.mjs";
 import { createNavigationPolicy } from "./navigationPolicy.mjs";
+import { APP_ORIGIN, APP_SCHEME, resolveAppAssetPath } from "./appProtocol.mjs";
 
 const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
@@ -37,6 +38,40 @@ const OFFLINE_PAGE = fileURLToPath(new URL("./offline.html", import.meta.url));
  * one says the app is starting, that one says it failed. See splash.html.
  */
 const SPLASH_PAGE = fileURLToPath(new URL("./splash.html", import.meta.url));
+
+/**
+ * Feature 24.5F — the PACKAGED device runtime, built from native-device/ by
+ * `npm run windows:runtime` and shipped inside the installer.
+ *
+ * This directory is what makes a zero-network cold start possible. Until now the
+ * shell fetched /device over the network, so a till with no connection could not
+ * execute the runtime at all and fell to a static "no internet" page — every
+ * offline capability sat behind it, unreachable. Android proved the fix on real
+ * hardware; this is the same bundle, byte for byte, served locally.
+ */
+const RUNTIME_ROOT = fileURLToPath(new URL("./runtime/", import.meta.url));
+
+/** The document the shell opens. Served by the app:// handler below. */
+const RUNTIME_ENTRY = `${APP_ORIGIN}/index.html`;
+
+/**
+ * Feature 24.5F — how long the branded splash is guaranteed to stay on screen.
+ *
+ * One full cycle of the 1.4s `slide` animation in splash.html, so the mark is
+ * seen rather than glimpsed. Deliberately a floor and not a fixed delay: the
+ * splash load and this timer run concurrently, so a slower machine pays no more
+ * than a fast one.
+ *
+ * splash.html honours prefers-reduced-motion by disabling the animation; the
+ * hold is unchanged in that case, which is correct — the brand screen is still
+ * shown, it simply does not move.
+ */
+const SPLASH_MINIMUM_VISIBLE_MS = 1400;
+
+/** A promise that resolves after `ms`. The only timer in this file. */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** The channel the offline page uses to ask for another attempt. Carries nothing. */
 const RETRY_CHANNEL = "pos-canvas-shell:retry";
@@ -56,6 +91,47 @@ const RETRY_CHANNEL = "pos-canvas-shell:retry";
  * rather than assuming it here.
  */
 app.setName("POS Canvas");
+
+/**
+ * Feature 24.5F — the application's own scheme, registered BEFORE app ready.
+ *
+ * THE NAME IS PLURAL — registerSchemeSAsPrivileged — and the singular does not
+ * exist. The first version of this file called `registerSchemeAsPrivileged`,
+ * which threw a TypeError during module evaluation, before `app.whenReady()`
+ * and before any window was created, so the packaged application could not
+ * start at all. A source-string guard had asserted the misspelling and passed,
+ * because a string cannot know whether a function exists. lib/
+ * windowsStartup.smoke.test.ts now boots Electron for real instead.
+ *
+ * Electron requires this call to happen before the `ready` event; afterwards the
+ * scheme cannot gain privileges. Each privilege is here because something the
+ * POS actually does needs it, and nothing broader is enabled:
+ *
+ *   standard        — makes app://poscanvas a real, comparable ORIGIN in
+ *                     Chromium. Without it every app:// URL is opaque, and
+ *                     IndexedDB and localStorage — which are origin-scoped —
+ *                     would have nowhere stable to live.
+ *   secure          — makes it a secure context. lib/deviceOfflineCache.ts
+ *                     hashes the pinned config with crypto.subtle, which is
+ *                     unavailable outside one; without it digestConfig returns
+ *                     null, no cache is ever written, and offline mode silently
+ *                     never arms while looking perfectly healthy online.
+ *   supportFetchAPI — the runtime is an ES-module bundle and Supabase calls go
+ *                     out through fetch.
+ *
+ * DELIBERATELY NOT ENABLED: `allowServiceWorkers`, `corsEnabled`,
+ * `bypassCSP`, `stream`. None is needed, and each widens what a page can do.
+ *
+ * THE ORIGIN IS PERMANENT. Storage is origin-scoped, so changing the scheme or
+ * the host after release would strand a till's pairing, its pinned config and
+ * its queued sales.
+ */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true },
+  },
+]);
 
 /**
  * Feature 23.2 — one instance, and only one.
@@ -99,6 +175,10 @@ const WINDOW_DEFAULTS = {
   backgroundColor: "#FBFDFD",
   title: "POS Canvas",
   show: false,
+    // Feature 24.5F — the second barrier behind setApplicationMenu(null). With
+    // no application menu there is nothing to reveal, but this makes the
+    // intent explicit and survives a future menu being added for another reason.
+    autoHideMenuBar: true,
 };
 
 function focusExistingWindow() {
@@ -210,11 +290,56 @@ function createWindow() {
   // .finally, not .then: if the local splash somehow fails to load, the till
   // must still go to the runtime. A branded screen is never allowed to become
   // the reason a till does not start.
-  window.loadFile(SPLASH_PAGE).finally(() => {
+  // Feature 24.5F — HOLD THE SPLASH LONG ENOUGH TO BE SEEN.
+  //
+  // This used to be `loadFile(SPLASH_PAGE).finally(() => loadDeviceRuntime())`,
+  // which replaced the splash the instant the splash itself finished loading.
+  // That looked fine while the runtime was a NETWORK fetch taking seconds — the
+  // splash covered the whole wait. Now the runtime is local and resolves in
+  // milliseconds, so the brand animation was replaced before a single 1.4s cycle
+  // could play, and on a fast machine the window was often not even shown yet.
+  //
+  // Promise.all rather than nested timers: the splash and the minimum hold run
+  // CONCURRENTLY, so startup costs max(splashLoad, MIN_HOLD) — not their sum.
+  // Nothing here slows a device down beyond one animation cycle.
+  Promise.all([
+    // .catch, not .finally: a splash that fails to load must not stop the till
+    // starting. A branded screen is never allowed to become the reason a till
+    // does not open.
+    window.loadFile(SPLASH_PAGE).catch(() => undefined),
+    delay(SPLASH_MINIMUM_VISIBLE_MS),
+  ]).then(() => {
     loadDeviceRuntime(window);
   });
 
   return window;
+}
+
+/**
+ * Feature 24.5F — removes Electron's stock application menu.
+ *
+ * Electron installs a default menu when none is set; on Windows that renders as
+ * a File / Edit / View / Window bar inside the window frame. A till is a
+ * single-purpose appliance and has no use for New Window, Reload, Toggle
+ * DevTools or Zoom — several of which actively work against the deny-by-default
+ * posture the rest of this file maintains.
+ *
+ * setApplicationMenu(null) REMOVES it rather than hiding it, so the Alt key
+ * cannot summon one either; autoHideMenuBar on the window is the second,
+ * independent barrier. The frame itself is untouched — minimise, maximise and
+ * close stay exactly where Windows users expect them, and `frame: false` is
+ * deliberately not used.
+ *
+ * NOTE ON TEXT EDITING: removing the menu also removes its Edit roles, which is
+ * where Cut/Copy/Paste accelerators are conventionally declared. In Chromium
+ * those shortcuts are handled by the renderer for focused editable fields, so
+ * the pairing-code input keeps working — but that is a claim about a real
+ * keyboard on real Windows, so it is on the hardware checklist. If it ever
+ * proves false, the fix is a menu of edit roles marked `visible: false`, never
+ * the stock menu back.
+ */
+function removeApplicationMenu() {
+  Menu.setApplicationMenu(null);
 }
 
 /** Every deny-by-default control, applied to one window and its session. */
@@ -276,13 +401,44 @@ function applySecurityPolicy(window) {
   }
 }
 
-/** Navigates a window to the resolved runtime URL. The only place that happens. */
+/**
+ * Feature 24.5F — serves the packaged runtime over app://poscanvas.
+ *
+ * Every decision about WHICH file a URL names lives in appProtocol.mjs and is
+ * unit-tested under plain Node; this function is wiring plus the file read. A
+ * null answer means "not ours, or outside the runtime directory" and becomes a
+ * 404 either way, so a probe cannot tell the two apart.
+ */
+function registerRuntimeProtocol() {
+  protocol.handle(APP_SCHEME, async (request) => {
+    const filePath = resolveAppAssetPath(request.url, RUNTIME_ROOT);
+
+    if (filePath === null) {
+      console.warn(`[pos-canvas] refused app request: ${request.url}`);
+      return new Response("Not found", { status: 404 });
+    }
+
+    try {
+      // net.fetch on a file URL gives correct MIME types for the bundle's
+      // JavaScript and CSS without this process maintaining its own table.
+      return await net.fetch(pathToFileURL(filePath).toString());
+    } catch (error) {
+      console.error(`[pos-canvas] failed to serve ${request.url}: ${error}`);
+      return new Response("Not found", { status: 404 });
+    }
+  });
+}
+
+/** Navigates a window to the packaged runtime. The only place that happens. */
 function loadDeviceRuntime(window) {
   if (window.isDestroyed()) {
     return;
   }
 
-  window.loadURL(resolvedServer.url);
+  // Feature 24.5F — a LOCAL load. There is no network dependency to start, and
+  // no hosted URL to fail; resolvedServer is retained only for the dev-mode
+  // escape hatch and the release flag that governs DevTools.
+  window.loadURL(RUNTIME_ENTRY);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,9 +495,17 @@ if (hasSingleInstanceLock) {
       isRelease: resolvedServer.isRelease,
     });
 
+    // Feature 24.5F — the runtime must be servable before any window asks for
+    // it. Registered here, after ready, as protocol.handle requires.
+    registerRuntimeProtocol();
+
+    // Before any BrowserWindow exists, so no window is ever constructed with a
+    // menu attached.
+    removeApplicationMenu();
+
     console.log(
-      `[pos-canvas] shell ${app.getVersion()} — loading ${resolvedServer.url} ` +
-        `(${resolvedServer.source})`
+      `[pos-canvas] shell ${app.getVersion()} — serving ${RUNTIME_ENTRY} ` +
+        `from ${RUNTIME_ROOT}`
     );
     console.log(`[pos-canvas] user data: ${app.getPath("userData")}`);
     console.log(`[pos-canvas] shell directory: ${shellDirectory}`);

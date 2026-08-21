@@ -3,7 +3,7 @@
   "productName": "POS Canvas",
   "version": "1.0.0",
   "private": true,
-  "description": "Universal POS Canvas Windows shell — loads the hosted /device runtime.",
+  "description": "Universal POS Canvas Windows shell — serves the packaged device runtime from app://poscanvas.",
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
@@ -26,10 +26,12 @@
       "preload.js",
       "serverUrl.mjs",
       "navigationPolicy.mjs",
+      "appProtocol.mjs",
       "offline.html",
       "package.json",
       "splash.html",
-      "splash-mark.png"
+      "splash-mark.png",
+      "runtime/**/*"
     ],
     "win": {
       "target": [

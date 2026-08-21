@@ -12,18 +12,30 @@
 // every popup — is refused rather than sandboxed, because there is no legitimate
 // reason for a till to reach anything else, and "deny unless listed" is the only
 // version of this policy that stays correct as the product grows.
-import { PRODUCTION_DESKTOP_SERVER_URL } from "./serverUrl.mjs";
+import { APP_HOST, APP_ORIGIN, APP_SCHEME, isAppRuntimeUrl } from "./appProtocol.mjs";
 
 /**
- * The one origin a release build may ever display.
+ * Feature 24.5F — the one origin a release build may ever display.
  *
- * Derived from the pinned URL rather than restated, so the navigation policy and
- * the loaded URL cannot drift apart.
+ * WAS the hosted https origin; is now the application's own local scheme. The
+ * shell no longer fetches its runtime over the network at all, so the hosted
+ * origin has nothing left to allow — and allowing it anyway would leave a
+ * reachable path back to the architecture this feature exists to remove.
+ *
+ * Derived from appProtocol.mjs rather than restated, so the scheme the protocol
+ * handler serves and the origin this policy admits cannot drift apart.
  */
-export const PRODUCTION_ORIGIN = new URL(PRODUCTION_DESKTOP_SERVER_URL).origin;
+export const PRODUCTION_ORIGIN = APP_ORIGIN;
 
-/** The only schemes a page may ever navigate the main window to. */
-const NAVIGABLE_PROTOCOLS = new Set(["https:", "http:"]);
+/**
+ * The only schemes a page may ever navigate the main window to.
+ *
+ * `http:`/`https:` remain navigable ONLY so a non-release build can point at a
+ * local dev server; a release build allows no origin on either, so in practice
+ * they are refused by the origin check below. `file:` is absent and stays
+ * absent — see isAllowedNavigation.
+ */
+const NAVIGABLE_PROTOCOLS = new Set(["https:", "http:", `${APP_SCHEME}:`]);
 
 function parseOrNull(value) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -74,6 +86,23 @@ export function isAllowedNavigation(url, allowedOrigins) {
     return false;
   }
 
+  // Feature 24.5F — THE APP SCHEME IS MATCHED ON SCHEME AND HOST, NEVER ON
+  // ORIGIN, and this is the sharpest edge in the file.
+  //
+  // `app:` is not a special scheme to the WHATWG URL parser, so
+  // `new URL("app://poscanvas/x").origin` is the string "null" — and so is
+  // `new URL("app://evil/x").origin`. Adding APP_ORIGIN to an origin allow-list
+  // would match nothing; "fixing" that by adding "null" would match EVERY host
+  // on every non-special scheme at once. Chromium reports a real origin inside
+  // the renderer once the scheme is registered as standard, but this decision
+  // runs in the main process on Node's parser, which does not.
+  //
+  // So the app scheme gets its own exact check, and it is still gated on the
+  // policy having admitted APP_ORIGIN at all.
+  if (parsed.protocol === `${APP_SCHEME}:`) {
+    return allowedOrigins.includes(APP_ORIGIN) && isAppRuntimeUrl(url);
+  }
+
   return allowedOrigins.includes(parsed.origin);
 }
 
@@ -109,6 +138,8 @@ export function decideWindowOpen(url) {
  * @param {{ runtimeUrl: string, isRelease: boolean }} input
  */
 export function createNavigationPolicy({ runtimeUrl, isRelease }) {
+  // Feature 24.5F — the application's own origin, always. A release build gets
+  // this and nothing else: there is no hosted runtime to reach any more.
   const allowedOrigins = [PRODUCTION_ORIGIN];
 
   if (!isRelease) {
@@ -126,3 +157,6 @@ export function createNavigationPolicy({ runtimeUrl, isRelease }) {
     decideWindowOpen,
   };
 }
+
+/** Re-exported so main.mjs has one import for the scheme's identity. */
+export { APP_HOST, APP_ORIGIN, APP_SCHEME };

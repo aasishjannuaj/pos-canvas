@@ -1779,11 +1779,130 @@ default `androidScheme`). It is permanent for two reasons, both load-bearing:
    potentially-trustworthy by specification. `file://` is not, which is why it
    was rejected along with `http://localhost` and `capacitor://`.
 
-**Windows is NOT implemented.** It has the identical defect —
-`loadURL(server.url)` with `loadFile(offline.html)` on failure — and its
-approved next-stage origin is **`app://poscanvas`**, registered via
-`protocol.registerSchemeAsPrivileged({ secure: true, standard: true })` so it is
-a secure context too. Design only; no code has changed in `windows-shell/`.
+**Windows is implemented too, as of 24.5F.** It had the identical defect —
+`loadURL(server.url)` with `loadFile(offline.html)` on failure — and now serves
+the same packaged runtime from **`app://poscanvas`**, an Electron scheme
+registered before app ready with exactly three privileges: `standard` (so the
+origin is real and IndexedDB/localStorage have somewhere stable to live),
+`secure` (so `crypto.subtle` exists for the config digest) and
+`supportFetchAPI`. `bypassCSP`, `allowServiceWorkers`, `corsEnabled` and
+`stream` are deliberately not granted.
+
+#### One runtime, two local origins
+
+| | Android | Windows |
+|---|---|---|
+| Origin | `https://localhost` | `app://poscanvas` |
+| Served by | Capacitor's asset loader | Electron privileged scheme |
+| Package dir | `android-shell/www` | `windows-shell/runtime` |
+| Hardware QA | **PASS** (2026-08-20) | **pending** |
+
+**Both are built from `native-device/` by the same Vite config**, differing only
+in `POS_CANVAS_DEVICE_OUT_DIR`. The two builds emit byte-identical bundles — same
+content hash — which is the concrete form of "one implementation". A guard
+asserts neither `android-shell/` nor `windows-shell/` contains any POS or
+financial logic of its own.
+
+**"One implementation" has never meant "one origin".** It means one source for
+`DeviceApp`, `PosRuntime`, the cache, the queue, the sync engine and every `lib/`
+money rule. Each shell packages that source and serves it from its own stable
+local origin.
+
+#### The app:// origin trap, recorded because it is subtle
+
+`app:` is not a "special" scheme to the WHATWG URL parser, so
+`new URL("app://poscanvas/x").origin` is the string `"null"` — **and so is
+`new URL("app://evil/x").origin`.** An origin allow-list would therefore match
+nothing, and "fixing" that by adding `"null"` would admit every host on every
+non-special scheme at once. Chromium reports a real origin inside the renderer
+once the scheme is registered as `standard`, but the navigation policy runs in
+the main process on Node's parser, which does not. `windows-shell/appProtocol.mjs`
+and the navigation policy therefore compare **scheme and host explicitly** and
+never touch `.origin`.
+
+Path resolution has its own trap: the URL parser collapses a literal `/../` but
+**not** a percent-encoded one, so `app://poscanvas/assets/..%2f..%2fsecret`
+arrives intact and only reveals itself after decoding. The resolver decodes
+first, resolves against the runtime root, and then requires the result to still
+be inside it.
+
+#### First Windows hardware run — three defects, all fixed
+
+The first Windows QA build was **dead on arrival**, and the reason is worth
+recording because a guard passed while it was broken.
+
+`main.mjs` called `protocol.registerSchemeAsPrivileged` — **singular**, a
+function Electron does not have. The real API is
+`registerSchemesAsPrivileged`. It threw a `TypeError` during module evaluation,
+before `app.whenReady()` and before any window existed, so the packaged
+application could not start at all. A structural guard had asserted the exact
+misspelling and passed: **a source-string assertion verifies that a file says
+what its author believed, never that the API exists.** This is the same failure
+shape as the PostgREST classifier bug in 24.5G — a fixture agreeing with the
+code instead of with reality.
+
+The answer in both cases is the same: run the real thing.
+`lib/windowsStartup.smoke.test.ts` now boots Electron, checks the method name
+against Electron's own export list, asserts the shell starts without a fatal
+load exception, and drives an offscreen window that must report origin
+`app://poscanvas`, `isSecureContext`, `crypto.subtle`, IndexedDB and a mounted
+`DeviceApp`, with the document and both hashed assets each served 200.
+
+Two smaller defects were fixed alongside:
+
+- **The splash animation was invisible.** The splash was replaced the instant it
+  finished loading, which was fine while the runtime was a network fetch taking
+  seconds and useless once it became local and resolved in milliseconds. A
+  minimum visible hold of one animation cycle (1400 ms) now runs *concurrently*
+  with the splash load, so startup costs `max(load, hold)` rather than the sum.
+- **Electron's stock File / Edit / View / Window menu was visible.** It had never
+  been suppressed on either the old or the new architecture.
+  `Menu.setApplicationMenu(null)` removes it — rather than hiding it, so Alt
+  cannot summon one — with `autoHideMenuBar` as a second barrier. The window
+  frame is untouched; `frame: false` is deliberately not used.
+
+#### Windows hardware QA — PASS
+
+Confirmed on a real Windows PC after the three fixes above:
+
+| | |
+|---|---|
+| splash / logo | animation plays |
+| application menu | File / Edit / View / Window gone; minimise, maximise, close intact |
+| pairing field | Ctrl+V and normal editing work with no application menu |
+| online | pairing and the real POS load |
+| local runtime | `app://poscanvas` serves the packaged bundle |
+| **zero-network cold start** | **the real POS opens**, with the amber offline banner |
+| offline sale | completes; OFFLINE RECEIPT with an `OFF-` reference |
+| durability | queue survives Task Manager kill **and** a full PC reboot while offline |
+| reconnect | queue drains; no `needs_attention` afterwards |
+
+**Both platforms are now hardware proven**: Android on `https://localhost`,
+Windows on `app://poscanvas`, from one shared runtime built out of
+`native-device/`.
+
+#### A build-time hazard worth knowing about
+
+`electron-builder` **rewrites package.json files after packaging** — reducing
+them to `name`/`productName`/`version`/`private`/`description`/`main` and
+dropping `scripts`, `devDependencies` and the entire `build` block. It damaged
+BOTH `windows-shell/package.json` and, worse, the **repository root**
+`package.json`, overwriting it with the shell's own minimal manifest. The root
+then had no `test`, `build` or `lint` script at all.
+
+The installer itself is produced correctly from the full manifest; it is the
+source tree that is damaged, a few seconds after the build reports success.
+
+**So the safe local protocol is: commit first, build the installer last, then**
+
+```
+git checkout -- package.json windows-shell/package.json
+```
+
+CI is unaffected — it packages from a fresh checkout and never commits. This was
+caught only because the brand and installer guards failed on a tree that had
+been green minutes earlier; `npm test` itself then stopped working, which is how
+the root-level damage surfaced.
 
 **Migration is not automatic and must never be pretended.** A device moving from
 the hosted origin to a local one starts with empty storage and no session: it

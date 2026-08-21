@@ -47,7 +47,9 @@ const MAIN = "windows-shell/main.mjs";
 const PRELOAD = "windows-shell/preload.js";
 const POLICY = "windows-shell/navigationPolicy.mjs";
 
-const PRODUCTION = "https://pos-canvas.vercel.app/device";
+// Feature 24.5F — the shell serves its own runtime; there is no hosted origin
+// left to trust. Kept as a named constant so every case below reads the same.
+const PRODUCTION = "app://poscanvas/index.html";
 const DEV_RUNTIME = "http://localhost:3000/device";
 
 const releasePolicy = createNavigationPolicy({
@@ -73,10 +75,11 @@ describe("the trusted origin is navigable", () => {
     // The device runtime is a single-page app; in-app routing must not be
     // mistaken for an escape attempt.
     for (const url of [
-      "https://pos-canvas.vercel.app/device",
-      "https://pos-canvas.vercel.app/device?code=abc",
-      "https://pos-canvas.vercel.app/device#receipt",
-      "https://pos-canvas.vercel.app/",
+      "app://poscanvas/index.html",
+      "app://poscanvas/index.html?code=abc",
+      "app://poscanvas/index.html#receipt",
+      "app://poscanvas/",
+      "app://poscanvas/assets/index-abc123.js",
     ]) {
       expect(`${url}`).toBe(url);
       expect(releasePolicy.isAllowedNavigation(url)).toBe(true);
@@ -84,16 +87,25 @@ describe("the trusted origin is navigable", () => {
   });
 
   it("derives its origin from the pinned URL rather than restating it", () => {
-    expect(PRODUCTION_ORIGIN).toBe("https://pos-canvas.vercel.app");
-    expect(code(read(POLICY))).toContain(
-      "new URL(PRODUCTION_DESKTOP_SERVER_URL).origin"
-    );
+    expect(PRODUCTION_ORIGIN).toBe("app://poscanvas");
+    // Feature 24.5F — derived from appProtocol.mjs now, for the same reason it
+    // was derived from the pinned URL before: the origin this policy admits and
+    // the scheme the protocol handler serves must not drift apart.
+    expect(code(read(POLICY))).toContain("export const PRODUCTION_ORIGIN = APP_ORIGIN;");
+    expect(code(read(POLICY))).toContain('from "./appProtocol.mjs"');
   });
 });
 
 describe("everything else is refused", () => {
   const blocked = [
     ["a different host", "https://evil.example/device"],
+    // Feature 24.5F — the hosted runtime is no longer trusted by the shell.
+    ["the retired hosted origin", "https://pos-canvas.vercel.app/device"],
+    ["a foreign app host", "app://evil/index.html"],
+    ["an app lookalike host", "app://poscanvas.evil.example/index.html"],
+    ["an app host prefix", "app://poscanvasevil/index.html"],
+    ["app credentials", "app://user:pass@poscanvas/index.html"],
+    ["a file url", "file:///C:/Windows/System32/config"],
     ["a lookalike host", "https://pos-canvas.vercel.app.evil.example/device"],
     ["a lookalike with a hyphen", "https://pos-canvas-vercel.app/device"],
     ["a subdomain", "https://staging.pos-canvas.vercel.app/device"],
@@ -149,12 +161,12 @@ describe("localhost is a development-only privilege", () => {
 
   it("a release policy never carries a second origin", () => {
     expect(releasePolicy.allowedOrigins).toHaveLength(1);
-    expect(releasePolicy.allowedOrigins).toEqual(["https://pos-canvas.vercel.app"]);
+    expect(releasePolicy.allowedOrigins).toEqual(["app://poscanvas"]);
   });
 
   it("a development policy carries production plus exactly one dev origin", () => {
     expect(developmentPolicy.allowedOrigins).toEqual([
-      "https://pos-canvas.vercel.app",
+      "app://poscanvas",
       "http://localhost:3000",
     ]);
   });
@@ -518,9 +530,16 @@ describe("retry cannot be driven by the hosted page", () => {
     expect(main).toContain("return;");
   });
 
-  it("navigates only to the already-resolved URL", () => {
-    expect(main).toContain("window.loadURL(resolvedServer.url)");
+  it("navigates only to the packaged runtime, never a hosted URL", () => {
+    // SUPERSEDED BY 24.5F. This asserted the window loads a RESOLVED REMOTE
+    // URL — the architecture that made a zero-network cold start impossible.
+    // The destination is now a compile-time constant naming the app's own
+    // scheme, which is strictly stronger: there is no variable to influence.
+    expect(main).toContain("window.loadURL(RUNTIME_ENTRY)");
+    expect(main).toContain("const RUNTIME_ENTRY = `${APP_ORIGIN}/index.html`");
     expect(main).not.toMatch(/loadURL\(["'`]http/);
+    // And nothing reaches for the hosted runtime any more.
+    expect(main).not.toContain("loadURL(resolvedServer.url)");
   });
 });
 
@@ -562,7 +581,11 @@ describe("the device session's storage is left alone", () => {
   });
 
   it("never relocates or deletes the user-data directory", () => {
-    for (const banned of ["setPath(", "rmSync", "unlinkSync", "rmdir", "mkdtemp"]) {
+    // NARROWED BY 24.5F: "setPath(" alone is a substring of an unrelated
+    // identifier — resolveAppAssetPath( — and the property being guarded is
+    // that this process never MOVES Electron's user-data directory, which is
+    // `app.setPath(`. The narrower form still catches the real thing.
+    for (const banned of ["app.setPath(", "rmSync", "unlinkSync", "rmdir", "mkdtemp"]) {
       expect(`main.mjs: ${main}`).not.toContain(banned);
     }
   });

@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Feature 24.5F — the BUILT device runtime, emitted from native-device/ into
+    // each native shell's package directory. Minified bundler output, authored
+    // by nobody; the source it is built from is linted normally.
+    "android-shell/www/**",
+    "windows-shell/runtime/**",
     // Feature 16.2 — the generated native Android project. Everything under
     // android/ is either Capacitor-generated scaffolding, a Gradle build
     // intermediate, or third-party vendored JS (e.g.

@@ -297,11 +297,21 @@ describe("the packaged binary is universal", () => {
     // An explicit allow-list. Nothing from the web app, no configuration, no
     // asset that could vary per customer.
     expect(shellPackage.build.files.sort()).toEqual([
+      // Feature 24.5F — the app://poscanvas protocol resolver.
+      "appProtocol.mjs",
       "main.mjs",
       "navigationPolicy.mjs",
       "offline.html",
       "package.json",
       "preload.js",
+      // Feature 24.5F — the PACKAGED device runtime, built from native-device/.
+      //
+      // The one entry here that is not shell code, and it belongs: it is what
+      // makes a zero-network cold start possible. It is still universal —
+      // exactly the same bytes in every installer, carrying no project id, no
+      // customer id and no configuration. A till becomes a specific business's
+      // till by PAIRING at runtime, which is unchanged.
+      "runtime/**/*",
       "serverUrl.mjs",
       // Feature 24.3 — the branded startup screen and its artwork. Platform
       // branding, identical in every installer; nothing customer-specific.
