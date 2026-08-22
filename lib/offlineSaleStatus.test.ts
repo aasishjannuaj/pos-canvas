@@ -14,6 +14,7 @@ function summary(counts: Partial<QueueSummary> = {}): QueueSummary {
     syncing: 0,
     synced: 0,
     needsAttention: 0,
+    discarded: 0,
     permanentFailure: 0,
     outstanding: 0,
     total: 0,

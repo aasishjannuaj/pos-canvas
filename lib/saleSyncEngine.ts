@@ -331,12 +331,15 @@ async function syncOne(record: QueuedSale, deps: SyncDeps): Promise<SyncedOutcom
  * Why a drain is happening.
  *
  * Feature 24.5F (DEF-02) adds "retry": a persisted backoff window elapsed and
- * the host woke the engine for it. Named separately from "manual" because it is
+ * the host woke the engine for it. It also adds "revoked": the device just
+ * learned it was revoked and still owes the server queued sales, which
+ * complete_sale_v4 accepts or refuses per row depending on whether each one
+ * happened before revoked_at. Neither reclaims orphans; only "startup" does. Named separately from "manual" because it is
  * not a person pressing anything, and separately from "reconnect" because
  * connectivity did not change — the schedule did. Like every trigger except
  * "startup" it drains without reclaiming orphans.
  */
-export type SyncTrigger = "startup" | "reconnect" | "manual" | "retry";
+export type SyncTrigger = "startup" | "reconnect" | "manual" | "retry" | "revoked";
 
 export async function triggerSaleSync(
   trigger: SyncTrigger,

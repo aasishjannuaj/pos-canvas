@@ -57,9 +57,17 @@ function makeSale(overrides: Partial<QueuedSale> = {}): QueuedSale {
 // ---------------------------------------------------------------------------
 
 describe("the queue state machine", () => {
-  it("declares exactly the five approved states", () => {
+  it("declares exactly the six approved states", () => {
     expect([...QUEUE_STATES].sort()).toEqual(
-      ["needs_attention", "pending", "permanent_failure", "synced", "syncing"].sort()
+      [
+        "needs_attention",
+        "pending",
+        "permanent_failure",
+        "synced",
+        "syncing",
+        // Feature 24.5F — a rejected sale an operator resolved deliberately.
+        "discarded",
+      ].sort()
     );
   });
 
@@ -250,6 +258,7 @@ describe("ordering and summary", () => {
       syncing: 0,
       synced: 0,
       needsAttention: 0,
+      discarded: 0,
       permanentFailure: 0,
       outstanding: 0,
       total: 0,

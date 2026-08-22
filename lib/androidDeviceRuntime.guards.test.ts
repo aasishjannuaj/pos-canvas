@@ -462,9 +462,17 @@ describe("a reconnect both refreshes state and wakes the queue", () => {
   it("Sync now is offered on queued work, not on runtime mode", () => {
     const app = code(read(APP));
 
+    // Feature 24.5F — GATED ON `waiting`, NOT ON `unsynced`.
+    //
+    // `unsynced` counts needs_attention as well as pending/syncing, and nothing
+    // promotes a needs_attention record back to pending — isDueForAttempt
+    // refuses anything that is not pending, so a drain triggered for one does
+    // nothing whatsoever. Hardware QA found a revoked till offering Sync now
+    // over an authoritatively rejected sale, where every press was inert.
     expect(app).toContain(
-      'onSyncNow={saleStatus.unsynced > 0 ? () => void runSync("manual") : null}'
+      'onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}'
     );
+    expect(app).not.toContain("onSyncNow={saleStatus.unsynced > 0");
     // The gate that hid the only manual recovery exactly when it was needed.
     expect(app).not.toContain("onSyncNow={offlineMode ?");
   });
@@ -483,6 +491,129 @@ describe("a reconnect both refreshes state and wakes the queue", () => {
     const all = { ...manifest.dependencies, ...manifest.devDependencies };
 
     expect(all["@capacitor/network"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 24.5F — a revoked till can still settle what it owes
+// ---------------------------------------------------------------------------
+
+describe("the revoked screen is not a dead end", () => {
+  const APP = "components/device/DeviceApp.tsx";
+
+  it("drains the queue when the device learns it is revoked", () => {
+    const app = code(read(APP));
+
+    expect(app).toContain('if (syncSessionKey === null || state.status !== "revoked")');
+    expect(app).toContain('void runSync("revoked");');
+
+    // An EFFECT keyed on the status, so every route into revoked is covered —
+    // resolveDeviceState, returnOnlineFromReconnect and a rejected sale
+    // re-resolving. Adding a call at each site is how one gets forgotten.
+    expect(app).toContain('}, [syncSessionKey, state.status, runSync]);');
+  });
+
+  it("the drain runs AFTER the authoritative state is applied", () => {
+    // An effect cannot run before its own render commits, so the revoked state
+    // is on screen — and checkout gone — before any submission starts.
+    const app = code(read(APP));
+    const effect = app.indexOf('void runSync("revoked");');
+    const revokedCase = app.indexOf('case "revoked":');
+
+    expect(effect).toBeGreaterThan(-1);
+    expect(revokedCase).toBeGreaterThan(-1);
+  });
+
+  it("renders the queue status, and Sync now only for retryable work", () => {
+    const app = code(read(APP));
+    const branch = app.slice(app.indexOf('case "revoked":'), app.indexOf('case "config_unavailable":'));
+
+    expect(branch).toContain("statusSlot={");
+    expect(branch).toContain("<DeviceSyncStatus");
+
+    // The strip still appears for anything unresolved — a rejected sale must not
+    // vanish from the screen just because it cannot be retried.
+    expect(branch).toContain("saleStatus.unsynced > 0 ?");
+
+    // Feature 24.5F — but the BUTTON is gated on retryable work only.
+    expect(branch).toContain(
+      'onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}'
+    );
+    expect(branch).not.toContain('onSyncNow={() => void runSync("manual")}');
+  });
+
+  it("offers a way out of a needs_attention deadlock", () => {
+    const app = code(read(APP));
+    const branch = app.slice(app.indexOf('case "revoked":'), app.indexOf('case "config_unavailable":'));
+
+    // Feature 24.5F — without this the till is bricked: a rejected sale cannot
+    // sync, cannot be retried, and blocks the reset that would clear it.
+    expect(branch).toContain("onReview={saleStatus.needsAttention > 0");
+    expect(branch).toContain("<RejectedSaleReview");
+    expect(branch).toContain("onDiscard={handleDiscard}");
+
+    // Reset is rendered unavailable while evidence exists...
+    expect(branch).toContain("resetDisabled={resetBlocked}");
+    // ...but handleReset remains the authority, reading durable storage.
+    expect(branch).toContain("onReset={handleReset}");
+  });
+
+  it("still renders no POS on a revoked device", () => {
+    const app = code(read(APP));
+    const branch = app.slice(app.indexOf('case "revoked":'), app.indexOf('case "config_unavailable":'));
+
+    expect(branch).not.toContain("<PosRuntime");
+  });
+
+  it("never renders a POS or checkout on that screen", () => {
+    const app = code(read(APP));
+    const branch = app.slice(app.indexOf('case "revoked":'), app.indexOf('case "config_unavailable":'));
+
+    for (const banned of ["PosRuntime", "queueOfflineSale", "submitSale", "checkoutBlockedReason"]) {
+      expect(`revoked screen renders ${banned}`).toBe(`revoked screen renders ${banned}`);
+      expect(branch).not.toContain(banned);
+    }
+  });
+
+  it("never filters queue rows by revoked_at locally", () => {
+    // The server decides which sales count. A device that pre-judged would
+    // either strand real money or quietly discard evidence.
+    for (const file of [APP, "lib/saleSyncEngine.ts", "lib/saleQueueSession.ts", "lib/offlineSaleRpc.ts"]) {
+      const source = code(read(file));
+
+      for (const banned of ["revokedAt", "revoked_at"]) {
+        expect(`${file} filters on ${banned}`).toBe(`${file} filters on ${banned}`);
+        expect(source).not.toContain(banned);
+      }
+    }
+  });
+
+  it("v4 is still the only offline sync path", () => {
+    expect(code(read("lib/offlineSaleRpc.ts"))).toContain('rpc("complete_sale_v4"');
+    expect(code(read("lib/device.rpc.ts"))).not.toContain("complete_sale_v4");
+
+    const engine = code(read("lib/saleSyncEngine.ts"));
+
+    expect(engine).toContain("offlineSaleRpc");
+    // The new trigger name changes why a drain happens, never how.
+    expect(engine).toContain('"revoked"');
+  });
+
+  it("revocation clears configuration but never financial evidence", () => {
+    const store = code(read("lib/deviceOfflineStore.ts"));
+    const clear = store.slice(store.indexOf("export async function clearDeviceCache"));
+    const body = clear.slice(0, clear.indexOf("\n}"));
+
+    expect(body).toContain("PAIRING_ASSERTION_KEY");
+    expect(body).toContain("PINNED_CONFIG_KEY");
+    expect(body).not.toContain("SALE_QUEUE_STORE");
+    expect(body).not.toContain("UNCERTAIN_SALE_KEY");
+
+    // And the auth session is dropped only by an explicit reset.
+    const app = code(read(APP));
+    const revokedHandling = app.slice(app.indexOf('if (next.status === "revoked")'));
+
+    expect(revokedHandling.slice(0, 200)).not.toContain("resetDeviceSession");
   });
 });
 
@@ -526,5 +657,71 @@ describe("packaging changed no financial behaviour", () => {
     expect(receipt).toContain('from "@/lib/projectConfig"');
     expect(receipt).toContain('from "@/lib/cart"');
     expect(receipt).not.toContain("./EditorShell");
+  });
+});
+
+describe("resolving a rejected sale never becomes a delete-sale feature", () => {
+  const APP_FILE = "components/device/DeviceApp.tsx";
+
+  it("handleReset reads durable storage BEFORE it decides or clears anything", () => {
+    const app = code(read(APP_FILE));
+    const body = app.slice(app.indexOf("async function handleReset()"));
+    const read_ = body.indexOf("await readOfflineSaleStatus()");
+    const decide = body.indexOf("decideDeviceResetSafety(status)");
+    const clear = body.indexOf("await clearOfflineCache()");
+    const signOut = body.indexOf("await resetDeviceSession()");
+
+    expect(read_).toBeGreaterThan(-1);
+    // The durable read comes first, the decision second, and nothing is
+    // destroyed until both have happened.
+    expect(decide).toBeGreaterThan(read_);
+    expect(clear).toBeGreaterThan(decide);
+    expect(signOut).toBeGreaterThan(decide);
+  });
+
+  it("the UI never decides discard safety for itself", () => {
+    const app = code(read(APP_FILE));
+    const screen = code(read("components/device/RejectedSaleReview.tsx"));
+
+    // Every condition lives in the policy module. A component that reimplemented
+    // any of them could widen the rule without touching a single test.
+    for (const source of [app, screen]) {
+      expect(source).not.toContain('lastErrorCode === "post_revocation"');
+      expect(source).not.toContain("serverOrderNumber === null");
+      expect(source).not.toContain('state === "needs_attention"');
+    }
+
+    expect(code(read("lib/rejectedSaleSession.ts"))).toContain(
+      "decideRejectedSaleDiscardSafety({"
+    );
+  });
+
+  it("discard never reaches the server or invents an order", () => {
+    const session = code(read("lib/rejectedSaleSession.ts"));
+
+    expect(session).not.toContain("complete_sale_v4");
+    expect(session).not.toContain("submitQueuedSale");
+    expect(session).not.toContain("markSynced");
+    expect(session).not.toContain("serverOrderNumber:");
+    expect(session).not.toContain("deleteQueuedSaleRecord");
+    expect(session).not.toContain("deleteSyncedSale");
+  });
+
+  it("the confirmation is a second step, and discard is not the default button", () => {
+    const screen = code(read("components/device/RejectedSaleReview.tsx"));
+
+    // The confirmation body only renders once a record has been chosen.
+    expect(screen).toContain("isConfirming &&");
+    expect(screen).toContain("DISCARD_REJECTED_SALE_CONFIRMATION_LINES");
+    // Keep is the solid, primary button; discard is the outlined one. Scoped to
+    // the confirmation JSX rather than the whole file — the import list at the
+    // top names the discard constant first, so a file-wide index comparison
+    // would be measuring the imports, not the buttons.
+    const confirmation = screen.slice(screen.indexOf("{isConfirming && ("));
+
+    expect(confirmation).toContain("Keep this sale");
+    expect(confirmation.indexOf("Keep this sale")).toBeLessThan(
+      confirmation.indexOf("DISCARD_REJECTED_SALE_CONFIRM_ACTION")
+    );
   });
 });

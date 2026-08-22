@@ -1923,6 +1923,47 @@ hardware pass on the reconnect *signal* — but the state-refresh and
 next-sale-goes-online behaviour has not been observed on a real PC. That retest
 is still outstanding.
 
+#### A revoked till still owes its queued sales (24.5F)
+
+Hardware found a deadlock. A phone held one legitimate sale taken **before** the
+owner revoked it. On learning the revocation the screen correctly said "let it
+sync before resetting this device" and Reset correctly refused — but nothing
+could sync, and it sat there. The engine was mounted the whole time; every route
+to it happened to be shut at once:
+
+| Trigger | Why it could not fire |
+|---|---|
+| startup | latched per device session, spent at boot |
+| reconnect | fires on `online`; the device was **already** online — it had just talked to the server to learn it was revoked |
+| retry | schedules only for rows with a persisted `nextAttemptAt`; this row had never been attempted |
+| Sync now | `DeviceSyncStatus` was rendered only inside the `ready` branch |
+
+**The server was never the problem.** `complete_sale_v4` §2 resolves a device
+*without* the revoked filter precisely so §6c can judge each sale on its own
+`occurred_at`: before `revoked_at` it is accepted, after it is refused with a
+catalogued message. No SQL changed.
+
+**The fix is two small things.** A drain now runs when the device enters the
+revoked state — as an *effect keyed on the status*, so every route in is covered
+rather than the three that exist today — and the revoked screen renders the
+queue status with **Sync now** whenever unresolved evidence exists. The screen's
+promise is now literally true.
+
+**Rows are never filtered locally by `revoked_at`.** Every durable row is
+submitted and the server decides: pre-revocation sales are accepted and
+reconciled, post-revocation ones become `needs_attention`, are retained, and
+keep Reset blocked. The device is not the authority on which of its own sales
+count, and guessing would either strand real money or discard evidence.
+
+**Evidence survives revocation.** `clearDeviceCache` removes only the pairing
+assertion and the pinned config; the sale queue and the uncertain-online-sale
+marker are untouched, and the auth session is dropped only by an explicit reset.
+Once everything eligible has synced and nothing unresolved remains, Reset
+unblocks on the same screen.
+
+**Android hardware retest is pending**; the phone is being held in the blocker
+state deliberately so the fix can be proven against it.
+
 #### Windows hardware QA — PASS
 
 Confirmed on a real Windows PC after the three fixes above:
@@ -2280,3 +2321,117 @@ never a reason to reject a real sale. See §6.1.
 No offline runtime, no IndexedDB code, no queue, no migration, no RPC change, no
 receipt change, no inventory change, no pairing or revocation change, no schema
 change. `lib/offlineDesign.guards.test.ts` asserts this boundary.
+
+## 24. Resolving an authoritatively rejected sale (24.5F)
+
+### The deadlock this closes
+
+Hardware QA revoked a paired Android till and then rang one more sale on it. The
+device queued that sale, synced it, and `complete_sale_v4` refused it under §13:
+its `occurred_at` was at or after `revoked_at`, so §6c declined to record it. No
+order was created and none ever will be — the server has already answered, and
+it will answer the same way every time.
+
+That left a record which was not waiting for anything, could not be retried, and
+which the reset guard correctly refused to let anyone erase. The till could not
+sync, could not reset, and could not be re-paired.
+
+Two separate defects were found along the way:
+
+* **Sync now was gated on `unsynced`**, which counts `needs_attention` as well as
+  `pending`/`syncing`. Nothing in the codebase promotes a `needs_attention`
+  record back to `pending`, and `isDueForAttempt` refuses anything that is not
+  `pending` — so the button was **inert by construction** on exactly the screen
+  that most needed it to mean something. It is now gated on `waiting`.
+* **There was no resolution path at all** for a sale the server had definitively
+  refused. That is what §24.1 adds.
+
+### 24.1 The `discarded` disposition
+
+`QueueState` gains a sixth member, `discarded`, reachable **only** from
+`needs_attention` and terminal thereafter.
+
+It is not a delete and not a synonym for `synced`. The record stays on the device
+with its idempotency key, items, time and rejection code intact; what changes is
+that it stops counting as unresolved, so it no longer blocks a reset and no
+longer asks a cashier to act. `synced` asserts the server holds this sale — the
+whole point of a discarded record is that the server refused it.
+
+`SALE_QUEUE_SCHEMA_VERSION` is **unchanged at 1**. Adding a state value needs no
+migration: `readQueuedSale` pins the version exactly, and a record written in the
+new state reads back fine on any build that knows the state. An older build would
+quarantine it, which counts as needing attention — fail-safe, never a silent
+drop.
+
+### 24.2 The discard policy
+
+`lib/rejectedSaleResolution.ts` holds the single decision function,
+`decideRejectedSaleDiscardSafety`. Every condition lives there so a UI change
+cannot widen the rule. A discard is allowed **only** when all hold:
+
+* `state === "needs_attention"`
+* `lastErrorCode` is in `TERMINAL_LOCAL_RESOLUTION_CODES` — today exactly
+  `["post_revocation"]`
+* neither `serverOrderId` nor `serverOrderNumber` is set
+* no outstanding uncertain online sale names this `saleRequestId`, and none
+  exists that cannot be attributed
+
+Refused for everything else, including `pending`, `syncing`, `synced`,
+`permanent_failure`, transport exhaustion, unknown outcomes, and uncatalogued
+server errors. **Adding a code to that allowlist is a financial decision**: it
+must be an answer the server gives identically every time, that allocates nothing
+and records nothing.
+
+The session layer re-runs the policy against freshly read storage immediately
+before writing. A confirmation dialog is not a lock, so the only decision that
+counts is the one made against durable state — the same reasoning `handleReset`
+already applies.
+
+### 24.3 Reset affordance
+
+`DeviceStatusScreen` now renders Reset disabled when known state says unresolved
+evidence exists. **This is an affordance, not the guard.** `handleReset` still
+re-reads IndexedDB and refuses on its own authority, because React state can be
+stale and a stale "looks safe" must never be able to erase a sale.
+
+## 25. Remaining 24.5F release blocker — no client timeout on the sale RPC
+
+**Not fixed in the rejected-sale change, and tracked here deliberately.**
+
+`submitQueuedSale` issues `complete_sale_v4` with no deadline. Confirmed against
+postgrest-js 2.110.5: the fetch is called with `signal: this.signal`, which is
+`undefined` for us, and there is no `AbortController`, `AbortSignal` or timeout
+anywhere on the submission path. A hung socket therefore means:
+
+* `await deps.submit(...)` never settles;
+* the row stays `syncing`, where `isDueForAttempt` refuses it and
+  `earliestRetryAt` schedules no timer;
+* `activeRun` — released only by `drain(...).finally(...)` — is never cleared, so
+  every later `runSync`, including Sync now, joins the same unresolved promise;
+* only the `startup` trigger reclaims it, so nothing recovers before a restart.
+
+One piece of good news from the same audit: `RETRYABLE_METHODS` is
+`["GET","HEAD","OPTIONS"]`, and the guard sits on the transport path as well as
+the status path. **An RPC is a POST, so the library makes exactly one network
+attempt** — there is no hidden double-submit.
+
+### Constraints on the eventual fix
+
+* Use a **per-call** `.abortSignal()` on `complete_sale_v4`, not a global fetch
+  wrapper — a global one would also bound auth token refresh, which must not
+  share a sale's deadline.
+* **A timeout is an UNKNOWN OUTCOME, never a transport failure.** The submit path
+  must return `{ transport: "unknown" }` explicitly when its own timer fires.
+  Message matching cannot be relied on: `TRANSPORT_MESSAGE_FRAGMENTS` already
+  contains `"aborterror"`, `"signal timed out"` and `"timeout"`, so an abort
+  would otherwise classify as `transport` — and `enterOfflineFromTransportFailure`
+  admits only a transport failure, so a sale the server actually committed could
+  flip the till into offline mode on the strength of our own timer.
+* The row must stay retryable **under the same persisted `saleRequestId`**, so v4
+  idempotency resolves committed-but-lost and never-committed to one order. This
+  already holds: the key is minted once at draft creation and `updateQueueState`
+  never writes it.
+* Manual Sync now may override a pending backoff, but **must not reclaim a live
+  `syncing` row** without a stale-claim rule. Nothing today distinguishes "in
+  flight now" from "hung forty minutes ago"; that needs a claim lease, which is
+  the same mechanism the timeout introduces. The two land together.

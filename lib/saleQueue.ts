@@ -60,6 +60,21 @@ export type QueueState =
   | "syncing"
   | "synced"
   | "needs_attention"
+  /**
+   * Feature 24.5F — an authoritatively REJECTED sale an operator has resolved
+   * by hand, on purpose.
+   *
+   * NOT A DELETE, and not a synonym for "synced". The record stays on the
+   * device with everything it always held; what changes is that it stops being
+   * unresolved, so it no longer blocks a reset and no longer asks a cashier to
+   * do something about it. The distinction matters because "synced" asserts the
+   * server has this sale — and the whole point of a discarded record is that
+   * the server refused it and never will.
+   *
+   * Reachable ONLY from needs_attention, and only through the policy in
+   * lib/rejectedSaleResolution.ts.
+   */
+  | "discarded"
   | "permanent_failure";
 
 export const QUEUE_STATES: readonly QueueState[] = [
@@ -67,6 +82,7 @@ export const QUEUE_STATES: readonly QueueState[] = [
   "syncing",
   "synced",
   "needs_attention",
+  "discarded",
   "permanent_failure",
 ] as const;
 
@@ -156,6 +172,7 @@ export type QueuedSale = {
  *   syncing          -> needs_attention                  a person must resolve it
  *   syncing          -> permanent_failure                replay is impossible
  *   needs_attention  -> pending                          manual retry
+ *   needs_attention  -> discarded                        operator resolved it
  *   needs_attention  -> permanent_failure                escalated
  *
  * TERMINAL, with no way back:
@@ -163,6 +180,9 @@ export type QueuedSale = {
  *                      invite a second submission of money already recorded.
  *   permanent_failure  a hash conflict or a corrupt record. Retrying blindly
  *                      cannot help and could double-submit.
+ *   discarded          the server authoritatively refused this sale and a
+ *                      person chose to resolve it locally. Re-queueing it would
+ *                      ask the server the question it has already answered.
  *
  * A transition to the SAME state is refused rather than treated as a no-op, so
  * a caller that believes it is advancing the machine always learns it is not.
@@ -170,13 +190,18 @@ export type QueuedSale = {
 export const QUEUE_TRANSITIONS: Readonly<Record<QueueState, readonly QueueState[]>> = {
   pending: ["syncing"],
   syncing: ["pending", "synced", "needs_attention", "permanent_failure"],
-  needs_attention: ["pending", "permanent_failure"],
+  needs_attention: ["pending", "discarded", "permanent_failure"],
   synced: [],
+  discarded: [],
   permanent_failure: [],
 } as const;
 
 /** States a record can never leave. */
-export const TERMINAL_QUEUE_STATES: readonly QueueState[] = ["synced", "permanent_failure"];
+export const TERMINAL_QUEUE_STATES: readonly QueueState[] = [
+  "synced",
+  "discarded",
+  "permanent_failure",
+];
 
 export function isQueueState(value: unknown): value is QueueState {
   return typeof value === "string" && (QUEUE_STATES as readonly string[]).includes(value);
@@ -271,6 +296,8 @@ export type QueueSummary = {
   syncing: number;
   synced: number;
   needsAttention: number;
+  /** Feature 24.5F — rejected sales an operator resolved deliberately. */
+  discarded: number;
   permanentFailure: number;
   /** Everything not yet accepted by the server — what an operator cares about. */
   outstanding: number;
@@ -283,22 +310,44 @@ export function summarizeQueue(records: readonly QueuedSale[]): QueueSummary {
     syncing: 0,
     synced: 0,
     needsAttention: 0,
+    discarded: 0,
     permanentFailure: 0,
   };
 
+  // EVERY STATE NAMED EXPLICITLY. This loop used to end in a bare `else` that
+  // meant permanent_failure, which would have silently counted the new
+  // `discarded` state as a failure needing attention — the exact opposite of
+  // what resolving one is for. An exhaustive switch makes the next state
+  // addition a compile error instead of a wrong number.
   for (const record of records) {
-    if (record.state === "pending") counts.pending += 1;
-    else if (record.state === "syncing") counts.syncing += 1;
-    else if (record.state === "synced") counts.synced += 1;
-    else if (record.state === "needs_attention") counts.needsAttention += 1;
-    else counts.permanentFailure += 1;
+    switch (record.state) {
+      case "pending":
+        counts.pending += 1;
+        break;
+      case "syncing":
+        counts.syncing += 1;
+        break;
+      case "synced":
+        counts.synced += 1;
+        break;
+      case "needs_attention":
+        counts.needsAttention += 1;
+        break;
+      case "discarded":
+        counts.discarded += 1;
+        break;
+      case "permanent_failure":
+        counts.permanentFailure += 1;
+        break;
+    }
   }
 
   return {
     ...counts,
     // permanent_failure is excluded: it is not waiting for anything, it is
     // waiting for a person. Counting it as "outstanding" would make a status
-    // badge that never clears.
+    // badge that never clears. `discarded` is excluded for the opposite reason
+    // — a person has already dealt with it.
     outstanding: counts.pending + counts.syncing + counts.needsAttention,
     total: records.length,
   };

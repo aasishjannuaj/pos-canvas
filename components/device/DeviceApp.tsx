@@ -71,6 +71,13 @@ import {
   resolveOfflineCheckoutSession,
 } from "@/lib/offlineCheckoutSession";
 import { decideDeviceResetSafety } from "@/lib/offlineSaleStatus";
+import RejectedSaleReview from "@/components/device/RejectedSaleReview";
+import {
+  discardRejectedSale,
+  listRejectedSaleReviews,
+} from "@/lib/rejectedSaleSession";
+import type { RejectedSaleReview as RejectedSale } from "@/lib/rejectedSaleSession";
+import { DISCARD_REJECTED_SALE_REFUSALS } from "@/lib/rejectedSaleResolution";
 import type { OfflineSaleStatus } from "@/lib/offlineSaleStatus";
 import {
   subscribeToReconnect,
@@ -137,6 +144,15 @@ export default function DeviceApp() {
   const [saleStatus, setSaleStatus] = useState<OfflineSaleStatus>(EMPTY_SALE_STATUS);
   const [syncing, setSyncing] = useState(false);
   const [resetNotice, setResetNotice] = useState<string | null>(null);
+  /**
+   * Feature 24.5F — the unresolved-sale review, open or closed.
+   *
+   * Held here rather than routed because a revoked device has no router and no
+   * POS: this screen replaces the status screen for as long as it is open, and
+   * closing it returns to exactly the state that was there before.
+   */
+  const [reviewing, setReviewing] = useState(false);
+  const [reviews, setReviews] = useState<RejectedSale[]>([]);
 
   // Guards against a second resolve running while the first is in flight (e.g.
   // a retry tapped twice, or a rejected sale firing while a check is running).
@@ -213,7 +229,7 @@ export default function DeviceApp() {
    * connection alike.
    */
   const runSync = useCallback(
-    async (trigger: "reconnect" | "manual" | "retry") => {
+    async (trigger: "reconnect" | "manual" | "retry" | "revoked") => {
       setSyncing(true);
 
       try {
@@ -429,6 +445,33 @@ export default function DeviceApp() {
   }, [resolveDeviceState]);
 
   /**
+   * Feature 24.5F — loads the unresolved sales when the review is opened.
+   *
+   * Read on OPEN rather than kept continuously in sync: this is a resolution
+   * screen someone visits deliberately, and re-reading IndexedDB behind a
+   * confirmation dialog would let the list shift under the person using it.
+   */
+  useEffect(() => {
+    if (!reviewing) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const loaded = await listRejectedSaleReviews();
+
+      if (!cancelled) {
+        setReviews(loaded);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reviewing]);
+
+  /**
    * Feature 24.5E — the startup sync, wired in exactly ONE place.
    *
    * Gated on the session rather than on mount: the drain submits under this
@@ -470,6 +513,58 @@ export default function DeviceApp() {
       cancelled = true;
     };
   }, [syncSessionKey]);
+
+  /**
+   * Feature 24.5F — a revoked device still owes the server its queued sales.
+   *
+   * THE DEADLOCK THIS BREAKS. A till was revoked while holding one legitimate
+   * sale taken BEFORE revocation. The screen correctly said "let it sync before
+   * resetting", and reset correctly refused — but nothing could sync. The
+   * engine was still mounted; every route to it was shut:
+   *
+   *   * startup   — latched per device session and long since spent;
+   *   * reconnect — fires on the `online` event, and the device was ALREADY
+   *                 online; it had just talked to the server to learn it was
+   *                 revoked, so no transition and no event;
+   *   * retry     — schedules only for rows carrying a persisted nextAttemptAt,
+   *                 and this sale had never been attempted;
+   *   * Sync now  — rendered only inside the `ready` branch.
+   *
+   * AN EFFECT RATHER THAN A CALL AT EACH SITE, deliberately. There are three
+   * ways into `revoked` — resolveDeviceState, returnOnlineFromReconnect and a
+   * rejected sale re-resolving — and adding a drain to each is how one gets
+   * forgotten. Keying on the status covers every path that exists and every
+   * path added later.
+   *
+   * NO LOCAL FILTERING BY revoked_at. Every durable row is submitted and
+   * complete_sale_v4 decides: a sale that occurred before revoked_at is
+   * accepted and reconciled, one after it is refused with a catalogued message
+   * and becomes needs_attention. The device is not the authority on which of
+   * its own sales count, and guessing here would either strand real money or
+   * quietly discard evidence.
+   *
+   * NOT GATED ON THE SALE COUNT. `saleStatus` refreshes from its own effect,
+   * also keyed on status, so the count may not have caught up at the moment
+   * this runs — gating on it could skip exactly the case this exists to fix.
+   * The engine's own due-list is the real gate: an empty queue drains to a
+   * no-op, and single-flight absorbs any overlap.
+   */
+  useEffect(() => {
+    if (syncSessionKey === null || state.status !== "revoked") {
+      return;
+    }
+
+    // Deferred out of the commit phase. runSync sets `syncing`, and setting
+    // state synchronously inside an effect costs an extra render and is what
+    // react-hooks/set-state-in-effect exists to catch. The zero delay also
+    // buys a cleanup path: a device that leaves this screen before the timer
+    // fires never starts a drain it no longer needs.
+    const start = setTimeout(() => {
+      void runSync("revoked");
+    }, 0);
+
+    return () => clearTimeout(start);
+  }, [syncSessionKey, state.status, runSync]);
 
   /**
    * Feature 24.5F — a live POS returns to authoritative online mode.
@@ -829,6 +924,39 @@ export default function DeviceApp() {
   }
 
   /**
+   * Feature 24.5F — resolves ONE authoritatively rejected sale, on request.
+   *
+   * The policy is not re-implemented here. discardRejectedSale re-reads the
+   * record from IndexedDB and re-runs decideRejectedSaleDiscardSafety against
+   * it, so a record that changed while the confirmation was on screen is
+   * refused by the same rule that offered the button. This function only turns
+   * that answer into words and refreshes what the screen is showing.
+   */
+  async function handleDiscard(queueRecordId: string): Promise<string | null> {
+    const result = await discardRejectedSale(queueRecordId);
+
+    // Re-read both regardless of outcome: a refusal usually means storage says
+    // something different from what this screen was rendering, and the fix for
+    // that is to show what storage says.
+    setSaleStatus(await readOfflineSaleStatus());
+    setReviews(await listRejectedSaleReviews());
+
+    if (result.ok) {
+      return null;
+    }
+
+    if (result.reason === "not_found") {
+      return "This sale is no longer on this device.";
+    }
+
+    if (result.reason === "storage_unavailable") {
+      return "This device could not save that change. Try again.";
+    }
+
+    return DISCARD_REJECTED_SALE_REFUSALS[result.reason];
+  }
+
+  /**
    * Feature 24.5E — reset, REFUSED while this device holds unsynced sales.
    *
    * APPROVED RULE (owner, 24.4 review, docs/OFFLINE_ARCHITECTURE.md §15). The
@@ -1129,6 +1257,17 @@ export default function DeviceApp() {
     [enterOfflineFromTransportFailure, resolveDeviceState]
   );
 
+  /**
+   * Feature 24.5F — whether this device is KNOWN to be holding unresolved
+   * financial evidence.
+   *
+   * Used only to render Reset as unavailable. handleReset re-reads durable
+   * storage and refuses on its own authority, and that remains the real guard:
+   * this value comes from React state, which can be stale, and a stale "looks
+   * safe" must never be able to erase a sale.
+   */
+  const resetBlocked = !decideDeviceResetSafety(saleStatus).allowed;
+
   switch (state.status) {
     case "checking":
     case "signing_in":
@@ -1162,6 +1301,20 @@ export default function DeviceApp() {
       );
 
     case "revoked":
+      // Feature 24.5F — the review REPLACES the status screen while it is open.
+      // A revoked till renders no PosRuntime and no checkout in either branch;
+      // this is a read-only account of what is unresolved, plus the one action
+      // that can resolve it.
+      if (reviewing) {
+        return (
+          <RejectedSaleReview
+            reviews={reviews}
+            onDiscard={handleDiscard}
+            onClose={() => setReviewing(false)}
+          />
+        );
+      }
+
       return (
         <DeviceStatusScreen
           title="Device revoked"
@@ -1169,8 +1322,41 @@ export default function DeviceApp() {
             state.pairing
           )} can no longer take payments. Its access was removed by the account owner. Pair it again with a new code to bring it back into service.`}
           onReset={handleReset}
+          resetDisabled={resetBlocked}
           resetNote={RESET_NOTE}
           actionNotice={resetNotice}
+          // Feature 24.5F — what this device still owes, and the means to
+          // settle it. Rendered only while unresolved evidence exists, so a
+          // cleanly revoked till shows nothing extra. Sync now is offered
+          // because the automatic drain above can only fire once per entry to
+          // this screen: if the network is still down then, a person needs a
+          // way to try again without relaunching the app.
+          //
+          // No checkout and no POS controls appear here — a revoked device
+          // takes no payments, and this is a status readout with one button.
+          statusSlot={
+            saleStatus.unsynced > 0 ? (
+              <DeviceSyncStatus
+                status={saleStatus}
+                syncing={syncing}
+                // Feature 24.5F — SYNC NOW IS GATED ON `waiting`, NOT `unsynced`.
+                //
+                // needs_attention records are not retryable: nothing in this
+                // codebase promotes one back to `pending`, and isDueForAttempt
+                // refuses anything that is not pending — so a drain triggered
+                // for them does nothing at all. Hardware QA hit exactly that:
+                // a revoked till showed Sync now over a rejected sale, and
+                // pressing it was silently inert. A control that visibly does
+                // nothing teaches an operator to distrust the whole screen.
+                onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}
+              />
+            ) : null
+          }
+          // Feature 24.5F — the way OUT of a needs_attention deadlock. Offered
+          // only when something is actually unresolved, so a cleanly revoked
+          // till still shows nothing extra.
+          onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : undefined}
+          reviewLabel={saleStatus.needsAttention === 1 ? "Review sale" : "Review sales"}
         />
       );
 
@@ -1181,6 +1367,7 @@ export default function DeviceApp() {
           message="This device is paired, but its menu could not be loaded. The build it is pinned to may no longer be available."
           onRetry={() => void resolveDeviceState()}
           onReset={handleReset}
+          resetDisabled={resetBlocked}
           resetNote={RESET_NOTE}
           actionNotice={resetNotice}
         />
@@ -1205,6 +1392,7 @@ export default function DeviceApp() {
           message={OFFLINE_BLOCKED_MESSAGES[state.reason]}
           onRetry={() => void resolveDeviceState()}
           onReset={handleReset}
+          resetDisabled={resetBlocked}
           resetNote={RESET_NOTE}
           actionNotice={resetNotice}
         />
@@ -1262,7 +1450,7 @@ export default function DeviceApp() {
           <DeviceSyncStatus
             status={saleStatus}
             syncing={syncing}
-            onSyncNow={saleStatus.unsynced > 0 ? () => void runSync("manual") : null}
+            onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}
           />
 
           <div className="min-h-0 flex-1">
