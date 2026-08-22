@@ -2394,44 +2394,93 @@ evidence exists. **This is an affordance, not the guard.** `handleReset` still
 re-reads IndexedDB and refuses on its own authority, because React state can be
 stale and a stale "looks safe" must never be able to erase a sale.
 
-## 25. Remaining 24.5F release blocker — no client timeout on the sale RPC
+## 25. Bounded sale submission (24.5F)
 
-**Not fixed in the rejected-sale change, and tracked here deliberately.**
+**Resolved.** This section previously recorded an open release blocker; the fix
+below closes it.
 
-`submitQueuedSale` issues `complete_sale_v4` with no deadline. Confirmed against
-postgrest-js 2.110.5: the fetch is called with `signal: this.signal`, which is
-`undefined` for us, and there is no `AbortController`, `AbortSignal` or timeout
-anywhere on the submission path. A hung socket therefore means:
+### The blocker
 
-* `await deps.submit(...)` never settles;
-* the row stays `syncing`, where `isDueForAttempt` refuses it and
-  `earliestRetryAt` schedules no timer;
-* `activeRun` — released only by `drain(...).finally(...)` — is never cleared, so
-  every later `runSync`, including Sync now, joins the same unresolved promise;
-* only the `startup` trigger reclaims it, so nothing recovers before a restart.
+`complete_sale_v4` was issued with no deadline. Confirmed against postgrest-js
+2.110.5: the builder passes `signal: this.signal` straight to fetch, and ours was
+`undefined`. A hung socket therefore meant `await deps.submit(...)` never settled,
+so the row stayed `syncing` — where `isDueForAttempt` refuses it and
+`earliestRetryAt` schedules no timer — and `activeRun`, released only by
+`drain(...).finally(...)`, was never cleared. Every later Sync now, reconnect and
+retry joined the same dead promise. Only a process restart recovered, and the
+till could not sync, reset, or be re-paired.
 
-One piece of good news from the same audit: `RETRYABLE_METHODS` is
-`["GET","HEAD","OPTIONS"]`, and the guard sits on the transport path as well as
-the status path. **An RPC is a POST, so the library makes exactly one network
-attempt** — there is no hidden double-submit.
+### The fix
 
-### Constraints on the eventual fix
+`submitQueuedSale` now bounds each call with a **per-call `AbortController`**,
+passed to PostgREST's own `.abortSignal()`. Deliberately not a custom global fetch
+on the Supabase client: that would also bound auth token refresh, and a token
+refresh has no business sharing a sale's deadline. The timer is always cleared in
+`finally`.
 
-* Use a **per-call** `.abortSignal()` on `complete_sale_v4`, not a global fetch
-  wrapper — a global one would also bound auth token refresh, which must not
-  share a sale's deadline.
-* **A timeout is an UNKNOWN OUTCOME, never a transport failure.** The submit path
-  must return `{ transport: "unknown" }` explicitly when its own timer fires.
-  Message matching cannot be relied on: `TRANSPORT_MESSAGE_FRAGMENTS` already
-  contains `"aborterror"`, `"signal timed out"` and `"timeout"`, so an abort
-  would otherwise classify as `transport` — and `enterOfflineFromTransportFailure`
-  admits only a transport failure, so a sale the server actually committed could
-  flip the till into offline mode on the strength of our own timer.
-* The row must stay retryable **under the same persisted `saleRequestId`**, so v4
-  idempotency resolves committed-but-lost and never-committed to one order. This
-  already holds: the key is minted once at draft creation and `updateQueueState`
-  never writes it.
-* Manual Sync now may override a pending backoff, but **must not reclaim a live
-  `syncing` row** without a stale-claim rule. Nothing today distinguishes "in
-  flight now" from "hung forty minutes ago"; that needs a claim lease, which is
-  the same mechanism the timeout introduces. The two land together.
+`SALE_SUBMISSION_TIMEOUT_MS` is **30 seconds**. The floor is how slow a legitimate
+call can be — v4 takes a project-level `FOR UPDATE` lock, so a busy shop can
+serialize behind another till, and poor mobile data adds round trips; abandoning
+calls that were going to succeed costs an idempotent replay and one of the ten
+attempts. The ceiling is what a person will tolerate watching a spinner. Inside
+that band, being slightly too generous costs a longer (but bounded) stuck window;
+being too eager costs needless unknown outcomes on a working network.
+
+### A timeout is an UNKNOWN OUTCOME
+
+The sale may be committed on the server with the response lost, or may never have
+arrived. `submitQueuedSale` returns `{ transport: "unknown", timedOut: true }`,
+and `classifySubmissionFailure` checks `timedOut` **first**, ahead of the message
+table, yielding `retry`/`sale_timeout` (or `needs_attention`/
+`timeout_attempts_exhausted` once attempts are spent).
+
+**Never `transport`.** That would assert the request never reached the server, and
+it is the evidence `enterOfflineFromTransportFailure` acts on — so misclassifying
+our own impatience could take a shop offline over a sale the server had already
+committed.
+
+**The timeout is identified by a flag, never by message text.** The adapter owns a
+`timedOut` boolean set by the one timer that can cause it.
+`TRANSPORT_MESSAGE_FRAGMENTS` already matches `"aborterror"`, `"signal timed out"`
+and `"timeout"`, so an abort routed through the ordinary classifier would come
+back as `transport`. Worse, postgrest-js does **not** rethrow an aborted request:
+it catches the `AbortError` and synthesizes an ordinary error object carrying that
+text, so an abort arrives down the normal error path looking like any other
+failure. The sentinel is therefore checked before `error` is even inspected.
+
+### Same identity on retry
+
+The persisted `saleRequestId` is read from the durable record on every attempt and
+is never regenerated — minted once at draft creation, and `updateQueueState` never
+writes it. So a retry after a timeout is the same request as far as v4's
+idempotency lookup is concerned: if the server committed, the replay returns the
+original order; if it did not, exactly one order is created. No duplicate is
+reachable.
+
+### Claim lifecycle
+
+`syncing → (timeout ⇒ unknown) → pending` with persisted retry metadata. The row
+never remains `syncing` once the bounded handler returns, so the ordinary backoff
+and retry timer take over. **No second claim mechanism was introduced** — the
+existing state machine already represents this safely, and a bounded request plus
+startup recovery covers both the timeout case and the process-kill case.
+
+Startup recovery is unchanged and still the only reclaimer of orphaned `syncing`
+rows: `recoverInterruptedSale` flips state and `updatedAt` only, preserving the
+idempotency key.
+
+### Manual Sync now
+
+`isManuallyRetryable` relaxes **the backoff and only the backoff**. A persisted
+`nextAttemptAt` exists to stop a device hammering a server it cannot reach; a
+person pressing Sync now once is not that, and they often know something the timer
+does not.
+
+**The state check is never relaxed.** A `syncing` row is refused by both
+predicates, so a manual press can never reissue a claim that may still be on the
+wire. A live claim is resolved by exactly three things: a response, the bounded
+timeout, or startup recovery after a restart. Single-flight is unchanged, so
+repeated presses collapse to one drain and cannot duplicate an order.
+
+Only the `manual` trigger sets `ignoreBackoff`; `startup`, `reconnect`, `retry`
+and `revoked` all keep respecting persisted backoff.

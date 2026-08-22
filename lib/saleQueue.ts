@@ -361,6 +361,25 @@ export function summarizeQueue(records: readonly QueuedSale[]): QueueSummary {
  * rather than held in a timer. An unparseable value is treated as due, because
  * refusing to ever retry a sale over a bad timestamp would strand money.
  */
+/**
+ * Feature 24.5F — may a PERSON retry this record right now?
+ *
+ * The difference from isDueForAttempt is the backoff, and only the backoff. A
+ * persisted nextAttemptAt exists to stop a device hammering a server it cannot
+ * reach; a human pressing Sync now once is not that, and they usually know
+ * something the timer does not — that the wifi is back, that the router was
+ * rebooted. Making them wait up to fifteen minutes to act on it is the UI
+ * refusing information it has.
+ *
+ * WHAT IS NOT RELAXED: the state. A `syncing` row is refused here exactly as it
+ * is refused there, because a claim that may still be on the wire must never be
+ * reissued — the only things that resolve one are a response, the submission
+ * timeout, or startup recovery after a restart.
+ */
+export function isManuallyRetryable(record: QueuedSale): boolean {
+  return record.state === "pending";
+}
+
 export function isDueForAttempt(record: QueuedSale, now: number): boolean {
   if (record.state !== "pending") return false;
   if (record.nextAttemptAt === null) return true;

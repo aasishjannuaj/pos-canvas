@@ -31,11 +31,19 @@ import type { OfflineSaleSubmission } from "@/lib/offlineSaleRpc";
 export type SyncDeps = {
   submit: (record: QueuedSale) => Promise<OfflineSaleSubmission>;
   now: () => number;
+  /**
+   * Feature 24.5F — set ONLY by the manual trigger. A person pressing Sync now
+   * may retry a pending record whose backoff has not elapsed; nothing automatic
+   * may. It never relaxes the state check, so a live `syncing` claim is
+   * untouchable either way.
+   */
+  ignoreBackoff: boolean;
 };
 
 const defaultDeps: SyncDeps = {
   submit: submitQueuedSale,
   now: () => Date.now(),
+  ignoreBackoff: false,
 };
 
 export type SyncedOutcome = {
@@ -181,7 +189,7 @@ async function drain(deps: SyncDeps): Promise<SyncRunReport> {
   // Reclaiming orphans is a STARTUP concern, so it lives on the startup
   // trigger. Within a drain, the only thing that may move a record out of
   // `pending` is the claim below.
-  const due = await listDueSales(deps.now());
+  const due = await listDueSales(deps.now(), { ignoreBackoff: deps.ignoreBackoff });
 
   if (!due.ok) {
     return report;
@@ -354,7 +362,10 @@ export async function triggerSaleSync(
     await recoverInterruptedSyncs(new Date(Date.now()).toISOString());
   }
 
-  return runSaleSync(deps);
+  // A MANUAL PRESS IS THE ONLY TRIGGER ALLOWED TO SKIP A BACKOFF, and it is
+  // still only allowed to skip it for PENDING rows. An explicit `deps` value
+  // from a caller wins, so a test can drive either behaviour.
+  return runSaleSync({ ignoreBackoff: trigger === "manual", ...deps });
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   SALE_QUEUE_SCHEMA_VERSION,
   SALE_REQUEST_PAYLOAD_VERSION,
   isDueForAttempt,
+  isManuallyRetryable,
   markQueuedSaleAttempt,
   readQueuedSale,
   recoverInterruptedSale,
@@ -265,12 +266,21 @@ export async function listPendingSales(): Promise<QueueResult<QueuedSale[]>> {
  * place in the queue and simply is not eligible yet. That is what lets one
  * failing sale back off without holding up the sales behind it.
  */
-export async function listDueSales(now: number): Promise<QueueResult<QueuedSale[]>> {
+export async function listDueSales(
+  now: number,
+  /**
+   * Feature 24.5F — a manual press may skip a pending backoff, and nothing else
+   * may. Defaults to false so every automatic caller keeps the old behaviour
+   * without knowing this parameter exists.
+   */
+  options: { ignoreBackoff?: boolean } = {}
+): Promise<QueueResult<QueuedSale[]>> {
   const listing = await listQueuedSales();
+  const due = options.ignoreBackoff === true
+    ? (sale: QueuedSale) => isManuallyRetryable(sale)
+    : (sale: QueuedSale) => isDueForAttempt(sale, now);
 
-  return listing.ok
-    ? { ok: true, value: listing.value.sales.filter((sale) => isDueForAttempt(sale, now)) }
-    : listing;
+  return listing.ok ? { ok: true, value: listing.value.sales.filter(due) } : listing;
 }
 
 /**

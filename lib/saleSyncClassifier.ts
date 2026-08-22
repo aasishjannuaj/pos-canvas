@@ -127,6 +127,17 @@ export type SubmissionFailure = {
   /** What lib/deviceConnectivity.ts made of the transport. */
   transport: "transport" | "server_rejected" | "unknown";
   message: string | null;
+  /**
+   * Feature 24.5F — THIS DEVICE stopped waiting. Set only by the submission
+   * adapter's own timer (lib/offlineSaleRpc.ts) and never inferred from text.
+   *
+   * A flag rather than a fourth `transport` value because it does not describe
+   * the transport at all: it says nothing about whether the request arrived,
+   * which is precisely the point. `transport` is already "unknown" alongside it;
+   * this only records WHY it is unknown, so a timed-out attempt can be told apart
+   * from a genuinely unreadable answer in a queue record and in a log.
+   */
+  timedOut?: boolean;
 };
 
 /**
@@ -147,6 +158,23 @@ export function classifySubmissionFailure(
   failure: SubmissionFailure,
   attemptCount: number
 ): SyncOutcome {
+  // FEATURE 24.5F — OUR OWN TIMEOUT, CHECKED FIRST AND ON ITS OWN FLAG.
+  //
+  // Deliberately ahead of every other branch, including the message table, so no
+  // future edit to KNOWN_SERVER_ERRORS can reroute it. A timeout is an UNKNOWN
+  // OUTCOME: the sale may be committed on the server with the response lost, or
+  // may never have arrived. Retrying under the SAME persisted saleRequestId is
+  // exactly what resolves that — complete_sale_v4 replays the existing order if
+  // there is one and creates exactly one if there is not.
+  //
+  // Note what it is NOT: not `transport`, which would assert the request never
+  // reached the server and is the evidence the offline-mode switch runs on.
+  if (failure.timedOut === true) {
+    return attemptCount >= SYNC_MAX_ATTEMPTS
+      ? { outcome: "needs_attention", code: "timeout_attempts_exhausted" }
+      : { outcome: "retry", code: "sale_timeout" };
+  }
+
   if (failure.transport === "transport") {
     return attemptCount >= SYNC_MAX_ATTEMPTS
       ? { outcome: "needs_attention", code: "transport_attempts_exhausted" }
