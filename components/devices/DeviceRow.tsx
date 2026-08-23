@@ -55,14 +55,23 @@ export default function DeviceRow({ device, onRevoke, isBusy }: DeviceRowProps) 
         <p className="mt-1 text-xs text-neutral-500">
           {formatDevicePlatform(device.platform)} · Paired{" "}
           {formatDeviceDate(device.createdAt)}
-          {!active && device.revokedAt !== null && (
+          {device.status === "revoked" && device.revokedAt !== null && (
             <> · Revoked {formatDeviceDate(device.revokedAt)}</>
+          )}
+          {/* Feature 25.1 — the device removed itself. Shown, not hidden: an
+              owner should see that a till was taken out of service and when.
+              Reachable only when status is `unpaired`, so a revoked device that
+              had also unpaired still reads as Revoked. */}
+          {device.status === "unpaired" && device.unpairedAt !== null && (
+            <> · Unpaired {formatDeviceDate(device.unpairedAt)}</>
           )}
         </p>
       </div>
 
-      {/* A revoked device has no action: revocation is terminal in the current
-          backend, so there is nothing here to offer. */}
+      {/* Neither a revoked nor an unpaired device has an action. Revocation is
+          terminal, and a device that already removed itself has nothing left to
+          cut off — offering Revoke there would change a financial boundary for
+          no reason. */}
       {active && (
         <button
           type="button"

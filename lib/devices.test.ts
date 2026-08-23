@@ -35,6 +35,7 @@ describe("mapPairedDeviceRow", () => {
       createdAt: "2026-08-03T12:00:00.000Z",
       lastSeenAt: null,
       revokedAt: null,
+      unpairedAt: null,
     });
   });
 
@@ -78,6 +79,7 @@ describe("mapPairedDeviceRow", () => {
       "projectId",
       "revokedAt",
       "status",
+      "unpairedAt",
     ]);
     expect(device).not.toHaveProperty("authUserId");
     expect(device).not.toHaveProperty("ownerId");
@@ -103,5 +105,82 @@ describe("display helpers", () => {
     expect(getPairedDeviceDisplayName(named)).toBe("Front Till");
     expect(getPairedDeviceDisplayName(unnamed)).toBe("Unnamed android device");
     expect(getPairedDeviceDisplayName(bare)).toBe("Unnamed device");
+  });
+});
+
+describe("the three-state device lifecycle (Feature 25.1)", () => {
+  /** mapPairedDeviceRow is nullable; every row below is valid by construction. */
+  function mapped(overrides: Partial<PairedDeviceRow> = {}): PairedDeviceSummary {
+    const device = mapPairedDeviceRow(makeRow(overrides));
+
+    if (device === null) {
+      throw new Error("fixture row failed to map");
+    }
+
+    return device;
+  }
+
+  it("maps Active when neither timestamp is set", () => {
+    expect(mapped({ unpaired_at: null }).status).toBe("active");
+  });
+
+  it("maps Unpaired when the device removed itself", () => {
+    const device = mapped({ unpaired_at: "2026-08-23T12:00:00.000Z" });
+
+    expect(device.status).toBe("unpaired");
+    expect(device.unpairedAt).toBe("2026-08-23T12:00:00.000Z");
+    expect(device.revokedAt).toBeNull();
+  });
+
+  it("maps Revoked when the owner cut it off", () => {
+    expect(mapped({ revoked_at: "2026-08-23T13:00:00.000Z" }).status).toBe("revoked");
+  });
+
+  it("REVOKED WINS if both timestamps somehow exist", () => {
+    // The owner made the stronger statement, and it is the one with financial
+    // consequences — a device that unpaired and was then revoked must not read
+    // as merely Unpaired.
+    expect(
+      mapped({
+        revoked_at: "2026-08-23T13:00:00.000Z",
+        unpaired_at: "2026-08-23T12:00:00.000Z",
+      }).status
+    ).toBe("revoked");
+  });
+
+  it("reads Active when the column is absent entirely", () => {
+    // A query written before this column existed omits it, and `undefined` must
+    // not read as "unpaired" — that would relabel every device in the list.
+    expect(mapped().status).toBe("active");
+  });
+
+  it("re-pairing leaves the old row Unpaired and the new row Active", () => {
+    const oldRow = mapped({
+      id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+      unpaired_at: "2026-08-23T12:00:00.000Z",
+    });
+    const newRow = mapped({
+      id: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+      created_at: "2026-08-23T12:05:00.000Z",
+      unpaired_at: null,
+    });
+
+    // The owner list must never show two Active rows for one physical device.
+    expect(oldRow.status).toBe("unpaired");
+    expect(newRow.status).toBe("active");
+    expect([oldRow, newRow].filter((d) => d.status === "active")).toHaveLength(1);
+  });
+
+  it("labels all three states for an owner", () => {
+    expect(getPairedDeviceStatusLabel("active")).toBe("Active");
+    expect(getPairedDeviceStatusLabel("unpaired")).toBe("Unpaired");
+    expect(getPairedDeviceStatusLabel("revoked")).toBe("Revoked");
+  });
+
+  it("treats only Active as active, so no Revoke action is offered otherwise", () => {
+    // DeviceRow gates its Revoke button on isPairedDeviceActive.
+    expect(isPairedDeviceActive(mapped({ unpaired_at: "2026-08-23T12:00:00.000Z" }))).toBe(false);
+    expect(isPairedDeviceActive(mapped({ revoked_at: "2026-08-23T13:00:00.000Z" }))).toBe(false);
+    expect(isPairedDeviceActive(mapped())).toBe(true);
   });
 });

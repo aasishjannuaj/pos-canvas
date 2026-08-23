@@ -1060,7 +1060,14 @@ describe("24.5E changed nothing it was not meant to", () => {
       file.endsWith(".sql")
     );
 
-    expect(migrations).toHaveLength(17);
+    // NARROWED BY 25.1. This pinned the GLOBAL migration count, which made it a
+    // tripwire for every future feature rather than a statement about this
+    // phase. Timestamps sort, so the honest assertion is that nothing was added
+    // at or before this phase's boundary — a later migration is somebody else's
+    // business, and deleting or renaming one of these still fails.
+    const OWNED_THROUGH = "20260819120000";
+
+    expect(migrations.filter((file) => file.slice(0, 14) <= OWNED_THROUGH)).toHaveLength(17);
     expect(migrations).toContain("20260819120000_offline_sale_contract_and_complete_sale_v4.sql");
   });
 

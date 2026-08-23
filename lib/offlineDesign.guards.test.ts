@@ -252,9 +252,38 @@ describe("Feature 24.4 changed no schema, RPC or migration", () => {
       readFileSync(join(migrationsDir, name), "utf-8").includes("complete_sale_v4")
     );
 
-    expect(carriers).toEqual([
-      "20260819120000_offline_sale_contract_and_complete_sale_v4.sql",
-    ]);
+    // NARROWED BY 25.1, which redefines complete_sale_v4 to add the
+    // active-pairing rule — approved work, so a fence forbidding any second
+    // carrier would again only be satisfiable by not doing it.
+    //
+    // What still protects production is that 24.5B REMAINS the file that created
+    // the contract, and that any later carrier preserves the revocation window
+    // verbatim. A migration that redefined v4 with a different boundary would
+    // fail here, which is the property that actually matters.
+    expect(carriers[0]).toBe(
+      "20260819120000_offline_sale_contract_and_complete_sale_v4.sql"
+    );
+
+    const WINDOW = "if v_occurred_at >= v_device_revoked_at then";
+
+    for (const carrier of carriers) {
+      const body = readFileSync(join(migrationsDir, carrier), "utf-8");
+
+      if (!body.includes("create or replace function public.complete_sale_v4")) continue;
+
+      expect(`${carrier} keeps the revocation window`).toBe(
+        `${carrier} keeps the revocation window`
+      );
+      expect(body).toContain(WINDOW);
+      // And compares occurred_at against NOTHING ELSE. Asserted as "every match
+      // is the revoked_at form" rather than as an exact list: 24.5B states the
+      // comparison in both the function and its verification block, and the
+      // property that matters is that no OTHER timestamp ever appears here.
+      const comparisons = body.match(/v_occurred_at\s*>=\s*v_device_\w+/g) ?? [];
+
+      expect(comparisons.length).toBeGreaterThan(0);
+      expect([...new Set(comparisons)]).toEqual(["v_occurred_at >= v_device_revoked_at"]);
+    }
 
     // v3's own migration is untouched by the new contract.
     const v3Migration = readFileSync(

@@ -130,7 +130,16 @@ export function createDeviceError(kind: DeviceErrorKind): DeviceState {
 // ---------------------------------------------------------------------------
 
 export type PairingStateResult =
-  | { paired: false; reason: "not_authenticated" | "not_paired" }
+  /**
+   * Feature 25.1 — `unpaired` is distinct from `not_paired` on purpose.
+   *
+   * Both send the operator to the pairing screen, but only `unpaired` means a
+   * STALE LOCAL SESSION is still on this device. The client has to clear it:
+   * redeem_device_pairing_token keys on auth_user_id, so re-pairing under the
+   * old anonymous user would find the old row and answer `already_paired`,
+   * leaving the till unable to pair again.
+   */
+  | { paired: false; reason: "not_authenticated" | "not_paired" | "unpaired" }
   | { paired: true; pairing: DevicePairing; active: boolean }
   | { paired: false; reason: "unreadable" };
 
@@ -156,7 +165,12 @@ export function parsePairingState(value: unknown): PairingStateResult {
   if (raw.paired === false) {
     return {
       paired: false,
-      reason: raw.reason === "not_authenticated" ? "not_authenticated" : "not_paired",
+      reason:
+        raw.reason === "not_authenticated"
+          ? "not_authenticated"
+          : raw.reason === "unpaired"
+            ? "unpaired"
+            : "not_paired",
     };
   }
 
@@ -205,7 +219,11 @@ export function decidePairingState(result: PairingStateResult): DeviceState {
       : { status: "revoked", pairing: result.pairing };
   }
 
-  if (result.reason === "not_paired") {
+  // Feature 25.1 — the same screen for both. A device that removed itself and a
+  // device that was never paired are in the same place from here: they need a
+  // pairing code. What differs is the session cleanup the caller performs, which
+  // is a side effect and not a screen.
+  if (result.reason === "not_paired" || result.reason === "unpaired") {
     return { status: "unpaired", notice: null };
   }
 

@@ -189,13 +189,29 @@ describe("a server that answered is never overridden by cache", () => {
     expect(app).toContain("clearOfflineCache()");
   });
 
-  it("a local reset clears the cache before signing out", () => {
+  it("every reset clears the cache before signing out", () => {
+    // NARROWED BY 25.1, which added a second reset path (the voluntary unpair
+    // from Device settings). The original indexOf pair compared the FIRST
+    // clearOfflineCache in the file against the FIRST resetDeviceSession, which
+    // silently stops meaning anything once two functions each do both. Checked
+    // per function now, so a new reset path cannot inherit a passing assertion
+    // it never satisfied.
     const app = code(read(DEVICE_APP));
-    const clear = app.indexOf("await clearOfflineCache();");
-    const signOut = app.indexOf("await resetDeviceSession();");
+    const resets = ["async function handleUnpair()", "async function handleReset()"];
 
-    expect(clear).toBeGreaterThan(-1);
-    expect(signOut).toBeGreaterThan(clear);
+    for (const fn of resets) {
+      const start = app.indexOf(fn);
+
+      expect(`${fn} exists`).toBe(`${fn} exists`);
+      expect(start).toBeGreaterThan(-1);
+
+      const body = app.slice(start, start + 2_000);
+      const clear = body.indexOf("await clearOfflineCache();");
+      const signOut = body.indexOf("await resetDeviceSession();");
+
+      expect(clear).toBeGreaterThan(-1);
+      expect(signOut).toBeGreaterThan(clear);
+    }
   });
 
   it("the lease is never refreshed by a read", () => {
@@ -335,7 +351,10 @@ describe("Feature 24.5A stops at read-only startup", () => {
       .filter((f) => f.endsWith(".sql"))
       .filter((f) => readFileSync(join(migrationsDir, f), "utf-8").includes("complete_sale_v4"));
 
-    expect(withV4).toHaveLength(1);
+    // NARROWED BY 25.1, which redefines v4 for the active-pairing rule. The
+    // count was a proxy for "the contract has one home"; the property that
+    // survives is that 24.5B is still where it was created.
+    expect(withV4[0]).toBe("20260819120000_offline_sale_contract_and_complete_sale_v4.sql");
 
     // NARROWED AGAIN BY 24.5D. The queue records `occurredAt`/`offline_queued`,
     // and the sync adapter now issues v4 — both are the approved work. The

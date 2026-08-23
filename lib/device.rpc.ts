@@ -243,6 +243,56 @@ export async function signInDeviceAnonymously(): Promise<DeviceSessionResult> {
  * This is a LOCAL RESET, not a revocation — the paired_devices row is
  * untouched and the device stays listed (and revocable) for its owner.
  */
+export type UnpairOwnDeviceResult =
+  | { ok: true }
+  /**
+   * The server did not confirm. `retryable` separates "we could not reach it"
+   * from "it refused": only the first is worth pressing again, and neither may
+   * clear local pairing — an unconfirmed unpair that wiped the device would
+   * leave exactly the ghost Active row this feature exists to prevent.
+   */
+  | { ok: false; retryable: boolean; message: string };
+
+export const UNPAIR_UNREACHABLE_MESSAGE =
+  "This device could not reach POS Canvas to unpair. Check the connection and try again.";
+
+export const UNPAIR_REFUSED_MESSAGE =
+  "POS Canvas could not unpair this device. Try again, or remove it from the owner dashboard.";
+
+/**
+ * Feature 25.1 — tells the server this device has removed itself.
+ *
+ * IDEMPOTENT ON BOTH SIDES. unpair_own_device coalesces the timestamp, so a
+ * retry after a lost response is safe and reports the original instant. That is
+ * what lets the caller treat an unreachable server as "try again" rather than as
+ * an ambiguous state it has to reason about.
+ *
+ * NOT REVOCATION. This sets unpaired_at only. revoked_at and revoked_by are
+ * left alone, and so is every rule the offline sale contract derives from them —
+ * this module deliberately names no sale RPC at all.
+ */
+export async function unpairOwnDevice(): Promise<UnpairOwnDeviceResult> {
+  try {
+    const { error } = await getDeviceSupabaseClient().rpc("unpair_own_device");
+
+    if (error) {
+      // A transport failure is worth retrying; an answer from the server is not
+      // going to change on the next press.
+      const kind = classifyDeviceFailure(error);
+
+      return kind === "transport"
+        ? { ok: false, retryable: true, message: UNPAIR_UNREACHABLE_MESSAGE }
+        : { ok: false, retryable: false, message: UNPAIR_REFUSED_MESSAGE };
+    }
+
+    return { ok: true };
+  } catch (thrown) {
+    return classifyDeviceFailure(thrown) === "transport"
+      ? { ok: false, retryable: true, message: UNPAIR_UNREACHABLE_MESSAGE }
+      : { ok: false, retryable: false, message: UNPAIR_REFUSED_MESSAGE };
+  }
+}
+
 export async function resetDeviceSession(): Promise<void> {
   try {
     await getDeviceSupabaseClient().auth.signOut({ scope: "local" });

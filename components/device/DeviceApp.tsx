@@ -35,6 +35,7 @@ import {
   readPersistedDeviceUserId,
   redeemDevicePairingCode,
   resetDeviceSession,
+  unpairOwnDevice,
   signInDeviceAnonymously,
 } from "@/lib/device.rpc";
 import {
@@ -72,6 +73,7 @@ import {
 } from "@/lib/offlineCheckoutSession";
 import { decideDeviceResetSafety } from "@/lib/offlineSaleStatus";
 import RejectedSaleReview from "@/components/device/RejectedSaleReview";
+import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import {
   discardRejectedSale,
   listRejectedSaleReviews,
@@ -155,6 +157,13 @@ export default function DeviceApp() {
    * POS: this screen replaces the status screen for as long as it is open, and
    * closing it returns to exactly the state that was there before.
    */
+  /**
+   * Feature 25.1 — device settings, open or closed.
+   *
+   * Held here rather than routed for the same reason the review screen is: a
+   * till has no router, and this replaces the POS for as long as it is open.
+   */
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [reviews, setReviews] = useState<RejectedSale[]>([]);
 
@@ -382,6 +391,24 @@ export default function DeviceApp() {
         if (next.status === "revoked") {
           void clearOfflineCache();
         }
+
+        // Feature 25.1 — CRASH RECOVERY. unpair_own_device committed and the
+        // app died before the local session was cleared. Without this the
+        // stale anonymous user survives, and re-pairing under it would find
+        // the old row and be told `already_paired` — a till that could never
+        // pair again. Clearing here makes the next pairing a fresh identity.
+        //
+        // Keyed on the server's own `unpaired` reason, never on the screen:
+        // `not_paired` reaches the same screen and must NOT clear a session
+        // that was never associated with a pairing at all.
+        if (
+          pairingState.state.paired === false &&
+          pairingState.state.reason === "unpaired"
+        ) {
+          void clearOfflineCache();
+          await resetDeviceSession();
+        }
+
 
         readyPairingRef.current = null;
         setState(next);
@@ -1000,6 +1027,69 @@ export default function DeviceApp() {
   }
 
   /**
+   * Feature 25.1 — the VOLUNTARY unpair, from Device settings on a working till.
+   *
+   * SERVER FIRST, AND NOT BEST-EFFORT. The whole point of this path is that the
+   * owner's device list stops showing the tablet as Active, so a local reset
+   * that ran without the server's confirmation would recreate the exact ghost
+   * row this feature exists to remove. If unpair_own_device does not succeed,
+   * nothing local is cleared and the operator stays on this screen with a
+   * message they can act on.
+   *
+   * IT SHARES ONE SAFETY DECISION with handleReset and adds none of its own: the
+   * same durable re-read, the same decideDeviceResetSafety, the same refusal.
+   * What differs is only what happens AFTER the decision says yes.
+   *
+   * Deliberately separate from handleReset rather than a flag on it, because the
+   * emergency screens must keep working with no server at all — see the note on
+   * handleReset below.
+   */
+  async function handleUnpair() {
+    setResetNotice(null);
+
+    // 1. The existing durable read and the existing decision. Unchanged.
+    const status = await readOfflineSaleStatus();
+    const safety = decideDeviceResetSafety(status);
+
+    setSaleStatus(status);
+
+    if (!safety.allowed) {
+      setResetNotice(safety.message);
+      return;
+    }
+
+    // 2. Tell the server. Idempotent, so a retry after a lost answer is safe.
+    const unpaired = await unpairOwnDevice();
+
+    if (!unpaired.ok) {
+      setResetNotice(unpaired.message);
+      return;
+    }
+
+    // 3. Only now is anything local touched.
+    setSettingsOpen(false);
+    await clearOfflineCache();
+    await resetDeviceSession();
+    readyPairingRef.current = null;
+    offlineDraftRef.current = null;
+    setPairingError(null);
+    setState({ status: "unpaired", notice: null });
+    await resolveDeviceState();
+  }
+
+  /**
+   * Feature 25.1 — the EMERGENCY reset, deliberately unchanged.
+   *
+   * Reached from `revoked`, `config_unavailable` and `reconnect_required` — the
+   * screens a till lands on when something is already wrong, often including the
+   * network. It stays local-only on purpose: requiring a server round trip here
+   * would mean a device that cannot reach POS Canvas can never be recovered,
+   * which is a worse failure than a stale row an owner can revoke.
+   *
+   * The cost is that these three paths can still leave a row reading Active. For
+   * `revoked` it cannot — the row already reads Revoked. For the other two it is
+   * a rare recovery case, and the owner's Revoke action remains the answer.
+   *
    * Feature 24.5E — reset, REFUSED while this device holds unsynced sales.
    *
    * APPROVED RULE (owner, 24.4 review, docs/OFFLINE_ARCHITECTURE.md §15). The
@@ -1030,6 +1120,12 @@ export default function DeviceApp() {
     // reset. Clearing it here is what guarantees Business A's menu cannot
     // appear on this device after it is paired to Business B; the auth-user
     // check in decideOfflineFallback is the second, independent barrier.
+    // Feature 25.1 — leave settings behind on the way out, so a device that is
+    // later re-paired opens on the POS rather than on the screen it was unpaired
+    // from. Placed after the safety check: a REFUSED reset must leave the screen
+    // exactly where it was, with its notice on display.
+    setSettingsOpen(false);
+
     await clearOfflineCache();
     await resetDeviceSession();
     readyPairingRef.current = null;
@@ -1458,6 +1554,24 @@ export default function DeviceApp() {
         );
       }
 
+      // Feature 25.1 — settings REPLACE the POS while open, exactly as the
+      // review screen does. onUnpair is handleReset itself: this branch adds an
+      // entry point and no second safety decision.
+      if (settingsOpen) {
+        return (
+          <DeviceSettingsScreen
+            pairing={state.pairing}
+            onUnpair={() => void handleUnpair()}
+            notice={resetNotice}
+            unpairBlocked={resetBlocked}
+            onClose={() => {
+              setResetNotice(null);
+              setSettingsOpen(false);
+            }}
+          />
+        );
+      }
+
       const offline = state.offline ?? null;
       const offlineMode = getDeviceRuntimeMode(state) === "offline";
 
@@ -1526,6 +1640,22 @@ export default function DeviceApp() {
           refreshStock={null}
           // A till has nowhere to go back to.
           homeLink={null}
+          // Feature 25.1 — the ONLY entry point to device settings on a healthy
+          // till. In the header rather than beside checkout: unpairing is an
+          // occasional administrative act, and a destructive control next to the
+          // pay button is a control that eventually gets pressed by accident.
+          headerTrailing={
+            <button
+              type="button"
+              onClick={() => {
+                setResetNotice(null);
+                setSettingsOpen(true);
+              }}
+              className="flex-none rounded-full border border-white/30 px-3 py-1 text-xs font-medium text-white/90 transition-colors hover:border-white/60 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              Device settings
+            </button>
+          }
           // Feature 19 — the logo origin. A device reads its logo from the
           // PINNED snapshot's path, so replacing the owner's logo later cannot
           // change what this till displays. Public bucket: no signing, and no

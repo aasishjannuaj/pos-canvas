@@ -206,6 +206,13 @@ export function describeRejectedSaleReason(lastErrorCode: string | null): string
     return "This sale was created after this device had already been revoked and POS Canvas did not create a server order for it.";
   }
 
+  // Feature 25.1 — the pairing was already removed from this device. Worded so
+  // an operator understands the sale was not recorded and why, without implying
+  // the owner cut them off — nobody did; this device unpaired itself.
+  if (lastErrorCode === "device_unpaired") {
+    return "This device had already been unpaired from POS Canvas, so this sale was not recorded.";
+  }
+
   // The three no-answer codes. Worded as an unfinished job rather than a
   // failure, because that is what it is: nobody has said no, this device simply
   // stopped waiting. The operator's next move is to try again once the

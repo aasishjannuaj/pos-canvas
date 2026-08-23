@@ -239,6 +239,7 @@ describe("paired device mapping feeding the list", () => {
       "projectId",
       "revokedAt",
       "status",
+      "unpairedAt",
     ]);
     expect(device).not.toHaveProperty("auth_user_id");
     expect(device).not.toHaveProperty("owner_id");

@@ -203,7 +203,7 @@ export async function getProjectPairedDevices(projectId: string): Promise<{
   const { data, error } = await supabase
     .from("paired_devices")
     .select(
-      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at"
+      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at, unpaired_at"
     )
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });

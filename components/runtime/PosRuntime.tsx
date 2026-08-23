@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import Link from "next/link";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
 import { CURRENCY_SYMBOLS } from "@/lib/projectConfig";
@@ -76,6 +76,19 @@ type PosRuntimeProps = {
 
   // null = render no exit link (a till has nowhere to go back to).
   homeLink: PosRuntimeHomeLink | null;
+
+  /**
+   * Feature 25.1 — an optional host affordance for the header's trailing slot.
+   *
+   * USED ONLY WHEN THERE IS NO homeLink, which keeps Feature 16.4A's rule
+   * intact: a till still has nowhere to go back to and still must not offer a
+   * route into the owner app. This is the opposite direction — a device-owned
+   * control (Device settings) the owner runtime never passes.
+   *
+   * PosRuntime renders it and knows nothing else about it, so no unpair or reset
+   * logic enters this component.
+   */
+  headerTrailing?: ReactNode;
 
   // Feature 19 — the origin a stored logo path resolves against, supplied by
   // the host so this component never names Supabase. null = no logo rendering.
@@ -155,6 +168,7 @@ export default function PosRuntime({
   submitSale,
   refreshStock,
   homeLink,
+  headerTrailing,
   logoBaseUrl,
   onSaleRejected,
   checkoutBlockedReason = null,
@@ -779,7 +793,12 @@ export default function PosRuntime({
             >
               {homeLink.label}
             </Link>
-          ) : undefined
+          ) : (
+            // Feature 25.1 — the device's own affordance. Never rendered
+            // alongside a homeLink: an owner runtime has a way back, a till has
+            // settings, and neither surface gets both.
+            headerTrailing ?? undefined
+          )
         }
       />
 

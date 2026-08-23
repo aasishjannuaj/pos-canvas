@@ -92,6 +92,15 @@ export const KNOWN_SERVER_ERRORS: Readonly<Record<string, string>> = {
 
   // Authorization — the device is no longer allowed to record this.
   "Offline sale occurred after this device was revoked": "post_revocation",
+  // Feature 25.1 — the device removed itself, and the server refused a NEW sale
+  // because of it. A DEFINITE business answer, so needs_attention rather than a
+  // retry: sending it again gets the same reply, and the pairing is gone.
+  //
+  // Deliberately its own code and NOT post_revocation. They look similar and
+  // mean different things: post_revocation is the owner cutting a till off,
+  // which is why it earns the temporal window and the local discard flow. This
+  // one has neither, and must never inherit either by sharing a code.
+  "This device is no longer paired": "device_unpaired",
   "Only a paired device can record an offline sale": "not_a_paired_device",
   "Project not found or access denied": "not_authorized",
   "This device is not linked to a usable build": "build_unavailable",
