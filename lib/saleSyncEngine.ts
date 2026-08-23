@@ -32,18 +32,24 @@ export type SyncDeps = {
   submit: (record: QueuedSale) => Promise<OfflineSaleSubmission>;
   now: () => number;
   /**
-   * Feature 24.5F — set ONLY by the manual trigger. A person pressing Sync now
-   * may retry a pending record whose backoff has not elapsed; nothing automatic
-   * may. It never relaxes the state check, so a live `syncing` claim is
-   * untouchable either way.
+   * Feature 24.5F — was this run asked for by a PERSON?
+   *
+   * ONE FLAG, TWO CONSEQUENCES, because both follow from the same fact. A manual
+   * run may retry a pending record whose backoff has not elapsed, and a manual
+   * attempt may not be the one that exhausts the retry budget. Keeping them on
+   * separate flags would let them drift apart, and the second exists precisely
+   * because the first removed the only thing that was rate-limiting attempts.
+   *
+   * It never relaxes the STATE check, so a live `syncing` claim is untouchable
+   * either way, and it never softens a server's answer.
    */
-  ignoreBackoff: boolean;
+  manual: boolean;
 };
 
 const defaultDeps: SyncDeps = {
   submit: submitQueuedSale,
   now: () => Date.now(),
-  ignoreBackoff: false,
+  manual: false,
 };
 
 export type SyncedOutcome = {
@@ -189,7 +195,7 @@ async function drain(deps: SyncDeps): Promise<SyncRunReport> {
   // Reclaiming orphans is a STARTUP concern, so it lives on the startup
   // trigger. Within a drain, the only thing that may move a record out of
   // `pending` is the claim below.
-  const due = await listDueSales(deps.now(), { ignoreBackoff: deps.ignoreBackoff });
+  const due = await listDueSales(deps.now(), { ignoreBackoff: deps.manual });
 
   if (!due.ok) {
     return report;
@@ -293,7 +299,9 @@ async function syncOne(record: QueuedSale, deps: SyncDeps): Promise<SyncedOutcom
         };
   }
 
-  const decision = classifySubmissionFailure(submission.failure, attemptCount);
+  const decision = classifySubmissionFailure(submission.failure, attemptCount, {
+    manual: deps.manual,
+  });
   const finishedAt = new Date(deps.now()).toISOString();
 
   if (decision.outcome === "retry") {
@@ -365,7 +373,7 @@ export async function triggerSaleSync(
   // A MANUAL PRESS IS THE ONLY TRIGGER ALLOWED TO SKIP A BACKOFF, and it is
   // still only allowed to skip it for PENDING rows. An explicit `deps` value
   // from a caller wins, so a test can drive either behaviour.
-  return runSaleSync({ ignoreBackoff: trigger === "manual", ...deps });
+  return runSaleSync({ manual: trigger === "manual", ...deps });
 }
 
 /**

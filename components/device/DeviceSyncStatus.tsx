@@ -27,12 +27,23 @@ type DeviceSyncStatusProps = {
    * teaches operators to distrust the UI.
    */
   onSyncNow: (() => void) | null;
+  /**
+   * Feature 24.5F — opens the unresolved-sale review.
+   *
+   * Null hides it. A sale that needs attention must be REACHABLE from the
+   * screen that reports it: Windows hardware found a paired, working till whose
+   * only sign of an unresolved sale was this strip, with no control anywhere
+   * that could act on it — and reset could not clear it either, because that
+   * sale was what blocked reset.
+   */
+  onReview?: (() => void) | null;
 };
 
 export default function DeviceSyncStatus({
   status,
   syncing,
   onSyncNow,
+  onReview = null,
 }: DeviceSyncStatusProps) {
   const lines = describeOfflineSaleStatus(status);
 
@@ -58,6 +69,16 @@ export default function DeviceSyncStatus({
       ))}
 
       {syncing && <span className="text-neutral-500">Syncing…</span>}
+
+      {onReview !== null && (
+        <button
+          type="button"
+          onClick={onReview}
+          className="rounded-full border border-current px-2.5 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
+        >
+          {status.needsAttention === 1 ? "Review sale" : "Review sales"}
+        </button>
+      )}
 
       {onSyncNow !== null && !syncing && (
         <button

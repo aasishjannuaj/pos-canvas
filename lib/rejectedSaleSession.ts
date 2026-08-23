@@ -16,15 +16,22 @@ import { buildProvisionalReceipt } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 import { readPinnedConfig } from "@/lib/deviceOfflineCache";
 import { openOfflineDb, readPinnedConfigRecord } from "@/lib/deviceOfflineStore";
-import { getQueuedSale, listQueuedSales, updateQueueState } from "@/lib/saleQueueSession";
+import {
+  getQueuedSale,
+  listQueuedSales,
+  startOperatorRetry,
+  updateQueueState,
+} from "@/lib/saleQueueSession";
 import type { QueuedSale } from "@/lib/saleQueue";
 import { readUncertainSale } from "@/lib/uncertainSaleSession";
 import {
   decideRejectedSaleDiscardSafety,
+  decideRejectedSaleRetrySafety,
   describeRejectedSaleReason,
 } from "@/lib/rejectedSaleResolution";
 import type {
   RejectedSaleDiscardRefusal,
+  RejectedSaleRetryRefusal,
   UncertainSaleEvidence,
 } from "@/lib/rejectedSaleResolution";
 
@@ -42,6 +49,7 @@ export type RejectedSaleReview = {
   receipt: ProvisionalReceipt | null;
   reason: string;
   discard: { allowed: true } | { allowed: false; reason: RejectedSaleDiscardRefusal };
+  retry: { allowed: true } | { allowed: false; reason: RejectedSaleRetryRefusal };
 };
 
 export type RejectedSaleReviewResult =
@@ -132,6 +140,7 @@ export async function readRejectedSaleReview(
       receipt: await rebuildReceipt(record),
       reason: describeRejectedSaleReason(record.lastErrorCode),
       discard: decideRejectedSaleDiscardSafety({ record, uncertain }),
+      retry: decideRejectedSaleRetrySafety({ record, uncertain }),
     },
   };
 }
@@ -215,8 +224,52 @@ export async function listRejectedSaleReviews(): Promise<RejectedSaleReview[]> {
       receipt: await rebuildReceipt(record),
       reason: describeRejectedSaleReason(record.lastErrorCode),
       discard: decideRejectedSaleDiscardSafety({ record, uncertain }),
+      retry: decideRejectedSaleRetrySafety({ record, uncertain }),
     });
   }
 
   return reviews;
+}
+
+export type RetryRejectedSaleResult =
+  | { ok: true; record: QueuedSale }
+  | { ok: false; reason: RejectedSaleRetryRefusal | "not_found" | "storage_unavailable" };
+
+/**
+ * Starts a fresh sync cycle for a sale that gave up. THE ONLY OPERATOR RETRY.
+ *
+ * Re-reads the record and the uncertainty evidence from storage and re-runs the
+ * policy before writing anything, so a record that changed while the review was
+ * on screen is refused by the same rule that offered the button — a stale React
+ * render cannot talk this into acting.
+ *
+ * DOES NOT SUBMIT. It returns the record to `pending` with a clean budget and
+ * leaves the existing engine to do what it already does; there is no second
+ * submission path, and nothing here touches complete_sale_v4. The caller
+ * triggers a manual drain afterwards.
+ */
+export async function retryRejectedSale(
+  queueRecordId: string
+): Promise<RetryRejectedSaleResult> {
+  const stored = await getQueuedSale(queueRecordId);
+
+  if (!stored.ok) {
+    return { ok: false, reason: stored.reason === "not_found" ? "not_found" : "storage_unavailable" };
+  }
+
+  const record = stored.value;
+  const safety = decideRejectedSaleRetrySafety({
+    record,
+    uncertain: await readUncertainEvidence(record),
+  });
+
+  if (!safety.allowed) {
+    return { ok: false, reason: safety.reason };
+  }
+
+  const moved = await startOperatorRetry(queueRecordId, new Date().toISOString());
+
+  return moved.ok
+    ? { ok: true, record: moved.value }
+    : { ok: false, reason: "storage_unavailable" };
 }

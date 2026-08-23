@@ -75,9 +75,13 @@ import RejectedSaleReview from "@/components/device/RejectedSaleReview";
 import {
   discardRejectedSale,
   listRejectedSaleReviews,
+  retryRejectedSale,
 } from "@/lib/rejectedSaleSession";
 import type { RejectedSaleReview as RejectedSale } from "@/lib/rejectedSaleSession";
-import { DISCARD_REJECTED_SALE_REFUSALS } from "@/lib/rejectedSaleResolution";
+import {
+  DISCARD_REJECTED_SALE_REFUSALS,
+  RETRY_REJECTED_SALE_REFUSALS,
+} from "@/lib/rejectedSaleResolution";
 import type { OfflineSaleStatus } from "@/lib/offlineSaleStatus";
 import {
   subscribeToReconnect,
@@ -924,6 +928,45 @@ export default function DeviceApp() {
   }
 
   /**
+   * Feature 24.5F — starts a fresh sync cycle for a sale that gave up.
+   *
+   * The policy is not re-implemented here. retryRejectedSale re-reads the record
+   * and re-runs decideRejectedSaleRetrySafety against durable storage, so a
+   * record that changed while the review was open is refused by the same rule
+   * that offered the button.
+   *
+   * The DRAIN is triggered from here rather than from the session layer, so the
+   * one place that knows about triggers stays the one place that fires them —
+   * and it goes through runSync("manual"), which is exactly what a person
+   * pressing a button means.
+   */
+  async function handleRetry(queueRecordId: string): Promise<string | null> {
+    const result = await retryRejectedSale(queueRecordId);
+
+    if (!result.ok) {
+      setSaleStatus(await readOfflineSaleStatus());
+      setReviews(await listRejectedSaleReviews());
+
+      if (result.reason === "not_found") {
+        return "This sale is no longer on this device.";
+      }
+
+      if (result.reason === "storage_unavailable") {
+        return "This device could not save that change. Try again.";
+      }
+
+      return RETRY_REJECTED_SALE_REFUSALS[result.reason];
+    }
+
+    await runSync("manual");
+
+    setSaleStatus(await readOfflineSaleStatus());
+    setReviews(await listRejectedSaleReviews());
+
+    return null;
+  }
+
+  /**
    * Feature 24.5F — resolves ONE authoritatively rejected sale, on request.
    *
    * The policy is not re-implemented here. discardRejectedSale re-reads the
@@ -1310,6 +1353,7 @@ export default function DeviceApp() {
           <RejectedSaleReview
             reviews={reviews}
             onDiscard={handleDiscard}
+            onRetry={handleRetry}
             onClose={() => setReviewing(false)}
           />
         );
@@ -1399,6 +1443,21 @@ export default function DeviceApp() {
       );
 
     case "ready": {
+      // Feature 24.5F — the review REPLACES the POS while it is open, exactly as
+      // it does on the revoked screen, and it is the SAME component. A till that
+      // is otherwise working can still be holding a sale nobody can act on, and
+      // that sale has to be reachable from the screen that reports it.
+      if (reviewing) {
+        return (
+          <RejectedSaleReview
+            reviews={reviews}
+            onDiscard={handleDiscard}
+            onRetry={handleRetry}
+            onClose={() => setReviewing(false)}
+          />
+        );
+      }
+
       const offline = state.offline ?? null;
       const offlineMode = getDeviceRuntimeMode(state) === "offline";
 
@@ -1451,6 +1510,7 @@ export default function DeviceApp() {
             status={saleStatus}
             syncing={syncing}
             onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}
+            onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : null}
           />
 
           <div className="min-h-0 flex-1">

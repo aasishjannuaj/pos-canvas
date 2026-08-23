@@ -725,3 +725,68 @@ describe("resolving a rejected sale never becomes a delete-sale feature", () => 
     );
   });
 });
+
+describe("a sale that needs attention is reachable from every screen that reports it", () => {
+  const APP_FILE = "components/device/DeviceApp.tsx";
+
+  it("the ready POS offers Review sale, not just the revoked screen", () => {
+    const app = code(read(APP_FILE));
+    // `case "ready"` is the last arm of the switch, so the slice runs to the end
+    // of the file rather than to a following case label.
+    const ready = app.slice(app.indexOf('case "ready": {'));
+
+    // Windows hardware found a paired, working till whose only sign of an
+    // unresolved sale was the banner, with no control anywhere that could act on
+    // it — and reset could not clear it either, because that sale blocked reset.
+    expect(ready).toContain("onReview={saleStatus.needsAttention > 0");
+    expect(ready).toContain("<RejectedSaleReview");
+    expect(ready).toContain("onRetry={handleRetry}");
+    expect(ready).toContain("onDiscard={handleDiscard}");
+  });
+
+  it("both screens render the SAME review component", () => {
+    const app = code(read(APP_FILE));
+
+    // Two call sites, one component. A second review implementation would drift
+    // from the policy the first one enforces.
+    expect(app.match(/<RejectedSaleReview/g)).toHaveLength(2);
+    expect(app).not.toContain("ReadyRejectedSaleReview");
+    expect(app).not.toContain("ReadySaleReview");
+  });
+
+  it("the UI never decides retry safety for itself", () => {
+    const app = code(read(APP_FILE));
+    const screen = code(read("components/device/RejectedSaleReview.tsx"));
+
+    for (const source of [app, screen]) {
+      expect(source).not.toContain("transport_attempts_exhausted");
+      expect(source).not.toContain("RETRYABLE_NEEDS_ATTENTION_CODES");
+      expect(source).not.toContain("attemptCount = 0");
+    }
+
+    expect(code(read("lib/rejectedSaleSession.ts"))).toContain(
+      "decideRejectedSaleRetrySafety({"
+    );
+  });
+
+  it("the operator retry never reaches the server itself", () => {
+    const session = code(read("lib/rejectedSaleSession.ts"));
+
+    // It returns the row to pending and lets the existing engine submit; there
+    // is no second submission path.
+    expect(session).not.toContain("complete_sale_v4");
+    expect(session).not.toContain("submitQueuedSale");
+    expect(session).not.toContain("markSynced");
+    expect(session).toContain("startOperatorRetry(");
+  });
+
+  it("a manual attempt cannot be the one that exhausts the budget", () => {
+    const classifier = code(read("lib/saleSyncClassifier.ts"));
+
+    expect(classifier).toContain("options.manual !== true");
+    // Every exhaustion branch goes through the shared guard rather than
+    // re-testing the counter, so none can be left behind by a later edit.
+    expect(classifier.match(/exhausted\s*$/gm)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(classifier).not.toContain("attemptCount >= SYNC_MAX_ATTEMPTS\n      ?");
+  });
+});

@@ -404,7 +404,7 @@ describe("a timed-out submission leaves the queue recoverable", () => {
     // never settled, so everything after this joined a dead promise.
     expect(engine.isRunning()).toBe(false);
 
-    await engine.run({ ignoreBackoff: true });
+    await engine.run({ manual: true });
 
     expect(server.submit).toHaveBeenCalledTimes(2);
     expect((await readOfflineSaleStatus()).synced).toBe(1);
@@ -419,7 +419,7 @@ describe("retrying after a timeout cannot duplicate a sale", () => {
     const engine = createSaleSyncEngine({ submit: server.submit, now: () => NOW });
 
     await engine.run();
-    await engine.run({ ignoreBackoff: true });
+    await engine.run({ manual: true });
 
     expect(server.orders.size).toBe(1);
     expect((await readOfflineSaleStatus()).synced).toBe(1);
@@ -458,7 +458,7 @@ describe("retrying after a timeout cannot duplicate a sale", () => {
     const engine = createSaleSyncEngine({ submit, now: () => NOW });
 
     await engine.run();
-    await engine.run({ ignoreBackoff: true });
+    await engine.run({ manual: true });
 
     const final = await getQueuedSale("q-1");
 
@@ -475,7 +475,7 @@ describe("retrying after a timeout cannot duplicate a sale", () => {
     const engine = createSaleSyncEngine({ submit: server.submit, now: () => NOW });
 
     for (let i = 0; i < 4; i += 1) {
-      await engine.run({ ignoreBackoff: true });
+      await engine.run({ manual: true });
     }
 
     const keys = new Set(server.submit.mock.calls.map((call) => call[0].saleRequestId));
@@ -508,7 +508,7 @@ describe("manual Sync now, backoff, and live claims", () => {
     const engine = createSaleSyncEngine({ submit: server.submit, now: () => NOW });
 
     await engine.run();
-    await engine.run({ ignoreBackoff: true });
+    await engine.run({ manual: true });
 
     expect(server.submit).toHaveBeenCalledTimes(2);
     expect((await readOfflineSaleStatus()).synced).toBe(1);
@@ -535,7 +535,7 @@ describe("manual Sync now, backoff, and live claims", () => {
     // A manual press while it is genuinely in flight must not reissue it.
     const second = createSaleSyncEngine({ submit, now: () => NOW });
 
-    await second.run({ ignoreBackoff: true });
+    await second.run({ manual: true });
 
     expect(submit).toHaveBeenCalledTimes(1);
 
@@ -552,9 +552,9 @@ describe("manual Sync now, backoff, and live claims", () => {
     const engine = createSaleSyncEngine({ submit: server.submit, now: () => NOW });
 
     await Promise.all([
-      engine.run({ ignoreBackoff: true }),
-      engine.run({ ignoreBackoff: true }),
-      engine.run({ ignoreBackoff: true }),
+      engine.run({ manual: true }),
+      engine.run({ manual: true }),
+      engine.run({ manual: true }),
     ]);
 
     expect(server.submit).toHaveBeenCalledTimes(1);
@@ -614,7 +614,7 @@ describe("a process killed mid-submission still recovers", () => {
     const server = serverWithHangs(0);
 
     await createSaleSyncEngine({ submit: server.submit, now: () => NOW }).run({
-      ignoreBackoff: true,
+      manual: true,
     });
 
     expect(server.orders.size).toBe(1);
@@ -670,7 +670,7 @@ describe("end to end: the real adapter unwedges a hung row", () => {
 
     // The press that used to join a dead promise and do nothing.
     await createSaleSyncEngine({ submit: server.submit, now: () => NOW }).run({
-      ignoreBackoff: true,
+      manual: true,
     });
 
     expect(server.orders.size).toBe(1);

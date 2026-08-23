@@ -18,6 +18,8 @@ import { useState } from "react";
 import type { RejectedSaleReview as Review } from "@/lib/rejectedSaleSession";
 import {
   DISCARD_REJECTED_SALE_ACTION,
+  RETRY_REJECTED_SALE_ACTION,
+  RETRY_REJECTED_SALE_REFUSALS,
   DISCARD_REJECTED_SALE_CONFIRMATION_LINES,
   DISCARD_REJECTED_SALE_CONFIRM_ACTION,
   DISCARD_REJECTED_SALE_REFUSALS,
@@ -28,6 +30,8 @@ type RejectedSaleReviewProps = {
   reviews: readonly Review[];
   /** Resolves to an error message, or null when the discard succeeded. */
   onDiscard: (queueRecordId: string) => Promise<string | null>;
+  /** Resolves to an error message, or null when the retry was accepted. */
+  onRetry: (queueRecordId: string) => Promise<string | null>;
   onClose: () => void;
 };
 
@@ -43,11 +47,32 @@ function Row({ label, value }: { label: string; value: string }) {
 export default function RejectedSaleReview({
   reviews,
   onDiscard,
+  onRetry,
   onClose,
 }: RejectedSaleReviewProps) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // NO CONFIRMATION STEP, deliberately. A retry is not destructive: it sends a
+  // sale this device already holds, under the identity it already has, and the
+  // worst case is the same failure again. Putting it behind the same friction as
+  // a discard would teach operators to click through both.
+  async function requestRetry(queueRecordId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const failure = await onRetry(queueRecordId);
+
+      setNotice(failure === null ? "Trying this sale again…" : null);
+      setError(failure);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function confirmDiscard(queueRecordId: string) {
     setBusy(true);
@@ -145,6 +170,25 @@ export default function RejectedSaleReview({
                 )}
               </div>
 
+              {!isConfirming && review.retry.allowed && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void requestRetry(record.queueRecordId)}
+                  className="mt-5 w-full rounded-xl bg-neutral-900 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-neutral-800 disabled:opacity-50"
+                >
+                  {busy ? "Sending…" : RETRY_REJECTED_SALE_ACTION}
+                </button>
+              )}
+
+              {/* A code that is neither retryable nor discardable gets the
+                  reason and nothing else — never a control that cannot help. */}
+              {!isConfirming && !review.retry.allowed && !review.discard.allowed && (
+                <p className="mt-5 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-relaxed text-neutral-600">
+                  {RETRY_REJECTED_SALE_REFUSALS[review.retry.reason]}
+                </p>
+              )}
+
               {!isConfirming && review.discard.allowed && (
                 <button
                   type="button"
@@ -158,8 +202,10 @@ export default function RejectedSaleReview({
                 </button>
               )}
 
-              {!isConfirming && !review.discard.allowed && (
-                <p className="mt-5 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-relaxed text-neutral-600">
+              {/* Only when discard was the plausible action and was refused.
+                  A retryable row already has its own control above. */}
+              {!isConfirming && !review.discard.allowed && review.retry.allowed && (
+                <p className="mt-3 text-xs leading-relaxed text-neutral-500">
                   {DISCARD_REJECTED_SALE_REFUSALS[review.discard.reason]}
                 </p>
               )}
@@ -198,6 +244,24 @@ export default function RejectedSaleReview({
                     </button>
                   </div>
                 </div>
+              )}
+
+              {notice !== null && (
+                <p
+                  aria-live="polite"
+                  className="mt-3 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-relaxed text-neutral-700"
+                >
+                  {notice}
+                </p>
+              )}
+
+              {error !== null && !isConfirming && (
+                <p
+                  aria-live="polite"
+                  className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-900"
+                >
+                  {error}
+                </p>
               )}
 
               {error !== null && isConfirming && (

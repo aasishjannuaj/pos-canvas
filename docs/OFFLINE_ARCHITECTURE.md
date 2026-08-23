@@ -2482,5 +2482,74 @@ wire. A live claim is resolved by exactly three things: a response, the bounded
 timeout, or startup recovery after a restart. Single-flight is unchanged, so
 repeated presses collapse to one drain and cannot duplicate an order.
 
-Only the `manual` trigger sets `ignoreBackoff`; `startup`, `reconnect`, `retry`
-and `revoked` all keep respecting persisted backoff.
+Only the `manual` trigger sets it; `startup`, `reconnect`, `retry` and `revoked`
+all keep respecting persisted backoff.
+
+### 25.1 A manual attempt cannot exhaust the budget
+
+Windows hardware found the hole this opened. Once manual presses could skip the
+backoff, and the backoff had been the only thing rate-limiting attempts, **ten
+taps during an outage burned the whole `SYNC_MAX_ATTEMPTS` budget in seconds**
+and filed a perfectly good sale as `needs_attention` /
+`transport_attempts_exhausted`. Measured: 10 manual presses to exhaust, versus 25
+automatic runs at the same instant leaving the row `pending` with `attemptCount`
+still 1.
+
+`SYNC_MAX_ATTEMPTS` exists to detect a **sustained outage** — ten attempts is
+roughly seventy minutes of the curve. That is a statement about time, not about
+how many times a finger touched glass.
+
+`classifySubmissionFailure` therefore takes `{ manual }`, and a manual attempt
+never escalates the three no-answer families (`transport`, timeout, `unknown`).
+Attempts are still counted, so the curve and the diagnostics stay honest.
+
+**It does not mean "ignore the server".** A business answer — `post_revocation`,
+`invalid_item`, `hash_conflict` — classifies identically however it was
+triggered, because that is the server deciding, not a counter running out.
+
+## 26. Reaching a sale that needs attention (24.5F)
+
+The same hardware run exposed a second, worse defect: once the sale reached
+`needs_attention`, the **ready POS screen offered no way to act on it**. The
+banner said "1 sale needs attention" and nothing anywhere could review, retry or
+resolve it — and reset could not clear it either, because that sale was exactly
+what blocked reset. The only escape was uninstalling, which destroys the
+evidence.
+
+The review flow now renders from the ready screen as well as the revoked one,
+using the **same `RejectedSaleReview` component and the same session layer**.
+There is no second review implementation, and a guard asserts there are exactly
+two call sites of one component.
+
+### 26.1 Different codes, different actions
+
+| code family | action offered |
+|---|---|
+| `transport_attempts_exhausted`, `timeout_attempts_exhausted`, `unknown_attempts_exhausted` | Review + **Retry sync** |
+| `post_revocation` | Review + **Discard rejected local sale** (strong confirmation) |
+| every other server answer | Review + reason only |
+
+`RETRYABLE_NEEDS_ATTENTION_CODES` and `TERMINAL_LOCAL_RESOLUTION_CODES` are
+**disjoint, and a test asserts it**. Retryable means "no answer yet"; discardable
+means "a definitive answer that will never change". A code cannot be both, and a
+code in neither gets a reason and no control — never a button that cannot help.
+
+### 26.2 The operator retry
+
+`retryRejectedSale` re-reads the record and the uncertainty evidence from
+storage, re-runs `decideRejectedSaleRetrySafety`, and only then transitions
+`needs_attention -> pending` via `beginOperatorRetry`.
+
+**`attemptCount` resets to 0 and `nextAttemptAt` clears** (owner decision). An
+operator retry is a deliberate new cycle against a situation they believe has
+changed — the network is back — so inheriting a spent budget would mean one
+failure immediately re-escalating.
+
+**`saleRequestId`, `occurredAt`, items, payment method, source and `queuedAt` are
+all preserved.** The sale is the same sale; that is what makes the retry safe,
+because v4's idempotency lookup recognises it and replays an existing order
+rather than allocating a second one. No new offline reference is minted.
+
+It does **not** submit. It returns the row to `pending` and lets the existing
+engine do what it already does — there is no second submission path, and nothing
+in the session layer touches `complete_sale_v4`.

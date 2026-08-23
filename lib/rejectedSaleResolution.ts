@@ -41,6 +41,41 @@ export function isTerminalLocalResolutionCode(code: string | null): boolean {
 }
 
 /**
+ * Rejection codes a person may ask this device to TRY AGAIN.
+ *
+ * EXACTLY THE THREE THAT MEAN "WE NEVER GOT AN ANSWER". A transport failure, our
+ * own timeout, and an unreadable outcome all end here after the attempt budget
+ * runs out, and none of them is the server deciding anything — they are this
+ * device giving up. Asking again is the only way to find out what is true, and
+ * the persisted saleRequestId makes asking safe: v4 replays an existing order if
+ * there is one and creates exactly one if there is not.
+ *
+ * DISJOINT FROM THE DISCARD ALLOWLIST, and that is the invariant to preserve.
+ * Retryable means "no answer yet". Discardable means "a definitive answer that
+ * will never change". A code cannot be both, and a code in neither gets a
+ * reason and nothing else.
+ */
+export const RETRYABLE_NEEDS_ATTENTION_CODES: readonly string[] = [
+  "transport_attempts_exhausted",
+  "timeout_attempts_exhausted",
+  "unknown_attempts_exhausted",
+];
+
+export function isRetryableNeedsAttentionCode(code: string | null): boolean {
+  return code !== null && RETRYABLE_NEEDS_ATTENTION_CODES.includes(code);
+}
+
+export type RejectedSaleRetrySafety =
+  | { allowed: true }
+  | { allowed: false; reason: RejectedSaleRetryRefusal };
+
+export type RejectedSaleRetryRefusal =
+  | "not_needs_attention"
+  | "not_retryable"
+  | "server_order_exists"
+  | "uncertain_sale_outstanding";
+
+/**
  * What the device knows about an outstanding online request, if anything.
  *
  * `saleRequestId: null` means evidence EXISTS but cannot be attributed — an
@@ -110,6 +145,50 @@ export function decideRejectedSaleDiscardSafety(input: {
   return { allowed: true };
 }
 
+/**
+ * Whether a person may ask this device to try a failed sale again.
+ *
+ * Mirrors decideRejectedSaleDiscardSafety deliberately, down to the order of the
+ * checks, so the two can be read side by side and neither can quietly grow a
+ * condition the other lacks. The session layer re-runs this against freshly read
+ * storage immediately before writing.
+ */
+export function decideRejectedSaleRetrySafety(input: {
+  record: QueuedSale;
+  uncertain: UncertainSaleEvidence;
+}): RejectedSaleRetrySafety {
+  const { record, uncertain } = input;
+
+  // pending and syncing are the engine's business already; synced belongs to the
+  // server; discarded and permanent_failure are resolved or unrecoverable.
+  if (record.state !== "needs_attention") {
+    return { allowed: false, reason: "not_needs_attention" };
+  }
+
+  // A server answer is not something a retry can change. post_revocation will be
+  // refused identically every time, and re-asking would only teach an operator
+  // that the button does nothing.
+  if (!isRetryableNeedsAttentionCode(record.lastErrorCode)) {
+    return { allowed: false, reason: "not_retryable" };
+  }
+
+  // If the server has already answered with an order, there is nothing to retry.
+  if (record.serverOrderNumber !== null || record.serverOrderId !== null) {
+    return { allowed: false, reason: "server_order_exists" };
+  }
+
+  // An outstanding online request for THIS sale means a second dispatch could
+  // race the first. Unattributable evidence reads as "it might be this one".
+  if (
+    uncertain.present &&
+    (uncertain.saleRequestId === null || uncertain.saleRequestId === record.saleRequestId)
+  ) {
+    return { allowed: false, reason: "uncertain_sale_outstanding" };
+  }
+
+  return { allowed: true };
+}
+
 // ---------------------------------------------------------------------------
 // Operator-facing copy
 // ---------------------------------------------------------------------------
@@ -127,8 +206,33 @@ export function describeRejectedSaleReason(lastErrorCode: string | null): string
     return "This sale was created after this device had already been revoked and POS Canvas did not create a server order for it.";
   }
 
+  // The three no-answer codes. Worded as an unfinished job rather than a
+  // failure, because that is what it is: nobody has said no, this device simply
+  // stopped waiting. The operator's next move is to try again once the
+  // connection is back, which is exactly the action offered alongside this.
+  if (isRetryableNeedsAttentionCode(lastErrorCode)) {
+    return "We couldn't finish syncing this sale after several network attempts. It is still saved on this device and can be sent again.";
+  }
+
   return "POS Canvas could not record this sale, and it cannot be sent again automatically.";
 }
+
+/** The retry action, offered only where the policy allows it. */
+export const RETRY_REJECTED_SALE_ACTION = "Retry sync";
+
+/** Why a retry was refused, if the policy declines at press time. */
+export const RETRY_REJECTED_SALE_REFUSALS: Readonly<
+  Record<RejectedSaleRetryRefusal, string>
+> = {
+  not_needs_attention:
+    "This sale is no longer waiting for someone to resolve it. Reopen this screen to see its current state.",
+  not_retryable:
+    "POS Canvas refused this sale outright, so sending it again would get the same answer.",
+  server_order_exists:
+    "POS Canvas has already recorded this sale, so there is nothing to send.",
+  uncertain_sale_outstanding:
+    "Another sale on this device may already have gone through. Connect to the internet and finish that sale first.",
+};
 
 /** Shown above the review, so the state is named before any action is offered. */
 export const REJECTED_SALE_STATUS_LABEL = "Needs attention";

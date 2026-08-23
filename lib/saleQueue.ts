@@ -250,6 +250,45 @@ export function transitionQueuedSale(
  * Records that an attempt was made. Separate from the transition so attempt
  * metadata survives a state change and cannot be reset by one.
  */
+/**
+ * Feature 24.5F — a DELIBERATE operator retry of a sale that gave up.
+ *
+ * Distinct from the engine's own retry transition, which preserves the attempt
+ * curve because it is the same automatic cycle continuing. This is a person
+ * saying "the network is back, try again", and it starts a NEW cycle: the
+ * attempt budget resets to zero and the backoff instant is cleared, so the sale
+ * gets a full set of attempts rather than immediately re-escalating on the first
+ * failure of a genuinely different situation.
+ *
+ * WHAT IS NOT TOUCHED, and this is the part that matters: saleRequestId,
+ * occurredAt, items, paymentMethod, tipAmount, source, queuedAt and every
+ * identity field. The sale is the same sale — that is what makes the retry safe,
+ * because complete_sale_v4's idempotency lookup will recognise it and replay an
+ * existing order rather than allocating a second one.
+ *
+ * The rejection code is cleared along with the counters: it described the cycle
+ * that just ended, and carrying it into a fresh one would misreport the next
+ * failure. The disposition is recorded by the state change itself.
+ */
+export function beginOperatorRetry(record: QueuedSale, now: string): TransitionResult {
+  if (!canTransition(record.state, "pending")) {
+    return { ok: false, reason: "illegal_transition", from: record.state, to: "pending" };
+  }
+
+  return {
+    ok: true,
+    record: {
+      ...record,
+      state: "pending",
+      updatedAt: now,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    },
+  };
+}
+
 export function markQueuedSaleAttempt(record: QueuedSale, now: string): QueuedSale {
   return {
     ...record,

@@ -156,8 +156,29 @@ export type SubmissionFailure = {
  */
 export function classifySubmissionFailure(
   failure: SubmissionFailure,
-  attemptCount: number
+  attemptCount: number,
+  /**
+   * Feature 24.5F — was this attempt asked for by a PERSON?
+   *
+   * A manual attempt may not be the one that escalates a no-answer failure into
+   * needs_attention. SYNC_MAX_ATTEMPTS exists to detect a SUSTAINED OUTAGE — ten
+   * attempts is roughly seventy minutes of the backoff curve — and that is a
+   * statement about time, not about how many times a finger touched glass.
+   *
+   * Windows hardware found the hole: once manual Sync now was allowed to skip
+   * the backoff, ten taps during an outage burned the entire budget in seconds
+   * and filed a perfectly good sale as needing attention. The backoff had been
+   * the only thing rate-limiting attempts, and nothing replaced it.
+   *
+   * IT DOES NOT MEAN "IGNORE THE SERVER". Only the three exhaustion families
+   * below are affected. A business answer — post_revocation, invalid_item,
+   * hash_conflict — classifies identically however it was triggered, because
+   * that is the server deciding, not a counter running out.
+   */
+  options: { manual?: boolean } = {}
 ): SyncOutcome {
+  const exhausted = attemptCount >= SYNC_MAX_ATTEMPTS && options.manual !== true;
+
   // FEATURE 24.5F — OUR OWN TIMEOUT, CHECKED FIRST AND ON ITS OWN FLAG.
   //
   // Deliberately ahead of every other branch, including the message table, so no
@@ -170,13 +191,13 @@ export function classifySubmissionFailure(
   // Note what it is NOT: not `transport`, which would assert the request never
   // reached the server and is the evidence the offline-mode switch runs on.
   if (failure.timedOut === true) {
-    return attemptCount >= SYNC_MAX_ATTEMPTS
+    return exhausted
       ? { outcome: "needs_attention", code: "timeout_attempts_exhausted" }
       : { outcome: "retry", code: "sale_timeout" };
   }
 
   if (failure.transport === "transport") {
-    return attemptCount >= SYNC_MAX_ATTEMPTS
+    return exhausted
       ? { outcome: "needs_attention", code: "transport_attempts_exhausted" }
       : { outcome: "retry", code: "transport" };
   }
@@ -198,7 +219,7 @@ export function classifySubmissionFailure(
   // An UNKNOWN transport is the lost-response case, and retrying it is exactly
   // what the durable idempotency key exists for.
   if (failure.transport === "unknown") {
-    return attemptCount >= SYNC_MAX_ATTEMPTS
+    return exhausted
       ? { outcome: "needs_attention", code: "unknown_attempts_exhausted" }
       : { outcome: "retry", code: "unknown_outcome" };
   }

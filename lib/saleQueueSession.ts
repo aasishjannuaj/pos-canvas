@@ -20,6 +20,7 @@
 import {
   SALE_QUEUE_SCHEMA_VERSION,
   SALE_REQUEST_PAYLOAD_VERSION,
+  beginOperatorRetry,
   isDueForAttempt,
   isManuallyRetryable,
   markQueuedSaleAttempt,
@@ -374,6 +375,40 @@ export async function updateQueueState(
 }
 
 /** Increments the attempt counter. Kept separate so a transition cannot reset it. */
+/**
+ * Feature 24.5F — applies beginOperatorRetry to a stored record.
+ *
+ * Goes through the same read-parse-transition-write shape updateQueueState uses,
+ * rather than exposing raw storage to a caller: the transition is still checked,
+ * a corrupt record is still refused, and there is still exactly one module that
+ * writes the queue. updateQueueState itself cannot serve here because its patch
+ * deliberately covers only the error metadata, and this must also reset the
+ * attempt counter.
+ */
+export async function startOperatorRetry(
+  queueRecordId: string,
+  now: string
+): Promise<QueueResult<QueuedSale>> {
+  return withDb(async (db) => {
+    const raw = await readQueuedSaleRecord(db, queueRecordId);
+
+    if (!raw.ok) return { ok: false, reason: "storage_unavailable" };
+    if (raw.value === null) return { ok: false, reason: "not_found" };
+
+    const parsed = readQueuedSale(raw.value);
+
+    if (!parsed.ok) return { ok: false, reason: "corrupt_record" };
+
+    const moved = beginOperatorRetry(parsed.record, now);
+
+    if (!moved.ok) return { ok: false, reason: "illegal_transition" };
+
+    const written = await putQueuedSale(db, moved.record);
+
+    return written.ok ? { ok: true, value: moved.record } : { ok: false, reason: "write_failed" };
+  });
+}
+
 export async function markAttempt(
   queueRecordId: string,
   now: string
