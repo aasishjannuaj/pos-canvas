@@ -251,7 +251,6 @@ describe("24.5C stores intents and submits nothing", () => {
     for (const premature of [
       "components/devices/DeviceQueueStatus.tsx",
       "components/dashboard/DeviceSyncPanel.tsx",
-      "lib/publishProgress.ts",
     ]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);
       expect(exists(premature)).toBe(false);

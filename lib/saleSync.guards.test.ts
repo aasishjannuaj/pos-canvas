@@ -235,7 +235,6 @@ describe("the sync engine is driven from exactly one place", () => {
     for (const premature of [
       "components/devices/DeviceQueueStatus.tsx",
       "components/dashboard/DeviceSyncPanel.tsx",
-      "lib/publishProgress.ts",
     ]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);
       expect(exists(premature)).toBe(false);

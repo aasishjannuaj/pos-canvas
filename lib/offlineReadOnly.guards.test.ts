@@ -382,7 +382,14 @@ describe("Feature 24.5A stops at read-only startup", () => {
   });
 
   it("no 24.6 publish-progress work began", () => {
-    expect(exists("lib/publishProgress.ts")).toBe(false);
+    // FEATURE 24.6 HAS NOW STARTED, with owner approval, so lib/publishProgress.ts
+    // exists deliberately and asserting its absence would only pin this file to a
+    // past that has moved on. The boundary it protected is still real, so it is
+    // restated rather than dropped: publish progress is an OWNER-EDITOR concern
+    // and must not reach into the device, offline or branding surfaces.
+    expect(read("lib/publishProgress.ts")).not.toContain("@/lib/device");
+    expect(read("lib/publishProgress.ts")).not.toContain("@/lib/saleQueue");
+    expect(read("lib/publishProgress.ts")).not.toContain("@/lib/brand");
   });
 });
 

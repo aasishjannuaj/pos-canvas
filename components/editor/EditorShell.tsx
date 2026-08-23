@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
@@ -79,7 +79,8 @@ import {
   refreshBuildJobStatus,
   startBuildProcessing,
 } from "@/lib/buildJobs.actions";
-import { needsBuildProcessing } from "@/lib/buildJobs";
+import { isTerminalBuildStatus, needsBuildProcessing } from "@/lib/buildJobs";
+import { PUBLISH_POLL_INTERVAL_MS, resolvePublishProgress } from "@/lib/publishProgress";
 import type {
   BuildJobSummary,
   BuildProcessingState,
@@ -409,6 +410,14 @@ export default function EditorShell({
   // from buildRequestStatus since refreshing and requesting are two
   // different actions that must never be conflated.
   const [isRefreshingBuildStatus, setIsRefreshingBuildStatus] = useState(false);
+  /**
+   * Feature 24.6 — guards the poll loop against overlapping itself.
+   *
+   * A ref rather than state on purpose: flipping it must not re-render, and it
+   * must not be a dependency of the effect that reads it.
+   */
+  const pollInFlight = useRef(false);
+
   // Feature 15.7 — artifact download state, kept distinct from
   // buildRequestStatus and isRefreshingBuildStatus for the same reason
   // those two are distinct from each other: requesting a build, refreshing
@@ -1638,6 +1647,94 @@ export default function EditorShell({
   // Feature 13.2 — warn only while there's something unsaved to lose; the
   // listener is added/removed as isDirty flips, so it's never registered
   // for a clean project and never lingers after a successful save.
+  /**
+   * Feature 24.6 — watches a publish that is still running.
+   *
+   * WHY THIS EXISTS. Until now the only way to see a publish advance was to
+   * press Refresh status: there was no timer anywhere in the editor, so an owner
+   * who published and waited watched a screen that never changed and could not
+   * tell a working queue from a stuck one. The stepper is only honest if it
+   * actually moves.
+   *
+   * ONE LOOP, BY CONSTRUCTION. It reschedules with setTimeout AFTER each read
+   * completes rather than running on an interval, so a slow response can never
+   * stack a second request behind the first. The effect keys on the job id and
+   * its STATUS, so a poll that returns the same status does not tear the loop
+   * down and restart it, and a status change re-runs the effect — which is what
+   * stops it, because a terminal status returns before scheduling anything.
+   *
+   * IT ONLY EVER READS. refreshBuildJobStatus re-reads the job this panel is
+   * already showing; there is no path from here to requestBuildJob, so polling
+   * cannot create a second publish however long it runs.
+   *
+   * A HIDDEN TAB IS NOT POLLED. A backgrounded editor left open all afternoon
+   * should not keep asking, so a hidden document skips its turn, and becoming
+   * visible again reads immediately rather than waiting out the remaining delay.
+   */
+  useEffect(() => {
+    const job = latestBuildJob;
+
+    if (job === null || isTerminalBuildStatus(job.status)) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (delayMs: number) => {
+      if (cancelled) return;
+      timer = setTimeout(() => void tick(), delayMs);
+    };
+
+    const tick = async () => {
+      if (cancelled || pollInFlight.current) return;
+
+      // Hidden tab: keep the loop alive but ask nothing.
+      if (typeof document !== "undefined" && document.hidden) {
+        schedule(PUBLISH_POLL_INTERVAL_MS);
+        return;
+      }
+
+      pollInFlight.current = true;
+
+      try {
+        const result = await refreshBuildJobStatus(job.id);
+
+        if (cancelled) return;
+
+        if (result.ok) {
+          setLatestBuildJob(result.job);
+
+          // Terminal: stop here rather than scheduling a tick the effect
+          // re-run would only have to cancel.
+          if (isTerminalBuildStatus(result.job.status)) return;
+        }
+        // A failed read is not surfaced as an error: the owner did not ask for
+        // this one, and Refresh status is still there if they want to know.
+      } finally {
+        pollInFlight.current = false;
+      }
+
+      schedule(PUBLISH_POLL_INTERVAL_MS);
+    };
+
+    const onVisibility = () => {
+      if (cancelled || document.hidden) return;
+      if (timer !== null) clearTimeout(timer);
+      schedule(0);
+    };
+
+    schedule(PUBLISH_POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestBuildJob?.id, latestBuildJob?.status]);
+
   useEffect(() => {
     if (!isDirty) {
       return;
@@ -1801,6 +1898,12 @@ export default function EditorShell({
           onRetryBuildProcessing={handleRetryBuildProcessing}
           onRequestBuild={handleRequestBuild}
           onRefreshBuildStatus={handleRefreshBuildStatus}
+          // Feature 24.6 — derived, never stored. One function decides what
+          // the stepper shows, so the panel cannot disagree with the job.
+          publishProgress={resolvePublishProgress({
+            requestStatus: buildRequestStatus,
+            job: latestBuildJob,
+          })}
           isRefreshingBuildStatus={isRefreshingBuildStatus}
           downloadStatus={downloadStatus}
           downloadError={downloadError}

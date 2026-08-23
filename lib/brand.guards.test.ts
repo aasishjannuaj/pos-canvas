@@ -474,7 +474,12 @@ describe("brand assets are approved artwork, in one place", () => {
   it("no offline or publish-progress work began", () => {
     // 24.4 / 24.5 / 24.6.
     expect(existsSync(join(repoRoot, "lib/offline.ts"))).toBe(false);
-    expect(existsSync(join(repoRoot, "lib/publishProgress.ts"))).toBe(false);
+    // FEATURE 24.6 HAS NOW STARTED, with owner approval, so this file exists
+    // deliberately. The boundary is restated rather than dropped: publish
+    // progress must not pull brand assets into an editor-side concern.
+    expect(
+      readFileSync(join(repoRoot, "lib/publishProgress.ts"), "utf-8")
+    ).not.toContain("@/lib/brand");
     expect(code(read("windows-shell/offline.html"))).not.toContain("localStorage");
   });
 });

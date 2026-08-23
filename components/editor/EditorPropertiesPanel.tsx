@@ -27,6 +27,12 @@ import type { LogoUploadStatus } from "./BrandingLogoField";
 // which is correct at the save/build boundary and destructive at a render one.
 import { toEditableModifierGroups } from "@/lib/modifierAuthoring";
 import { getAppInformation } from "@/lib/appInformation";
+import PublishProgressSteps from "@/components/editor/PublishProgressSteps";
+import {
+  PUBLISH_SUCCESS_MESSAGE,
+  describePublishProgress,
+} from "@/lib/publishProgress";
+import type { PublishProgress } from "@/lib/publishProgress";
 import {
   BUILD_PROCESSING_STARTED_MESSAGE,
   getBuildProcessingUnavailableMessage,
@@ -112,6 +118,12 @@ type EditorPropertiesPanelProps = {
   onRetryBuildProcessing: () => void;
   onRequestBuild: () => void;
   onRefreshBuildStatus: () => void;
+  /**
+   * Feature 24.6 — where publishing has got to, decided by
+   * lib/publishProgress.ts. Presentational input only: this panel never
+   * computes a stage and never infers one from a status itself.
+   */
+  publishProgress: PublishProgress;
   isRefreshingBuildStatus: boolean;
   // Feature 15.7 — artifact download. Purely presentational, exactly like
   // the build-request props above: this component never calls a Server
@@ -280,6 +292,7 @@ export default function EditorPropertiesPanel({
   onRetryBuildProcessing,
   onRequestBuild,
   onRefreshBuildStatus,
+  publishProgress,
   isRefreshingBuildStatus,
   downloadStatus,
   downloadError,
@@ -1420,6 +1433,26 @@ export default function EditorPropertiesPanel({
                       aria-live="polite"
                       className="flex flex-col gap-1.5 rounded-xl border border-neutral-200 px-4 py-3 text-xs text-neutral-600"
                     >
+                      {/* Feature 24.6 — the stage timeline. Sits above the
+                          factual Status/Requested rows rather than replacing
+                          them: the stepper answers "how far along is this", the
+                          rows answer "what exactly does the server say", and an
+                          owner chasing a slow publish wants both. */}
+                      <PublishProgressSteps progress={publishProgress} />
+
+                      {/* One short sentence for assistive technology, so a stage
+                          change is announced without re-reading the whole list
+                          on every poll. */}
+                      <span className="sr-only" role="status">
+                        {describePublishProgress(publishProgress)}
+                      </span>
+
+                      {publishProgress.kind === "published" && (
+                        <p className="mb-1 font-medium text-emerald-700">
+                          {PUBLISH_SUCCESS_MESSAGE}
+                        </p>
+                      )}
+
                       <div className="flex items-center justify-between">
                         <span className="text-neutral-500">Status</span>
                         <span className="font-medium text-neutral-900">
@@ -1441,19 +1474,22 @@ export default function EditorPropertiesPanel({
                           no cadence left to quote and nothing to hedge about.
                           Still no countdown and no progress indicator — a
                           dispatch means GitHub accepted a run, which is not the
-                          same as knowing when that run reaches this job. */}
+                          same as knowing when that run reaches this job.
+
+                          Feature 24.6 — the trailing "Use Refresh to check its
+                          status" is gone: the panel watches the job itself now
+                          and the stepper moves on its own. Refresh remains for
+                          anyone who wants to ask immediately. */}
                       {latestBuildJob.status === "queued" &&
                         buildProcessing !== "unavailable" && (
                           <p className="mt-1 text-neutral-400">
-                            {BUILD_PROCESSING_STARTED_MESSAGE} Use Refresh to
-                            check its status.
+                            {BUILD_PROCESSING_STARTED_MESSAGE}
                           </p>
                         )}
 
                       {latestBuildJob.status === "building" && (
                         <p className="mt-1 text-neutral-400">
-                          Your build is being processed. Use Refresh to check
-                          its status.
+                          This usually takes a few moments.
                         </p>
                       )}
 

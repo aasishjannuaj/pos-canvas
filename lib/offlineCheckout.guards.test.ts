@@ -1068,7 +1068,6 @@ describe("24.5E changed nothing it was not meant to", () => {
     for (const premature of [
       "components/devices/DeviceQueueStatus.tsx",
       "components/dashboard/DeviceSyncPanel.tsx",
-      "lib/publishProgress.ts",
     ]) {
       expect(`exists early: ${premature}`).toBe(`exists early: ${premature}`);
       expect(exists(premature)).toBe(false);
