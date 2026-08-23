@@ -102,14 +102,18 @@ describe("Feature 24.4 produced a design document", () => {
     // 24.4 said "nothing is implemented". Each phase since has had to say which
     // of them is true, or the document stops describing reality.
     //
-    // NARROWED BY 24.5F, deliberately. This used to require the literal string
-    // "NOT IMPLEMENTED", which worked while some phase still had that status.
-    // 24.5F is the last phase, and its honest status is neither "implemented"
-    // nor "not implemented" — the code fixes landed and the hardware QA has not
-    // run. Keeping the old assertion would have forced the table to overstate
-    // OR understate the state of the only phase left. What must remain true is
-    // that every phase carries a status and that the unfinished work is still
-    // visibly unfinished.
+    // NARROWED TWICE, both times because the honest status changed.
+    //
+    // It first required the literal "NOT IMPLEMENTED", which held while some
+    // phase still had that status. 24.5F then narrowed it to "IN PROGRESS or NOT
+    // IMPLEMENTED", because the code fixes had landed and the hardware QA had
+    // not run.
+    //
+    // 24.5F IS NOW COMPLETE — validated on real Android and Windows hardware and
+    // end to end against staging (§27) — so there is no unfinished phase left to
+    // name, and an assertion demanding one would force the table to understate
+    // reality. What must remain true is that EVERY phase carries a recognised
+    // status: no row may go blank, and none may be quietly dropped.
     const doc = read(DESIGN_DOC);
     const table = doc.slice(doc.indexOf("## Implementation status"), doc.indexOf("### What 24.5"));
 
@@ -121,9 +125,20 @@ describe("Feature 24.4 produced a design document", () => {
     }
 
     expect(table).toContain("IMPLEMENTED");
-    // The remaining work is still named as remaining.
-    expect(table).toMatch(/IN PROGRESS|NOT IMPLEMENTED/);
-    expect(doc).toContain("hardware QA not started");
+
+    // Every phase row carries one of the recognised statuses. The regex is per
+    // ROW, so a phase losing its status fails here rather than passing on some
+    // other row's word.
+    for (const phase of ["24.5A", "24.5B", "24.5C", "24.5D", "24.5E", "24.5F"]) {
+      const row = table.split("\n").find((line) => line.includes(`**${phase}**`)) ?? "";
+
+      expect(`phase ${phase} carries a status`).toBe(`phase ${phase} carries a status`);
+      expect(row).toMatch(/\*\*(IMPLEMENTED|COMPLETE|IN PROGRESS|NOT IMPLEMENTED)\*\*/);
+    }
+
+    // The closeout that replaced "hardware QA not started" must actually exist.
+    expect(doc).not.toContain("hardware QA not started");
+    expect(doc).toContain("## 27. Feature 24.5F closeout — COMPLETE");
   });
 
   it("the owner's seven decisions are recorded as decided, not still open", () => {

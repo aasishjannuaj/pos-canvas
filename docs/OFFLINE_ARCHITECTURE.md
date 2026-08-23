@@ -9,7 +9,7 @@
 | **24.5C** | Durable sale queue + persisted idempotency key, IndexedDB v2 | **IMPLEMENTED** |
 | **24.5D** | Sync engine — FIFO drain, single-flight, persisted backoff | **IMPLEMENTED** |
 | **24.5E** | Offline checkout, provisional receipts, startup/reconnect sync wiring, reconciliation, unpair block, cashier status | **IMPLEMENTED** (owner Devices UI deferred) |
-| **24.5F** | Cross-platform failure/torture QA; DEF-01 mid-session offline fallback; DEF-02 scheduled backoff retry | **IN PROGRESS** — code fixes landed, hardware QA not started |
+| **24.5F** | Cross-platform failure/torture QA on real Android + Windows hardware; DEF-01 mid-session offline fallback; DEF-02 scheduled backoff retry; native local runtimes; revoked-device queue; rejected-sale resolution; bounded `complete_sale_v4`; manual retry budget; OF-14 / OF-15 staging end-to-end | **COMPLETE** — see §27 |
 
 **A paired till with a valid cache can now complete a sale offline.** 24.5E
 opened the fence 24.5A put up. What changed is narrow and stated exactly in
@@ -2109,7 +2109,7 @@ and so nothing can queue a sale before the server can accept it.
 | **24.5C** | Durable sale queue + persisted idempotency key. Also fixes the existing in-memory key hole (§1.3.8) **for online sales**, which is a standalone win. | flag |
 | **24.5D** | Sync engine + state machine + reconnect detection. | flag |
 | **24.5E** | Offline checkout enabled, provisional receipts, inventory-shortfall reporting, owner-facing offline order views. | flag |
-| **24.5F** | Android + Windows failure testing (§20), including abrupt termination and process kill on real hardware. | gate before enabling by default |
+| **24.5F** | Android + Windows failure testing (§20), including abrupt termination and process kill on real hardware. | **PASSED** — §27 |
 
 **24.5B precedes any client that can queue a sale.** Shipping the queue first
 would create sales that the server would reject for lacking a contract — the
@@ -2215,6 +2215,10 @@ rejecting it, and the reconciliation model joining the offline reference to the
 resulting order identity. The server half is validated; the client-to-server
 join is not. Both scenarios therefore stay assigned to **staging** for 24.5F
 end-to-end QA, and neither should be run against the shop's production till.
+
+**Both were subsequently executed on staging and PASSED — see §27.3.** The
+client-to-server join is no longer unproven; this section is kept as written
+because it records the reasoning that assigned the work, not its outcome.
 
 ---
 
@@ -2553,3 +2557,119 @@ rather than allocating a second one. No new offline reference is minted.
 It does **not** submit. It returns the row to `pending` and lets the existing
 engine do what it already does — there is no second submission path, and nothing
 in the session layer touches `complete_sale_v4`.
+
+## 27. Feature 24.5F closeout — COMPLETE
+
+Offline capability was validated on **real Android and Windows hardware** and
+end-to-end against a **staging Supabase project**. Every scenario below was
+executed on a device, not simulated. This section records outcomes; it does not
+revise any architecture decision above.
+
+### 27.1 Android hardware coverage — all PASS
+
+Local packaged runtime · offline cold start · offline cash sale · offline
+card-label sale · modifiers + tax on the offline receipt · three-sale FIFO drain ·
+identical carts keeping separate sale identities · `OFF-` reference reconciled to
+the final `ORD` · persistence across app restart · persistence across a full phone
+reboot · reconnect without an app restart · the next sale after reconnect taking
+the normal online path · repeated Sync now staying single-flight with no
+duplicate · a revoked till's pre-revocation queued sale accepted · the
+post-revocation rejected-sale review/discard flow · hung-RPC recovery under the
+bounded timeout with same-identity retry · the ready-screen `needs_attention`
+retry flow.
+
+### 27.2 Windows hardware coverage — all PASS
+
+Local packaged runtime · splash, menu and branding · offline cold start · offline
+queue persistence · persistence across a Task Manager kill · persistence across a
+full reboot · reconnect and drain · the next sale after reconnect taking the
+normal online path · repeated Sync now with no duplicate · the ready-screen
+`needs_attention` Review/Retry flow · retry creating exactly one `ORD`.
+
+### 27.3 Staging end-to-end — OF-14 and OF-15 PASS
+
+Both ran against POS Canvas Staging from a separate `com.poscanvas.app.staging`
+build, installed alongside the production till and never replacing it.
+
+**OF-14 — the revocation window, client to server.**
+
+| | |
+|---|---|
+| R1 `occurred_at` | `2026-08-23 18:00:37.055+00` |
+| authoritative `revoked_at` | `2026-08-23 18:01:32.858318+00` |
+| R1 outcome | accepted, final order **ORD-1001** |
+
+R1 occurred **before** `revoked_at` and was recorded, exactly as §13 requires. R2
+was created **after** authoritative revocation by a device that did not yet know:
+the server refused it as `post_revocation`, the row was retained as
+`needs_attention`, **no server order was created**, Review sale was offered,
+**Retry sync was correctly withheld**, and the explicit discard flow resolved it.
+
+This closes the gap §19B identified: the server half was already validated, and
+the **client-to-server join is now proven too**.
+
+**OF-15 — offline stock policy under shortfall.**
+
+| | |
+|---|---|
+| order | **ORD-1002** |
+| quantity ordered | 5 |
+| inventory available | 2 |
+| inventory deducted | 2 |
+| `quantity_after` | 0 |
+| `inventory_shortfall` | 3 |
+| `has_inventory_shortfall` | `true` |
+| `line_total` | 32.45 |
+
+The sale was accepted and its totals preserved. Stock floored at zero rather than
+going negative, and the shortfall was recorded rather than silently absorbed —
+the offline policy behaving as designed against real PostgreSQL.
+
+### 27.4 Guarantees this phase established
+
+**Bounded `complete_sale_v4` submission (§25).** Every call carries a 30-second
+per-call `AbortController` via PostgREST's `.abortSignal()`. A timeout is an
+UNKNOWN OUTCOME — never a transport failure — identified by a flag the adapter
+owns rather than by message text.
+
+**Manual retry budget (§25.1).** A manual Sync now may skip a pending backoff but
+can never be the attempt that exhausts `SYNC_MAX_ATTEMPTS`. That budget detects a
+sustained outage, which is a statement about time, not about how many times a
+person taps. `manual` never softens a server's answer.
+
+**needs_attention review, retry and discard (§26).** Reachable from the ready POS
+screen as well as the revoked screen, through one component and one session
+layer. The three no-answer codes offer **Retry sync**; `post_revocation` offers
+**Discard rejected local sale** behind a strong confirmation; every other server
+answer offers a reason and no control. The retryable and discardable allowlists
+are disjoint, and a test asserts it.
+
+**Reconnect.** A till returns to online mode in place when the network comes
+back, without unmounting the POS, destroying the cart or interrupting a checkout,
+and then drains the queue.
+
+**One `saleRequestId`, always.** The idempotency key is minted once at draft
+creation and never regenerated — not by a timeout, not by a retry, not by an
+operator retry, not across a process kill or a reboot. This is what lets
+`complete_sale_v4` replay an existing order instead of allocating a second one,
+and it is why no duplicate order is reachable on any path exercised above.
+
+### 27.5 Open, non-blocking
+
+None of these blocked 24.5F.
+
+1. **Fresh-install error copy.** On a device with no prior session, a *server*
+   rejection during anonymous sign-in still renders "No connection". The
+   classifier is correct (`server_rejected`); the fresh-install branch discards
+   the classification before choosing the copy. Cost a full diagnostic cycle
+   during staging setup — worth fixing, cosmetic in effect.
+2. **§6c clock skew.** `occurred_at` is device-clock and `revoked_at` is
+   server-clock, compared with a bare `>=` and no allowance, where §6b grants
+   ±5 minutes on its other bounds. A till running fast can have a genuinely
+   pre-revocation sale refused. Behaved correctly in every case observed; fixing
+   it means a server contract change.
+3. **Near-dead modules.** `android-shell/serverUrl.mjs` and
+   `windows-shell/serverUrl.mjs` are largely unused since the local-runtime
+   migration.
+4. **Stale QA installers and APKs** can be cleaned up at leisure.
+5. **Windows Authenticode signing** remains deferred until public launch.
