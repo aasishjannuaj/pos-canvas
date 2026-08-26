@@ -28,6 +28,7 @@ const code = (source: string) =>
 const APP = "components/device/DeviceApp.tsx";
 const SETTINGS = "components/device/DeviceSettingsScreen.tsx";
 const RUNTIME = "components/runtime/PosRuntime.tsx";
+const MENU = "components/device/OperatorMenu.tsx";
 const MIGRATION = "supabase/migrations/20260823120000_device_voluntary_unpair.sql";
 const V4 = "supabase/migrations/20260819120000_offline_sale_contract_and_complete_sale_v4.sql";
 
@@ -47,19 +48,28 @@ function status(patch: Partial<OfflineSaleStatus> = {}): OfflineSaleStatus {
 describe("a working till can reach its own settings", () => {
   it("the ready POS offers Device settings", () => {
     const ready = code(read(APP)).slice(code(read(APP)).indexOf('case "ready": {'));
+    const menu = code(read(MENU));
 
+    // Feature 25.3 moved this behind the operator menu; the reachability the
+    // 25.1 guard protected is unchanged, only the affordance moved.
     expect(ready).toContain("headerTrailing=");
-    expect(ready).toContain("Device settings");
+    expect(ready).toContain("<OperatorMenu");
+    expect(ready).toContain("onOpenSettings={");
     expect(ready).toContain("setSettingsOpen(true)");
+    expect(menu).toContain("OPERATOR_MENU_SETTINGS");
+    expect(menu).toContain("onOpenSettings");
   });
 
-  it("settings replace the POS rather than sitting beside checkout", () => {
+  it("settings cover the POS rather than sitting beside checkout", () => {
     const ready = code(read(APP)).slice(code(read(APP)).indexOf('case "ready": {'));
 
     // A destructive control next to the pay button is one that eventually gets
-    // pressed by accident.
-    expect(ready).toContain("if (settingsOpen) {");
+    // pressed by accident. Since 25.3 the screen is a full-bleed overlay rather
+    // than a replacement tree, so PosRuntime keeps the cart alive underneath —
+    // but nothing of checkout may remain reachable through it.
     expect(ready).toContain("<DeviceSettingsScreen");
+    expect(ready).toContain("const overlay =");
+    expect(ready).toContain('<div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{overlay}</div>');
   });
 
   it("the settings screen offers unpair behind a confirmation", () => {

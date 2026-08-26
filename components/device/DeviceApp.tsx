@@ -74,6 +74,11 @@ import {
 import { decideDeviceResetSafety } from "@/lib/offlineSaleStatus";
 import RejectedSaleReview from "@/components/device/RejectedSaleReview";
 import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
+import OperatorMenu from "@/components/device/OperatorMenu";
+import SalesHistoryScreen from "@/components/runtime/SalesHistoryScreen";
+import SalesHistoryDetail from "@/components/runtime/SalesHistoryDetail";
+import { CURRENCY_SYMBOLS } from "@/lib/projectConfig";
+import type { DeviceHistoryOrder } from "@/lib/deviceOrders";
 import {
   discardRejectedSale,
   listRejectedSaleReviews,
@@ -164,6 +169,14 @@ export default function DeviceApp() {
    * till has no router, and this replaces the POS for as long as it is open.
    */
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /**
+   * Feature 25.3 — Sales history, and the one sale being looked at.
+   *
+   * Two pieces of state rather than a screen enum: the detail is reached FROM
+   * the list and returns to it, so closing the detail must not close history.
+   */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOrder, setHistoryOrder] = useState<DeviceHistoryOrder | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviews, setReviews] = useState<RejectedSale[]>([]);
 
@@ -1543,22 +1556,38 @@ export default function DeviceApp() {
       // it does on the revoked screen, and it is the SAME component. A till that
       // is otherwise working can still be holding a sale nobody can act on, and
       // that sale has to be reachable from the screen that reports it.
-      if (reviewing) {
-        return (
+      // Feature 25.3 — THE TILL SCREENS ARE AN OVERLAY, NOT A REPLACEMENT.
+      //
+      // These used to `return` a different tree, which unmounted PosRuntime —
+      // and the cart is useState INSIDE PosRuntime, so opening a screen threw
+      // away whatever the cashier had rung up. That was survivable for unpair
+      // (the pairing is going away anyway) and is not survivable for Sales
+      // history, which a cashier opens mid-order to check a previous sale.
+      //
+      // Rendering above a still-mounted PosRuntime keeps the cart, the offline
+      // state and the sync engine exactly where they were.
+      const overlay =
+        reviewing ? (
           <RejectedSaleReview
             reviews={reviews}
             onDiscard={handleDiscard}
             onRetry={handleRetry}
             onClose={() => setReviewing(false)}
           />
-        );
-      }
-
-      // Feature 25.1 — settings REPLACE the POS while open, exactly as the
-      // review screen does. onUnpair is handleReset itself: this branch adds an
-      // entry point and no second safety decision.
-      if (settingsOpen) {
-        return (
+        ) : historyOrder !== null ? (
+          <SalesHistoryDetail
+            order={historyOrder}
+            config={state.config}
+            // Back to the LIST, not out of history.
+            onBack={() => setHistoryOrder(null)}
+          />
+        ) : historyOpen ? (
+          <SalesHistoryScreen
+            currencySymbol={CURRENCY_SYMBOLS[state.config.receipt.currency]}
+            onOpenOrder={(order) => setHistoryOrder(order)}
+            onClose={() => setHistoryOpen(false)}
+          />
+        ) : settingsOpen ? (
           <DeviceSettingsScreen
             pairing={state.pairing}
             onUnpair={() => void handleUnpair()}
@@ -1569,8 +1598,7 @@ export default function DeviceApp() {
               setSettingsOpen(false);
             }}
           />
-        );
-      }
+        ) : null;
 
       const offline = state.offline ?? null;
       const offlineMode = getDeviceRuntimeMode(state) === "offline";
@@ -1644,17 +1672,20 @@ export default function DeviceApp() {
           // till. In the header rather than beside checkout: unpairing is an
           // occasional administrative act, and a destructive control next to the
           // pay button is a control that eventually gets pressed by accident.
+          // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
+          // Android viewport two full buttons would leave the business name
+          // almost nothing; a menu costs a fixed ~40px and has room to grow.
           headerTrailing={
-            <button
-              type="button"
-              onClick={() => {
+            <OperatorMenu
+              onOpenHistory={() => {
+                setHistoryOrder(null);
+                setHistoryOpen(true);
+              }}
+              onOpenSettings={() => {
                 setResetNotice(null);
                 setSettingsOpen(true);
               }}
-              className="flex-none rounded-full border border-white/30 px-3 py-1 text-xs font-medium text-white/90 transition-colors hover:border-white/60 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-            >
-              Device settings
-            </button>
+            />
           }
           // Feature 19 — the logo origin. A device reads its logo from the
           // PINNED snapshot's path, so replacing the owner's logo later cannot
@@ -1691,6 +1722,12 @@ export default function DeviceApp() {
           persistedUncertainSale={uncertainSale}
         />
           </div>
+
+          {/* Above the POS, never instead of it — see the note on `overlay`.
+              PosRuntime stays mounted, so the cart survives. */}
+          {overlay !== null && (
+            <div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{overlay}</div>
+          )}
         </div>
       );
     }
