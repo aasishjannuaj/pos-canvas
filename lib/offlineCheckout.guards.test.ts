@@ -615,8 +615,15 @@ describe("the cashier is told the truth about what is waiting", () => {
     const rpc = code(read("lib/device.rpc.ts"));
 
     // The classification is the EXISTING one, surfaced rather than re-derived.
-    expect(rpc).toContain("failure: classifyDeviceFailure(error)");
+    //
+    // Feature 25.4 — an auth call is classified by classifyAuthFailure, which
+    // is that same classifier behind auth-js's own is-this-a-fetch-failure
+    // predicate. What this guards is that NOTHING here invents a third answer,
+    // so both established names satisfy it and an inline re-derivation does not.
+    expect(rpc).toMatch(/failure: classify(Device|Auth)Failure\(error\)/);
     expect(rpc).toContain("failure: classifyDeviceFailure(thrown)");
+    expect(rpc).toContain("failure: classifyAuthFailure(thrown)");
+    expect(rpc).toContain('isAuthRetryableFetchError(error) ? "transport" : classifyDeviceFailure(error)');
     // A malformed body proves the server answered; it must never read as
     // transport.
     expect(rpc).toContain('failure: "server_rejected"');

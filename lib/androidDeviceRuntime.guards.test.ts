@@ -307,7 +307,15 @@ describe("a transport failure reaches the cache, not a dead end", () => {
     expect(fallback).toBeGreaterThan(recover);
 
     // The terminal error survives, but ONLY for a device with no identity.
-    const terminal = app.indexOf('setState(createDeviceError("offline"));', gate);
+    //
+    // Feature 25.4 changed WHICH error that is — it is now classified rather
+    // than always "offline" — so this anchors on the terminal setState itself.
+    // The ordering property guarded here is unchanged: the cache is consulted
+    // before any dead end, and the dead end is reachable only with no identity.
+    const terminal = app.indexOf(
+      "setState(createDeviceError(classifyStartupFailure(failure)));",
+      gate
+    );
 
     expect(terminal).toBeGreaterThan(recover);
     expect(terminal).toBeLessThan(fallback);

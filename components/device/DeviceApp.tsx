@@ -41,6 +41,7 @@ import {
 import {
   createDeviceError,
   decideConfigState,
+  DEVICE_ERROR_TITLES,
   decidePairingState,
   getDeviceDisplayName,
   getDeviceRuntimeMode,
@@ -77,6 +78,7 @@ import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import OperatorMenu from "@/components/device/OperatorMenu";
 import SalesHistoryScreen from "@/components/runtime/SalesHistoryScreen";
 import SalesHistoryDetail from "@/components/runtime/SalesHistoryDetail";
+import { classifyStartupFailure } from "@/lib/deviceStartupError";
 import { CURRENCY_SYMBOLS } from "@/lib/projectConfig";
 import type { DeviceHistoryOrder } from "@/lib/deviceOrders";
 import {
@@ -274,12 +276,20 @@ export default function DeviceApp() {
    * Refuses outright unless the failure was classified as transport. Every
    * other outcome — including "unknown" — keeps the till on the network, per
    * docs/OFFLINE_ARCHITECTURE.md §G: if uncertain, do not grant offline access.
+   *
+   * Feature 25.4 — THE GATE IS UNCHANGED; ONLY WHAT IT SAYS ON THE WAY OUT IS.
+   * A paired till whose start the server REFUSED was told "No connection" here,
+   * the same untruth the fresh-install branch told, one path over. The refusal
+   * decides that this device may not open from cache; it never decided that the
+   * network was at fault. permitsOfflineFallback still rules on access, and
+   * classifyStartupFailure — the one authority, shared with fresh install —
+   * rules on wording.
    */
   const openOfflineOrFail = useCallback(
     async (sessionUserId: string, failure: DeviceFailureKind | undefined) => {
 
       if (failure === undefined || !permitsOfflineFallback(failure)) {
-        setState(createDeviceError("offline"));
+        setState(createDeviceError(classifyStartupFailure(failure)));
         return;
       }
 
@@ -353,7 +363,15 @@ export default function DeviceApp() {
         if (persistedUserId === null) {
           // Genuinely nothing to fall back to: this device has never held a
           // session, so it has never been paired and has nothing cached.
-          setState(createDeviceError("offline"));
+          //
+          // Feature 25.4 — WHAT is wrong still has to be told truthfully.
+          // Having no cache to open decides that this start cannot continue; it
+          // does not decide why the start failed. This branch used to answer
+          // "offline" for every failure, so a fresh install whose sign-in the
+          // server REFUSED reported "No connection" on a working network. The
+          // classification was already computed directly above and simply went
+          // unread.
+          setState(createDeviceError(classifyStartupFailure(failure)));
           return;
         }
 
@@ -1529,7 +1547,7 @@ export default function DeviceApp() {
     case "error":
       return (
         <DeviceStatusScreen
-          title={state.kind === "offline" ? "No connection" : "Something went wrong"}
+          title={DEVICE_ERROR_TITLES[state.kind]}
           message={state.message}
           onRetry={() => void resolveDeviceState()}
         />

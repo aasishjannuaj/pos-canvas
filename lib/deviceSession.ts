@@ -38,8 +38,25 @@ export type DeviceStatus =
   | "reconnect_required"
   | "error";
 
-/** Why the device cannot proceed. Never carries a raw database message. */
-export type DeviceErrorKind = "offline" | "unavailable";
+/**
+ * Why the device cannot proceed. Never carries a raw database message.
+ *
+ * Feature 25.4 — `startup_failed` exists because `offline` was being told for
+ * two different facts. A fresh install whose sign-in the SERVER REFUSED — the
+ * anonymous provider switched off, for instance — was reported as "No
+ * connection" on a machine with perfect connectivity, which cost a full
+ * debugging cycle and would send an operator to check a router that is working.
+ *
+ * The three are separated by what is KNOWN, not by what went wrong:
+ *
+ *   offline        — nothing answered. A transport failure, positively
+ *                    classified; the network is the thing to check.
+ *   startup_failed — something answered and refused, or the failure could not
+ *                    be proven to be transport. The network is not the lead.
+ *   unavailable    — a reply arrived and could not be understood. Unchanged,
+ *                    and still only reachable from decidePairingState.
+ */
+export type DeviceErrorKind = "offline" | "startup_failed" | "unavailable";
 
 export type DevicePairing = {
   deviceId: string;
@@ -115,9 +132,30 @@ export type OfflineBlockedReason =
   | "cache_corrupt"
   | "storage_unavailable";
 
+/**
+ * The whole of what an operator is shown, titles included.
+ *
+ * NOTHING HERE NAMES A MECHANISM. No provider, no vendor, no HTTP status, no
+ * auth or PostgREST vocabulary, and never a raw server message — a cashier
+ * reads these, and a sentence naming the thing that refused is one they cannot
+ * act on. What differs between them is only which action is worth trying.
+ */
+export const DEVICE_ERROR_TITLES: Record<DeviceErrorKind, string> = {
+  offline: "No connection",
+  startup_failed: "Unable to start this device",
+  unavailable: "Something went wrong",
+};
+
 export const DEVICE_ERROR_MESSAGES: Record<DeviceErrorKind, string> = {
   offline:
-    "This device is offline. POS Canvas needs a network connection to take payments.",
+    "POS Canvas couldn't reach the service. Check your internet connection and try again.",
+  // Says only what is true in every case that reaches it. The suggested wording
+  // opened with "reached the service", which is proven for a refused reply and
+  // NOT proven for a failure that could not be classified — and both land here.
+  // Claiming it would reintroduce, in the other direction, exactly the kind of
+  // confident-but-wrong sentence this feature exists to remove.
+  startup_failed:
+    "POS Canvas couldn't start this device. Try again, and contact support if the problem continues.",
   unavailable: "POS Canvas could not be reached. Please try again.",
 };
 

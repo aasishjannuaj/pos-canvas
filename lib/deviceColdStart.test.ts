@@ -16,13 +16,15 @@ import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it } from "vitest";
 import { readPersistedDeviceUserId } from "@/lib/device.rpc";
 import { classifyDeviceFailure, permitsOfflineFallback } from "@/lib/deviceConnectivity";
+import { classifyStartupFailure } from "@/lib/deviceStartupError";
 import { DEVICE_AUTH_STORAGE_KEY } from "@/lib/supabase/deviceClient";
 import { loadOfflineFallback, persistDeviceCache } from "@/lib/deviceOfflineSession";
 import { OFFLINE_DEVICE_LEASE_MS } from "@/lib/deviceOfflineCache";
 import { openOfflineDb, writePinnedConfigRecord } from "@/lib/deviceOfflineStore";
 import { createGeneratedPosConfig } from "@/lib/generatedPosConfig";
 import { cloneProjectConfig, defaultProjectConfig } from "@/lib/projectConfig";
-import type { DevicePairing } from "@/lib/deviceSession";
+import { DEVICE_ERROR_MESSAGES, DEVICE_ERROR_TITLES } from "@/lib/deviceSession";
+import type { DeviceErrorKind, DevicePairing } from "@/lib/deviceSession";
 
 const USER = "0385499a-1111-4111-8111-111111111111";
 const OTHER_USER = "99999999-9999-4999-8999-999999999999";
@@ -355,14 +357,24 @@ const OFFLINE_AUTH_ERROR = {
 /**
  * The runtime's gate, as a function: openOfflineOrFail refuses anything that is
  * not a transport failure, and only then consults the cache.
+ *
+ * Feature 25.4 — the refusal now reports WHICH error it is, exactly as the
+ * component does. It used to return a single "error-offline" screen, which
+ * quietly baked in the assumption this feature removes: that every refusal here
+ * means the network is down. The gate itself — permitsOfflineFallback, then the
+ * validator — is byte-for-byte the same decision it was.
  */
 async function coldStart(input: {
-  failure: ReturnType<typeof classifyDeviceFailure>;
+  failure: ReturnType<typeof classifyDeviceFailure> | undefined;
   sessionUserId: string;
   now: number;
-}): Promise<{ screen: "ready-offline" | "reconnect_required" | "error-offline"; reason?: string }> {
-  if (!permitsOfflineFallback(input.failure)) {
-    return { screen: "error-offline" };
+}): Promise<{
+  screen: "ready-offline" | "reconnect_required" | "error";
+  kind?: DeviceErrorKind;
+  reason?: string;
+}> {
+  if (input.failure === undefined || !permitsOfflineFallback(input.failure)) {
+    return { screen: "error", kind: classifyStartupFailure(input.failure) };
   }
 
   const fallback = await loadOfflineFallback({
@@ -452,7 +464,10 @@ describe("an answered rejection still never opens the cache", () => {
       now: PAIRED_AT + 60_000,
     });
 
-    expect(outcome.screen).toBe("error-offline");
+    expect(outcome.screen).toBe("error");
+    // Feature 25.4 — a revocation ANSWERED. Telling the operator "No
+    // connection" here was the same untruth the fresh-install branch told.
+    expect(outcome.kind).toBe("startup_failed");
   });
 
   it("401, 403 and 503 responses all refuse", async () => {
@@ -467,7 +482,8 @@ describe("an answered rejection still never opens the cache", () => {
         now: PAIRED_AT + 60_000,
       });
 
-      expect(outcome.screen).toBe("error-offline");
+      expect(outcome.screen).toBe("error");
+      expect(outcome.kind).toBe("startup_failed");
     }
   });
 
@@ -482,5 +498,154 @@ describe("an answered rejection still never opens the cache", () => {
 
     expect(outcome.screen).toBe("reconnect_required");
     expect(outcome.reason).toBe("no_cache");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 25.4 — a paired till is told which thing is wrong, too
+//
+// The fresh-install branch was fixed first. The SAME untruth lived one path
+// over: openOfflineOrFail answered createDeviceError("offline") for every
+// failure the offline gate refused, so a paired till whose start the server
+// REFUSED reported "No connection" on a working network.
+//
+// The gate is untouched. What changed is only the sentence on the way out, and
+// these run over real IndexedDB so the lease, digest and identity checks are
+// genuinely exercised rather than mocked past.
+// ---------------------------------------------------------------------------
+
+describe("a paired till whose start was refused is not told the network is down", () => {
+  it("a definite server rejection with no usable fallback says startup_failed", async () => {
+    // No cache at all AND an answered rejection: the terminal error path.
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure({ status: 422, code: "P0001", message: "denied" }),
+      sessionUserId: USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    expect(outcome.screen).toBe("error");
+    expect(outcome.kind).toBe("startup_failed");
+    expect(DEVICE_ERROR_TITLES[outcome.kind!]).toBe("Unable to start this device");
+    expect(DEVICE_ERROR_TITLES[outcome.kind!]).not.toBe("No connection");
+  });
+
+  it("the same is true with a PERFECT cache — the refusal still wins", async () => {
+    await pairOnline();
+
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure({ status: 401, message: "denied" }),
+      sessionUserId: USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    // The 24.5A rule is intact: an answered rejection never opens the cache.
+    expect(outcome.screen).toBe("error");
+    expect(outcome.kind).toBe("startup_failed");
+  });
+
+  it("an unclassifiable failure does not claim the network is down either", async () => {
+    for (const failure of [classifyDeviceFailure({ weird: true }), undefined] as const) {
+      const outcome = await coldStart({ failure, sessionUserId: USER, now: PAIRED_AT + 60_000 });
+
+      expect(outcome.screen).toBe("error");
+      expect(outcome.kind).toBe("startup_failed");
+    }
+  });
+
+  it("a transport failure NEVER reaches this terminal error at all", async () => {
+    // Worth pinning explicitly, because it is what makes the persisted path
+    // differ from fresh install: permitsOfflineFallback admits transport, so a
+    // transport failure always goes on to the validator. With no usable cache
+    // the answer is reconnect_required — NOT "No connection", and NOT an error.
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure(OFFLINE_RPC_ERROR),
+      sessionUserId: USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    expect(outcome.screen).toBe("reconnect_required");
+    expect(outcome.screen).not.toBe("error");
+  });
+
+  it("but the mapping still answers offline for transport, wherever it is asked", () => {
+    // One authority, shared with fresh install. If the gate above ever changed
+    // so that transport could reach a terminal error, this is what it would say.
+    expect(classifyStartupFailure("transport")).toBe("offline");
+    expect(DEVICE_ERROR_TITLES.offline).toBe("No connection");
+  });
+
+  it("no refusal message names the thing that refused", async () => {
+    await pairOnline();
+
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure({
+        status: 403,
+        code: "42501",
+        message: "permission denied for table paired_devices",
+      }),
+      sessionUserId: USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    const shown = `${DEVICE_ERROR_TITLES[outcome.kind!]} ${DEVICE_ERROR_MESSAGES[outcome.kind!]}`;
+
+    for (const leak of ["paired_devices", "42501", "403", "permission denied", "supabase"]) {
+      expect(shown.toLowerCase()).not.toContain(leak.toLowerCase());
+    }
+  });
+});
+
+describe("the copy change bypasses no offline gate", () => {
+  it("a valid lease still opens the till offline on a transport failure", async () => {
+    await pairOnline();
+
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure(OFFLINE_AUTH_ERROR),
+      sessionUserId: USER,
+      now: PAIRED_AT + 6 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(outcome.screen).toBe("ready-offline");
+  });
+
+  it("an expired lease still refuses, with reconnect_required unchanged", async () => {
+    await pairOnline();
+
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure(OFFLINE_AUTH_ERROR),
+      sessionUserId: USER,
+      now: PAIRED_AT + OFFLINE_DEVICE_LEASE_MS + 1,
+    });
+
+    expect(outcome.screen).toBe("reconnect_required");
+    expect(outcome.reason).toBe("lease_expired");
+  });
+
+  it("a foreign identity still refuses, and never as a copy decision", async () => {
+    await pairOnline();
+
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure(OFFLINE_AUTH_ERROR),
+      sessionUserId: OTHER_USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    expect(outcome.screen).toBe("reconnect_required");
+    expect(outcome.reason).toBe("identity_mismatch");
+  });
+
+  it("every reconnect_required reason still routes to its own screen", async () => {
+    // No cache is the reason a fresh-ish paired device hits; the others are
+    // covered above and in the 24.5G blocks. What matters here is that NONE of
+    // them became a DeviceError when the terminal copy changed.
+    const outcome = await coldStart({
+      failure: classifyDeviceFailure(OFFLINE_RPC_ERROR),
+      sessionUserId: USER,
+      now: PAIRED_AT + 60_000,
+    });
+
+    expect(outcome.screen).toBe("reconnect_required");
+    expect(outcome.reason).toBe("no_cache");
+    expect(outcome.kind).toBeUndefined();
   });
 });

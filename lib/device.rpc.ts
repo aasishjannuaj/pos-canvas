@@ -224,12 +224,18 @@ export async function signInDeviceAnonymously(): Promise<DeviceSessionResult> {
       await getDeviceSupabaseClient().auth.signInAnonymously();
 
     if (error || !data.user?.id) {
-      return { ok: false, failure: classifyDeviceFailure(error) };
+      // Feature 25.4 — classifyAuthFailure, the SAME predicate getDeviceSession
+      // uses, rather than the generic classifier this line used to call. Both
+      // are auth-js errors and both decide what an operator is told, so they
+      // must be read by the same rules; the auth-specific one consults auth-js's
+      // own isAuthRetryableFetchError first, which is the only thing that can
+      // state authoritatively that a request never reached the server.
+      return { ok: false, failure: classifyAuthFailure(error) };
     }
 
     return { ok: true, userId: data.user.id };
   } catch (thrown) {
-    return { ok: false, failure: classifyDeviceFailure(thrown) };
+    return { ok: false, failure: classifyAuthFailure(thrown) };
   }
 }
 
