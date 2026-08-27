@@ -512,9 +512,23 @@ describe("nothing in this phase signs or publishes", () => {
 
     expect(raw).toContain("permissions:\n  contents: read");
 
-    expect(workflow).not.toContain("secrets.");
+    // Feature 25.6 — the job now reads two PUBLIC client values so it can build
+    // the device runtime before packaging. What must stay true is the scope of
+    // this workflow: it uploads an artifact and publishes nothing.
     expect(workflow).not.toContain("contents: write");
     expect(workflow).not.toContain("gh release create");
+    expect(workflow).not.toContain("softprops/action-gh-release");
+    expect(workflow).not.toContain("GITHUB_TOKEN");
+
+    // Scoped to what the job is GIVEN, not to any mention of the words. The
+    // verify step deliberately names SUPABASE_SERVICE_ROLE_KEY as a banned
+    // string to search the built bundle for — asserting on the whole file would
+    // fail the guard that exists to prevent exactly this leak.
+    for (const line of workflow.split("\n")) {
+      if (!/\$\{\{\s*(secrets|vars)\./.test(line)) continue;
+
+      expect(`workflow input: ${line.trim()}`).not.toContain("SERVICE_ROLE");
+    }
   });
 
   it("no auto-updater was introduced", () => {

@@ -63,11 +63,107 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: windows-shell/package-lock.json
+          # BOTH lockfiles. This job installs two separate npm projects: the
+          # repository root (which owns the device runtime's build) and
+          # windows-shell (which owns Electron and electron-builder).
+          cache-dependency-path: |
+            package-lock.json
+            windows-shell/package-lock.json
 
-      # The shell is a separate npm project; installing at the repository root
-      # would pull the web app's dependency tree for no reason and would not
-      # provide electron-builder.
+      # ------------------------------------------------------------------
+      # THE DEVICE RUNTIME. This must exist before packaging, and until
+      # Feature 25.6 it did not.
+      #
+      # windows-shell/runtime/ is gitignored build output, so a fresh CI
+      # checkout does not contain it. electron-builder's files glob includes
+      # "runtime/**/*", which matched NOTHING — so this workflow packaged an
+      # Electron installer with no POS inside it. The app installed, launched,
+      # failed to fetch app://poscanvas/index.html and sat on the offline page
+      # forever. The installer-size check below could not catch it: Electron
+      # alone is ~95 MB, far above the 40 MB floor.
+      #
+      # The runtime is built from the ROOT project (native-device/ + vite),
+      # which is why the root dependencies are installed here even though the
+      # packaging steps below run inside windows-shell.
+      # ------------------------------------------------------------------
+      - name: Install root dependencies
+        working-directory: .
+        run: npm ci
+
+      # The two PUBLIC values Next.js already inlines into every browser
+      # bundle it serves. They are client configuration, not credentials —
+      # read as repository variables, falling back to secrets so the job works
+      # with whichever the repository already has configured. A service-role
+      # key is a server credential and is deliberately not available here.
+      - name: Build the packaged device runtime
+        working-directory: .
+        run: npm run windows:runtime
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+      # FAIL CLOSED, BEFORE PACKAGING. A missing runtime must stop the build
+      # here rather than ship as a silently empty installer.
+      - name: Verify the packaged runtime exists and targets the right backend
+        shell: pwsh
+        working-directory: .
+        env:
+          EXPECTED_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL }}
+        run: |
+          $entry = "windows-shell/runtime/index.html"
+
+          if (-not (Test-Path $entry)) {
+            Write-Host "The packaged device runtime is missing: $entry"
+            Write-Host "windows-shell/runtime contains:"
+            if (Test-Path "windows-shell/runtime") {
+              Get-ChildItem -Recurse "windows-shell/runtime" | ForEach-Object { Write-Host "  $($_.FullName)" }
+            } else {
+              Write-Host "  (the directory does not exist)"
+            }
+            Write-Host ""
+            Write-Host "npm run windows:runtime must succeed before packaging."
+            exit 1
+          }
+
+          $bundles = Get-ChildItem "windows-shell/runtime/assets" -Filter *.js -ErrorAction SilentlyContinue
+
+          if (-not $bundles) {
+            Write-Host "No JavaScript bundle under windows-shell/runtime/assets."
+            exit 1
+          }
+
+          $js = ($bundles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+
+          # The backend is asserted against the URL THIS JOB WAS GIVEN, never a
+          # ref hardcoded in the repository. That keeps the assertion honest for
+          # any environment and puts no project identifier into tracked source.
+          $expected = $env:EXPECTED_SUPABASE_URL
+
+          if ([string]::IsNullOrWhiteSpace($expected)) {
+            Write-Host "NEXT_PUBLIC_SUPABASE_URL is not configured for this workflow."
+            Write-Host "Set it as a repository variable (or secret). See windows-shell/README.md."
+            exit 1
+          }
+
+          if ($js -notlike "*$expected*") {
+            Write-Host "The built runtime does not target the configured Supabase URL."
+            exit 1
+          }
+
+          # The established negative assertion: a server credential must never
+          # reach a customer-installable artifact.
+          foreach ($banned in @("service_role", "SUPABASE_SERVICE_ROLE_KEY")) {
+            if ($js -like "*$banned*") {
+              Write-Host "The built runtime contains a forbidden string: $banned"
+              exit 1
+            }
+          }
+
+          Write-Host "runtime ok: $entry"
+          Write-Host "bundles: $($bundles.Count)"
+
+      # The shell is a separate npm project; its dependency tree provides
+      # Electron and electron-builder, which the root project does not carry.
       - name: Install shell dependencies
         run: npm ci
 

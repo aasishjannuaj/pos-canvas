@@ -506,9 +506,14 @@ describe("the Windows build workflow", () => {
     expect(code(workflow)).not.toContain("pull_request");
   });
 
-  it("uses Node 24 and caches the shell lockfile", () => {
+  it("uses Node 24 and caches both lockfiles", () => {
     expect(workflow).toContain('node-version: "24"');
-    expect(workflow).toContain("cache-dependency-path: windows-shell/package-lock.json");
+    // Feature 25.6 — the job installs TWO npm projects: the repository root,
+    // which owns the device runtime build, and windows-shell, which owns
+    // Electron. The shell lockfile is still cached; the root one joined it.
+    expect(workflow).toContain("cache-dependency-path:");
+    expect(workflow).toContain("windows-shell/package-lock.json");
+    expect(workflow).toMatch(/cache-dependency-path:[\s\S]{0,120}\n\s+package-lock\.json/);
   });
 
   it("installs with npm ci inside windows-shell", () => {
@@ -570,11 +575,20 @@ describe("the Windows build workflow", () => {
     }
   });
 
-  it("references no secret at all", () => {
-    // The shell is a static wrapper with no credentials. A build that needs no
-    // secret cannot leak one.
-    expect(code(workflow)).not.toContain("secrets.");
-    expect(code(workflow)).not.toContain("${{ secrets");
+  it("references no server credential", () => {
+    // The original rule was "no secret at all", which held while the shell was a
+    // static wrapper. Feature 25.6 gave the job the two PUBLIC Supabase values
+    // the device runtime is compiled with — the same pair Next.js inlines into
+    // every browser bundle — so the rule is now the one that actually matters:
+    // nothing here may carry a SERVER credential.
+    const stripped = code(workflow);
+
+    for (const line of stripped.split("\n")) {
+      if (!/\$\{\{\s*(secrets|vars)\./.test(line)) continue;
+
+      expect(`workflow input: ${line.trim()}`).not.toContain("SERVICE_ROLE");
+      expect(line).toMatch(/NEXT_PUBLIC_SUPABASE_(URL|ANON_KEY)/);
+    }
   });
 });
 

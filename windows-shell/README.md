@@ -273,6 +273,45 @@ forward as a **hard validation gate for Feature 23.5**:
 
 **The authoritative build path is GitHub Actions, not your Mac.**
 
+### What the workflow does, in order
+
+The job builds **two things, in this order**, and the order is the whole point.
+
+1. **The device runtime, from the repository root.** `npm ci` at the root, then
+   `npm run windows:runtime`, which runs the `native-device` vite build and emits
+   the POS into `windows-shell/runtime/`.
+2. **A hard assertion that the runtime exists** and targets the configured
+   Supabase URL, and that no server credential reached the bundle. The job stops
+   here if anything is wrong.
+3. **The installer, from `windows-shell`.** `npm ci` there for Electron and
+   electron-builder, then `npm run build:windows`.
+
+`windows-shell/runtime/` is gitignored build output, so a fresh checkout does not
+contain it. Until Feature 25.6 this workflow skipped step 1 entirely:
+electron-builder's `runtime/**/*` glob matched nothing and the job produced an
+installer with **no POS inside it**. It installed, launched, failed to fetch
+`app://poscanvas/index.html` and sat on the offline page forever. The
+installer-size check could not catch it — Electron alone is ~95 MB, far above the
+40 MB floor — which is why step 2 exists and fails closed.
+
+### Required repository configuration
+
+The runtime build needs the same two **public** values Next.js already inlines
+into every browser bundle it serves:
+
+| Name | What it is |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | The project URL, e.g. `https://<ref>.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The public anon key |
+
+Set them as **repository variables** (Settings → Secrets and variables → Actions
+→ Variables). The workflow falls back to secrets of the same names, so either
+works. Neither is a credential: both ship inside every APK and EXE by design.
+
+**A service-role key is never available to this job**, and a guard fails the
+build if one is ever wired in. That is a server credential and would be
+catastrophic inside a customer-installable artifact.
+
 ### Running a build
 
 1. GitHub → **Actions** → **Windows app** → **Run workflow** → branch `main` → **Run workflow**.
@@ -280,6 +319,8 @@ forward as a **hard validation gate for Feature 23.5**:
 3. It contains two files:
    - `POS-Canvas-Windows-v1.0.0.exe`
    - `POS-Canvas-Windows-v1.0.0.exe.sha256`
+
+Check the log for `runtime ok:` before trusting the artifact.
 
 ### Verifying the download
 
