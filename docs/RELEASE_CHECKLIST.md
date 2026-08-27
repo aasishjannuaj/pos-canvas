@@ -266,19 +266,29 @@ For **every** artifact that leaves this machine:
 Carried from the 25.6 audit. P0 must be closed before release; P1 should be
 closed before wider launch; P2 is accepted for MVP.
 
-### P0-1 — Windows CI runtime generation — FIXED IN WORKING TREE
+### P0-1 — Windows CI runtime generation — STILL OPEN
 
-`.github/workflows/windows-app.yml` now installs the root project, runs
+`.github/workflows/windows-app.yml` installs the root project, runs
 `npm run windows:runtime`, and **fails closed** if
 `windows-shell/runtime/index.html` is missing or the bundle does not target the
 configured Supabase URL — all before electron-builder runs.
 
-**Not closed yet.** It is closed only when the fix is committed, pushed, and the
-GitHub Action itself completes green with `runtime ok:` in the log and an
-installer whose `app.asar` contains a real runtime.
+**First real CI run: FAILED, before packaging — which is the pipeline working.**
+
+| | |
+|---|---|
+| Failed at | *Build the packaged device runtime* |
+| Error | `'POS_CANVAS_DEVICE_OUT_DIR' is not recognized as an internal or external command` |
+| Root cause | `windows:runtime` used POSIX inline env assignment (`NAME=value command`). npm runs scripts through `cmd.exe` on Windows, which has no such syntax and tries to execute the assignment as a program. |
+| Second defect found | `readOutDir()` in `native-device/vite.config.mts` compared with a hardcoded `/` separator, so the containment check rejected a directory plainly inside the repository on Windows. Would have failed the next run. |
+| **Not the cause** | The two repository variables. `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` were configured correctly with the production client values, and the failure happened before either was read. **No GitHub configuration change is required.** |
+
+Both defects are fixed in the working tree and pending CI verification. P0-1
+closes only when the Action completes green with `runtime ok:` in the log **and**
+the artifact's `app.asar` is confirmed to contain a real runtime.
 
 Requires two repository variables: `NEXT_PUBLIC_SUPABASE_URL` and
-`NEXT_PUBLIC_SUPABASE_ANON_KEY` (see `windows-shell/README.md`).
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` (see `windows-shell/README.md`) — already set.
 
 ### P0-2 — stale published Windows v1.0.0 — OPEN PUBLICATION GATE
 
@@ -293,7 +303,7 @@ downloadable and its checksum verified against the served file.
 
 | # | Item | Class |
 |---|---|---|
-| 1 | Windows CI never builds `windows-shell/runtime` → installer with no POS | **P0 — FIXED IN WORKING TREE**, pending commit and a green CI run |
+| 1 | Windows CI never builds `windows-shell/runtime` → installer with no POS | **P0 — OPEN.** Fix committed; first CI run failed on POSIX-only npm script syntax, now fixed in tree and pending re-verification |
 | 2 | Published Windows v1.0.0 predates the local-runtime architecture | **P0 — OPEN PUBLICATION GATE** |
 | 3 | Windows installer unsigned (SmartScreen) | P1 |
 | 4 | Stalled `queued` publish polls while the editor is open | P1 |
@@ -306,6 +316,7 @@ downloadable and its checksum verified against the served file.
 | 11 | `windows-shell/serverUrl.mjs` still imported by `main.mjs` | P2 |
 | 12 | `supabase/config.toml` scaffold hazard | P2 (documented, §8) |
 | 13 | Windows staging QA builds share `userData` with production | P2 (QA only) |
+| 14 | `windows-shell` `start:production` still uses POSIX inline env (`POS_CANVAS_DESKTOP_RELEASE=1 electron .`) — breaks for a Windows developer; not in any release path | P2 |
 
 ---
 

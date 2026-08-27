@@ -343,8 +343,14 @@ describe("the installer carries the runtime and nothing customer-specific", () =
   it("builds that runtime from the SAME source Android uses", () => {
     const manifest = JSON.parse(read("package.json"));
 
-    expect(manifest.scripts["windows:runtime"]).toContain("native-device/vite.config.mts");
-    expect(manifest.scripts["android:runtime"]).toContain("native-device/vite.config.mts");
+    // Feature 25.6 P0-1 — the scripts now go through native-device/build.mjs
+    // rather than naming the vite config directly, because a POSIX inline env
+    // assignment cannot run under cmd.exe on the Windows CI runner. The property
+    // guarded here is unchanged: the runtime is built from the ONE shared
+    // native-device config, so there is no android copy and no windows copy.
+    expect(manifest.scripts["windows:runtime"]).toContain("native-device/build.mjs");
+    expect(manifest.scripts["android:runtime"]).toContain("native-device/build.mjs");
+    expect(read("native-device/build.mjs")).toContain('resolve(here, "vite.config.mts")');
     // One source, two output directories — no android copy and no windows copy.
     expect(manifest.scripts["windows:runtime"]).toContain("windows-shell/runtime");
   });

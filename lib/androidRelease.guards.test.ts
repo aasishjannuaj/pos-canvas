@@ -239,7 +239,7 @@ describe("the release URL is pinned in tracked code", () => {
     // a stale or missing bundle.
     const manifest = JSON.parse(read("package.json"));
 
-    expect(manifest.scripts["android:runtime"]).toContain("native-device/vite.config.mts");
+    expect(read("native-device/build.mjs")).toContain('resolve(here, "vite.config.mts")');
     expect(manifest.scripts["android:sync"]).toContain("android:runtime");
     expect(manifest.scripts["android:sync"]).toContain("cap sync android");
     expect(manifest.scripts["android:release:sync"]).toContain("android:sync");

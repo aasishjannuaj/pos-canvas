@@ -21,7 +21,7 @@
 // one device implementation with two entry points rather than two apps.
 import { defineConfig } from "vite";
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,7 +45,21 @@ function readOutDir(): string {
 
   const absolute = resolve(repoRoot, requested);
 
-  if (!absolute.startsWith(`${repoRoot}/`)) {
+  // Feature 25.6 P0-1 — SEPARATOR-AGNOSTIC containment.
+  //
+  // This was `absolute.startsWith(`${repoRoot}/`)`, which is a POSIX assumption
+  // hidden inside a security check. On Windows `resolve` returns
+  // D:\a\repo\windows-shell\runtime while the prefix being compared is
+  // D:\a\repo/ — a forward slash that never appears in the resolved path — so
+  // the check failed for a path that is plainly inside the repository, and every
+  // Windows build threw "must resolve inside the repository".
+  //
+  // `relative` answers the actual question on both platforms: a path inside the
+  // root produces a non-empty relative path that neither escapes with ".." nor
+  // is itself absolute (which is what a different drive letter yields).
+  const inside = relative(repoRoot, absolute);
+
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
     throw new Error(
       `POS_CANVAS_DEVICE_OUT_DIR must resolve inside the repository. Got: ${absolute}`
     );

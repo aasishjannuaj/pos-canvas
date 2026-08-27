@@ -78,7 +78,13 @@ describe("the Android app carries its own runtime", () => {
     // Otherwise an APK could be assembled around a stale or missing bundle.
     const manifest = JSON.parse(read("package.json"));
 
-    expect(manifest.scripts["android:runtime"]).toContain(VITE);
+    // Feature 25.6 P0-1 — the scripts now go through native-device/build.mjs
+    // rather than naming the vite config directly, because a POSIX inline env
+    // assignment cannot run under cmd.exe on the Windows CI runner. The property
+    // guarded here is unchanged: the runtime is built from the ONE shared
+    // native-device config, so there is no android copy and no windows copy.
+    expect(manifest.scripts["android:runtime"]).toContain("native-device/build.mjs");
+    expect(read("native-device/build.mjs")).toContain('resolve(here, "vite.config.mts")');
     expect(manifest.scripts["android:sync"]).toContain("android:runtime");
     expect(manifest.scripts["android:sync"]).toContain("cap sync android");
   });

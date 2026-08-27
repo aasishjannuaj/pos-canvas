@@ -27,6 +27,11 @@ const read = (file: string) => readFileSync(join(repoRoot, file), "utf-8");
 const WORKFLOW = ".github/workflows/windows-app.yml";
 const ROOT_PKG = "package.json";
 const SHELL_PKG = "windows-shell/package.json";
+const VITE_CONFIG = "native-device/vite.config.mts";
+const LAUNCHER = "native-device/build.mjs";
+
+/** A leading NAME=value, which is POSIX shell syntax cmd.exe cannot run. */
+const POSIX_INLINE_ENV = /^\s*[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** The workflow with comment lines stripped, so prose cannot satisfy a guard. */
 function steps(): string {
@@ -200,7 +205,7 @@ describe("packaging identity is unchanged by the fix", () => {
     const root = JSON.parse(read(ROOT_PKG));
     const shell = JSON.parse(read(SHELL_PKG));
 
-    expect(root.scripts["windows:runtime"]).toContain("POS_CANVAS_DEVICE_OUT_DIR=windows-shell/runtime");
+    expect(root.scripts["windows:runtime"]).toContain("windows-shell/runtime");
     expect(shell.build.files).toContain("runtime/**/*");
   });
 
@@ -209,5 +214,104 @@ describe("packaging identity is unchanged by the fix", () => {
 
     expect(source).toContain("actions/upload-artifact@v4");
     expect(source).toContain("if-no-files-found: error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 25.6 P0-1, second failure — the scripts must run on Windows
+//
+// The first real windows-latest run died before packaging:
+//
+//   'POS_CANVAS_DEVICE_OUT_DIR' is not recognized as an internal or external
+//   command, operable program or batch file.
+//
+// npm runs scripts through cmd.exe on Windows, and cmd has no leading
+// NAME=value assignment — it tries to EXECUTE that token. The fail-closed step
+// did its job and stopped the build; these guards stop the syntax coming back.
+// ---------------------------------------------------------------------------
+
+describe("the runtime scripts run on Windows as well as macOS", () => {
+  it("no root script starts with a POSIX inline env assignment", () => {
+    // THE NEGATIVE CONTROL. Reintroducing `NAME=value command` must fail here.
+    const root = JSON.parse(read(ROOT_PKG));
+
+    for (const [name, command] of Object.entries(root.scripts as Record<string, string>)) {
+      expect(`${name}: ${command}`).toBe(`${name}: ${command}`);
+      expect(POSIX_INLINE_ENV.test(command)).toBe(false);
+    }
+  });
+
+  it("both runtime scripts go through the Node launcher", () => {
+    const root = JSON.parse(read(ROOT_PKG));
+
+    // `node <file>` is a program on PATH plus arguments, which cmd.exe and any
+    // POSIX shell parse identically. There is nothing left to quote wrongly.
+    expect(root.scripts["windows:runtime"]).toBe("node native-device/build.mjs windows-shell/runtime");
+    expect(root.scripts["android:runtime"]).toBe("node native-device/build.mjs");
+  });
+
+  it("the launcher sets the variable itself, from an argument", () => {
+    const launcher = read(LAUNCHER);
+
+    expect(launcher).toContain("process.env.POS_CANVAS_DEVICE_OUT_DIR = requestedOutDir");
+    expect(launcher).toContain("process.argv[2]");
+    // Vite's Node API, so no shell is spawned on any platform.
+    expect(launcher).toContain('import { build } from "vite"');
+    expect(launcher).not.toContain("execSync");
+    expect(launcher).not.toContain("spawn");
+  });
+
+  it("a failed runtime build exits non-zero, so CI stops", () => {
+    expect(read(LAUNCHER)).toContain("process.exit(1)");
+  });
+
+  it("omitting the argument leaves the Android default intact", () => {
+    const launcher = read(LAUNCHER);
+    const config = read(VITE_CONFIG);
+
+    // The launcher only sets the variable when given one...
+    expect(launcher).toContain("requestedOutDir !== undefined");
+    // ...and the config's fallback is still the Android shell's webDir.
+    expect(config).toContain('return resolve(repoRoot, "android-shell/www");');
+  });
+
+  it("the workflow still calls the npm script, not a shell workaround", () => {
+    const runtime = commands();
+
+    expect(runtime).toContain("npm run windows:runtime");
+    // A PowerShell-only $env: assignment in the workflow would leave the npm
+    // script itself broken for everyone building on Windows locally.
+    expect(runtime).not.toContain("$env:POS_CANVAS_DEVICE_OUT_DIR");
+  });
+});
+
+describe("the out-dir containment check is separator-agnostic", () => {
+  it("does not compare against a hardcoded POSIX separator", () => {
+    // Comments stripped: the config now DESCRIBES the old expression in prose,
+    // and a guard that reads prose is the trap this file keeps re-learning.
+    const config = read(VITE_CONFIG)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+    // The old check was a POSIX assumption hidden inside a security check: on
+    // Windows the resolved path uses backslashes, so it rejected a directory
+    // plainly inside the repository.
+    expect(config).not.toContain("startsWith(`${repoRoot}/`)");
+  });
+
+  it("uses relative()/isAbsolute(), which answer the real question", () => {
+    const config = read(VITE_CONFIG);
+
+    expect(config).toContain("const inside = relative(repoRoot, absolute);");
+    expect(config).toContain('inside === "" || inside.startsWith("..") || isAbsolute(inside)');
+    expect(config).toContain('import { dirname, isAbsolute, relative, resolve } from "node:path";');
+  });
+
+  it("still refuses to write outside the repository", () => {
+    // The guard exists so a mistyped variable fails instead of scattering a POS
+    // across the filesystem. Weakening it must not be how Windows gets fixed.
+    expect(read(VITE_CONFIG)).toContain(
+      "POS_CANVAS_DEVICE_OUT_DIR must resolve inside the repository"
+    );
   });
 });
