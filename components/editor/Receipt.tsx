@@ -127,11 +127,23 @@ export default function Receipt({ order, businessProfile, receipt }: ReceiptProp
           // with different options stay distinct. Historical orders loaded from
           // the database carry a lineKey rebuilt from their stored snapshot.
           <div key={item.lineKey || `${item.itemId}-${index}`} className="text-xs text-neutral-600">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex-1 truncate text-neutral-900">
+            {/* Feature 25.5 — the purchased name WRAPS; it is never ellipsised.
+                A printed slip is the customer's record of what they bought, and
+                a name cut off at the column width silently changes what that
+                record says. `min-w-0` is what lets the name shrink below its
+                intrinsic width at all (a flex item defaults to min-width:auto),
+                and `break-words` breaks a single unbroken token rather than
+                pushing the row into horizontal overflow.
+
+                `items-baseline` replaces `items-center`, which centred the price
+                against the whole wrapped block and floated it into the middle of
+                a two-line name. The price now sits on the first line. It is
+                `flex-none` so it can never be the thing that shrinks. */}
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="min-w-0 flex-1 break-words text-neutral-900">
                 {item.quantity} × {item.name}
               </span>
-              <span className="font-medium text-neutral-900">
+              <span className="flex-none font-medium tabular-nums text-neutral-900">
                 {currencySymbol}
                 {(item.price * item.quantity).toFixed(2)}
               </span>
@@ -144,11 +156,14 @@ export default function Receipt({ order, businessProfile, receipt }: ReceiptProp
             {describeCartModifiers(item).map((option) => (
               <div
                 key={option.id}
-                className="flex items-center justify-between gap-2 pl-4 text-[11px] text-neutral-500"
+                className="flex items-baseline justify-between gap-2 pl-4 text-[11px] text-neutral-500"
               >
-                <span className="flex-1 truncate">{option.name}</span>
+                {/* pl-4 keeps the indent that shows this belongs to the item
+                    above; the wrapped continuation lines inherit it, so the
+                    hierarchy survives wrapping. */}
+                <span className="min-w-0 flex-1 break-words">{option.name}</span>
                 {option.priceAdjustment > 0 && (
-                  <span className="tabular-nums">
+                  <span className="flex-none tabular-nums">
                     +{currencySymbol}
                     {option.priceAdjustment.toFixed(2)}
                   </span>

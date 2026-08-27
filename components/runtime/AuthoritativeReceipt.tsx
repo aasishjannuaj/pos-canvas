@@ -87,7 +87,7 @@ export default function AuthoritativeReceipt({
           // returns them in a stable order; nothing is re-sorted here.
           <div key={`${item.itemId}-${index}`} className="py-0.5">
             <div className="flex justify-between gap-2">
-              <span className="min-w-0 flex-1 truncate">
+              <span className="min-w-0 flex-1 break-words">
                 {item.quantity} × {item.itemName}
               </span>
               {/* The server's stored line total, never quantity × price. */}
@@ -107,7 +107,7 @@ export default function AuthoritativeReceipt({
                 key={`${modifier.groupId}-${modifier.optionId}`}
                 className="flex justify-between gap-2 pl-4 text-[11px] text-neutral-500"
               >
-                <span className="min-w-0 flex-1 truncate">{modifier.optionName}</span>
+                <span className="min-w-0 flex-1 break-words">{modifier.optionName}</span>
                 {modifier.priceAdjustment !== "0.00" && (
                   <span className="flex-none tabular-nums">
                     +{currencySymbol}

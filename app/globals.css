@@ -62,4 +62,31 @@ body {
     margin: 0;
     padding: 12px;
   }
+
+  /* Feature 25.5 — ONE receipt per print job, proven necessary on hardware-
+     shaped inspection rather than assumed.
+
+     `.receipt-print-area` is an AMBIENT selector: it reveals every element
+     carrying the class, and every one of them is `position: absolute; left: 0;
+     top: 0`, so two of them do not print as two pages — they overprint each
+     other at the same origin and produce garbage.
+
+     That was safe while at most one could ever be mounted, which is what
+     EditorPreview's comment has always asserted. Feature 25.3 broke the
+     assumption without touching this file: Sales history became an OVERLAY
+     above a still-mounted PosRuntime (so the cart survives), which means a
+     cashier who completes a sale, leaves the receipt open, then opens history
+     and reprints an older order has TWO print areas in the document — the new
+     sale and the old one — and would hand the customer both, superimposed.
+
+     A screen that owns the whole viewport declares itself the exclusive print
+     source, and nothing else prints while it is mounted. Marked per element
+     rather than on <body> so no effect has to add and remove a class, and no
+     unmount can strand the document in print-suppressed state. */
+  body:has(.receipt-print-area[data-print-exclusive])
+    .receipt-print-area:not([data-print-exclusive]),
+  body:has(.receipt-print-area[data-print-exclusive])
+    .receipt-print-area:not([data-print-exclusive]) * {
+    visibility: hidden;
+  }
 }

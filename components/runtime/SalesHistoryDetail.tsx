@@ -95,8 +95,16 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
 
       {/* The print-only copy. Positioned off-screen on screen and revealed by
           the existing @media print rules in globals.css — the same mechanism the
-          checkout receipt uses, so no new print CSS exists for history. */}
-      <div className="receipt-print-area">
+          checkout receipt uses.
+
+          Feature 25.5 — data-print-exclusive, because this screen is an overlay
+          above a STILL-MOUNTED PosRuntime. If the cashier left a just-completed
+          receipt open before opening history, its print area is also in the
+          document, and both are absolutely positioned at the same origin: the
+          two would overprint into one illegible slip carrying a sale the
+          customer never asked for. This marks the historical receipt as the only
+          thing that prints while it is on screen. */}
+      <div className="receipt-print-area" data-print-exclusive>
         <Receipt
           order={completed}
           businessProfile={config.businessProfile}

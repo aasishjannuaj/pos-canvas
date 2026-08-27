@@ -103,7 +103,7 @@ export default function OfflineReceipt({
           // AuthoritativeReceipt does. Nothing is re-sorted here.
           <div key={`${item.itemId}-${index}`} className="py-0.5">
             <div className="flex justify-between gap-2">
-              <span className="min-w-0 flex-1 truncate">
+              <span className="min-w-0 flex-1 break-words">
                 {item.quantity} × {item.itemName}
               </span>
               <span className="flex-none tabular-nums">
@@ -117,7 +117,7 @@ export default function OfflineReceipt({
                 key={`${modifier.groupId}-${modifier.optionId}`}
                 className="flex justify-between gap-2 pl-4 text-[11px] text-neutral-500"
               >
-                <span className="min-w-0 flex-1 truncate">{modifier.optionName}</span>
+                <span className="min-w-0 flex-1 break-words">{modifier.optionName}</span>
                 {modifier.priceAdjustment !== "0.00" && (
                   <span className="flex-none tabular-nums">
                     +{currencySymbol}
