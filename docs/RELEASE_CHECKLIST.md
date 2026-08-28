@@ -96,6 +96,13 @@ Run against **staging**. Do not mutate production.
 **Known behaviour, not a bug:** a job stuck in `queued` polls for as long as the
 editor is open. It never fabricates progress. See §12 (P1).
 
+**Verify the snapshot, not the stepper.** *Published* means a new snapshot
+exists; it does not mean the tills are using it. After any publish QA, confirm in
+the database that the newest build's `config_snapshot` actually contains the
+change before drawing conclusions from a till. This is what 25.6 regression
+missed, and it cost a full debugging cycle. A paired till will still not show the
+change until it is re-paired — see §12 item 2c.
+
 ---
 
 ## 4. Device pairing / lifecycle QA
@@ -266,7 +273,7 @@ For **every** artifact that leaves this machine:
 Carried from the 25.6 audit. P0 must be closed before release; P1 should be
 closed before wider launch; P2 is accepted for MVP.
 
-### P0-1 — Windows CI runtime generation — STILL OPEN
+### P0-1 — Windows CI runtime generation — CLOSED
 
 `.github/workflows/windows-app.yml` installs the root project, runs
 `npm run windows:runtime`, and **fails closed** if
@@ -283,12 +290,24 @@ configured Supabase URL — all before electron-builder runs.
 | Second defect found | `readOutDir()` in `native-device/vite.config.mts` compared with a hardcoded `/` separator, so the containment check rejected a directory plainly inside the repository on Windows. Would have failed the next run. |
 | **Not the cause** | The two repository variables. `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` were configured correctly with the production client values, and the failure happened before either was read. **No GitHub configuration change is required.** |
 
-Both defects are fixed in the working tree and pending CI verification. P0-1
-closes only when the Action completes green with `runtime ok:` in the log **and**
-the artifact's `app.asar` is confirmed to contain a real runtime.
+Both defects were fixed (`695ae03`, `716244c`), the rerun passed, and the
+artifact was verified independently of the log:
+
+| | |
+|---|---|
+| Installer SHA256 | `ba16200203c00d47d941c008a4a867c2c870dd1e8671603c89bbea0bb1d201f5` |
+| Installer size | 100,260,930 bytes — matches the `.sha256` CI produced |
+| `app.asar` SHA256 | `309425f63349a56283f24db8ffee860c0e4ee0c36d30d103525f671aaec82404` |
+| Runtime inside | `runtime/index.html` + one JS bundle + one CSS bundle |
+| Refs | production present, staging absent, no `service_role` |
+| Bundle bytes | **byte-identical** to a local build (`cmp` clean) |
 
 Requires two repository variables: `NEXT_PUBLIC_SUPABASE_URL` and
 `NEXT_PUBLIC_SUPABASE_ANON_KEY` (see `windows-shell/README.md`) — already set.
+
+**Still unproven, and not blocking:** installing the artifact on Windows and
+reaching the pairing screen rather than the offline page. The bytes are right;
+running it is a separate confirmation.
 
 ### P0-2 — stale published Windows v1.0.0 — OPEN PUBLICATION GATE
 
@@ -301,10 +320,40 @@ Windows release after 1.1.0 is published.** Closing this is step 6 of the rollou
 order (§10): update `lib/windowsRelease.ts` only once the 1.1.0 installer is
 downloadable and its checksum verified against the served file.
 
+### P0-3 — publish reported success for a stale snapshot — CLOSED
+
+Found in 25.6 manual regression. An owner added a product, saved, pressed
+Publish, and watched the stepper reach **Published** — for a build created 22
+hours earlier whose snapshot did not contain the change. The paired till kept
+showing the old menu and was right to.
+
+`build_jobs_active_target_unique` permits one queued/building job per
+(project, target), and `requestBuildJob` resolved that collision by returning
+the existing job. Correct for a double-click, wrong for a second publish: the
+snapshot is taken when a job is **created**, so "an active job exists" and
+"this configuration is already publishing" are different facts and nothing
+compared them.
+
+Fixed by `decideExistingBuildJob`: a request-key match still reuses immediately,
+an active job is settled against the submitted config hash, and a differing hash
+is refused with a conflict. The stale job is left running, unmodified.
+
+**Manually verified on staging:**
+
+| | |
+|---|---|
+| Case A — conflict | Queued job `f77c4f37`, hash `9fd2a406c654`, 14-item snapshot. Saved a second change (15 items), pressed Publish → conflict message shown, **no** stepper advance, **no** Published. Active jobs stayed 1, total stayed 7, job id and hash unchanged, snapshot still 14 items. **No second active job; the stale snapshot was not rewritten.** |
+| Case B — recovery | First job completed; the latest configuration then created its own new job, whose snapshot contained the later change; publish completed normally. |
+| Case C — idempotency | Same-config publish reused the existing job with no conflict; rapid duplicate publish created no duplicate active jobs. |
+
+No schema change was required — `config_hash` was already stored and indexed.
+
 | # | Item | Class |
 |---|---|---|
-| 1 | Windows CI never builds `windows-shell/runtime` → installer with no POS | **P0 — OPEN.** Fix committed; first CI run failed on POSIX-only npm script syntax, now fixed in tree and pending re-verification |
+| 1 | Windows CI never builds `windows-shell/runtime` → installer with no POS | **P0 — CLOSED.** CI green; artifact verified to contain a real runtime |
 | 2 | Published Windows v1.0.0 predates the local-runtime architecture | **P0 — OPEN PUBLICATION GATE** |
+| 2b | Publish reported success for a stale snapshot | **P0 — CLOSED.** Manually verified on staging |
+| 2c | A paired till does not receive a newly published config without re-pairing (Cause 2) | **P1 — OPEN.** Documented, intentional pin; not a silent failure |
 | 3 | Windows installer unsigned (SmartScreen) | P1 |
 | 4 | Stalled `queued` publish polls while the editor is open | P1 |
 | 5 | Historical receipt currency symbol comes from current pinned config | P1 |

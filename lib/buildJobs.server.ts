@@ -17,7 +17,8 @@ import {
   isValidUuid,
   mapBuildJobRow,
   normalizeRequestKey,
-  resolveExistingBuildJob,
+  decideExistingBuildJob,
+  PUBLISH_IN_PROGRESS_MESSAGE,
   isValidRetryReference,
 } from "@/lib/buildJobs";
 import type {
@@ -80,7 +81,11 @@ type AdminSupabaseClient = ReturnType<typeof createAdminClient>;
 async function lookupExistingBuildJob(
   admin: AdminSupabaseClient,
   args: { ownerId: string; projectId: string; target: BuildTarget; requestKey: string }
-): Promise<{ job: BuildJobSummary | null; error: string | null }> {
+): Promise<{
+  byRequestKey: BuildJobSummary | null;
+  activeForTarget: BuildJobSummary | null;
+  error: string | null;
+}> {
   const { data: requestKeyRow, error: requestKeyError } = await admin
     .from("build_jobs")
     .select(BUILD_JOB_COLUMNS)
@@ -90,7 +95,7 @@ async function lookupExistingBuildJob(
     .maybeSingle();
 
   if (requestKeyError) {
-    return { job: null, error: GENERIC_DATABASE_ERROR_MESSAGE };
+    return { byRequestKey: null, activeForTarget: null, error: GENERIC_DATABASE_ERROR_MESSAGE };
   }
 
   const { data: activeRow, error: activeError } = await admin
@@ -105,15 +110,19 @@ async function lookupExistingBuildJob(
     .maybeSingle();
 
   if (activeError) {
-    return { job: null, error: GENERIC_DATABASE_ERROR_MESSAGE };
+    return { byRequestKey: null, activeForTarget: null, error: GENERIC_DATABASE_ERROR_MESSAGE };
   }
 
-  const existingJob = resolveExistingBuildJob({
+  // Feature 25.6 — BOTH arms are returned, where this used to collapse them
+  // into one job. decideExistingBuildJob needs to know which matched: a
+  // request-key match is the same request arriving twice and is always
+  // reusable, while an active job for the target is only reusable when it
+  // carries the same configuration.
+  return {
     byRequestKey: requestKeyRow ? mapBuildJobRow(requestKeyRow as BuildJobRow) : null,
     activeForTarget: activeRow ? mapBuildJobRow(activeRow as BuildJobRow) : null,
-  });
-
-  return { job: existingJob, error: null };
+    error: null,
+  };
 }
 
 // Feature 15.3 — the server-authoritative build-request entry point. The
@@ -248,8 +257,19 @@ export async function createBuildJob(
     };
   }
 
-  if (earlyLookup.job) {
-    return { ok: true, job: earlyLookup.job, reusedExisting: true };
+  // Feature 25.6 — the hash is not known yet, so this can only settle the
+  // cases that do not need it. A repeated request key still short-circuits
+  // here without paying for config generation, exactly as before; an active
+  // job for this target falls through to the comparison below, which is the
+  // one case where the answer genuinely depends on the configuration.
+  const earlyDecision = decideExistingBuildJob({
+    byRequestKey: earlyLookup.byRequestKey,
+    activeForTarget: earlyLookup.activeForTarget,
+    submittedConfigHash: null,
+  });
+
+  if (earlyDecision.outcome === "reuse") {
+    return { ok: true, job: earlyDecision.job, reusedExisting: true };
   }
 
   if (!isProjectConfig(project.config)) {
@@ -346,6 +366,33 @@ export async function createBuildJob(
 
   const configHash = computeGeneratedPosConfigHash(generatedConfig);
 
+  // Feature 25.6 — THE STALE-PUBLISH REFUSAL.
+  //
+  // The early pass deferred this because the hash did not exist yet. Now it
+  // does: if the active job carries the same configuration, this is a duplicate
+  // publish of identical content and reusing it is correct. If it carries a
+  // different one, the owner has changed something since that job was created,
+  // and returning it would report Published for a snapshot that does not
+  // contain their change. Refuse instead — the stale job is left running,
+  // untouched and unmodified.
+  if (earlyDecision.outcome === "hash_required") {
+    const settled = decideExistingBuildJob({
+      byRequestKey: null,
+      activeForTarget: earlyDecision.job,
+      submittedConfigHash: configHash,
+    });
+
+    if (settled.outcome === "reuse") {
+      return { ok: true, job: settled.job, reusedExisting: true };
+    }
+
+    return {
+      ok: false,
+      errorCode: "active_job_exists",
+      message: PUBLISH_IN_PROGRESS_MESSAGE,
+    };
+  }
+
   const { data: insertedRow, error: insertError } = await admin
     .from("build_jobs")
     .insert({
@@ -377,8 +424,26 @@ export async function createBuildJob(
       requestKey,
     });
 
-    if (recovery.job) {
-      return { ok: true, job: recovery.job, reusedExisting: true };
+    // Feature 25.6 — the same rule as above, and it matters just as much here:
+    // this is the race where another request won the active-job index between
+    // the early lookup and this insert. Reusing the winner is right only if it
+    // is publishing the same configuration.
+    const recovered = decideExistingBuildJob({
+      byRequestKey: recovery.byRequestKey,
+      activeForTarget: recovery.activeForTarget,
+      submittedConfigHash: configHash,
+    });
+
+    if (recovered.outcome === "reuse") {
+      return { ok: true, job: recovered.job, reusedExisting: true };
+    }
+
+    if (recovered.outcome === "publish_in_progress") {
+      return {
+        ok: false,
+        errorCode: "active_job_exists",
+        message: PUBLISH_IN_PROGRESS_MESSAGE,
+      };
     }
 
     // Feature 15.3 — reached only if the insert failed (almost certainly

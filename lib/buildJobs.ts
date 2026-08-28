@@ -209,11 +209,10 @@ export type CreateBuildJobInput = {
 // Feature 15.3 — "invalid_request" is one addition beyond the originally
 // suggested error-code list, for a malformed requestKey/retriedFromJobId or
 // an invalid retry reference — none of the other codes fit that
-// caller-input-shape case cleanly. "active_job_exists" is kept for API
-// completeness/future use (e.g. a future caller that wants to fail instead
-// of silently reusing an active job) but is never returned by the current
-// createBuildJob, whose approved behavior always resolves an active job by
-// reuse rather than rejection. "request_conflict" is returned only in the
+// caller-input-shape case cleanly. "active_job_exists" is the future use its
+// own comment once described: since Feature 25.6 it IS returned, when a publish
+// meets an active job whose snapshot is a DIFFERENT configuration — see
+// decideExistingBuildJob. "request_conflict" is returned only in the
 // rare case an insert fails (almost certainly due to the unique
 // constraints protecting against a race) and the recovery re-query still
 // can't find the row that caused the conflict.
@@ -401,6 +400,80 @@ export function resolveExistingBuildJob(lookup: {
 
   return lookup.activeForTarget;
 }
+
+/**
+ * What a publish request should do when a job already exists.
+ *
+ * FEATURE 25.6 — WHY THIS REPLACED A BARE REUSE. `build_jobs_active_target_unique`
+ * permits one queued/building job per (project, target), and the old path
+ * resolved that collision by returning the existing job. That is right for a
+ * double-click and wrong for everything else: an owner who edited the menu and
+ * pressed Publish got the OLD job back, the stepper followed it to Published,
+ * and the change they had just saved was never in a snapshot. Staging QA hit
+ * exactly that — a build created 22 hours earlier reported success for a
+ * 12-item menu while the project held 13.
+ *
+ * The snapshot is taken when a job is CREATED, so "an active job exists" and
+ * "this configuration is already publishing" are different facts. Comparing
+ * config hashes is what separates them.
+ *
+ * `submittedConfigHash` is null when the caller has not generated a config yet.
+ * That is deliberate: a repeated request key is answered without paying for
+ * config generation, exactly as before, and only the active-job fallback asks
+ * for a hash — the one case that genuinely needs it.
+ */
+export type ExistingBuildJobDecision =
+  /** Nothing to reuse: insert a new job with the submitted snapshot. */
+  | { outcome: "create" }
+  /** The same request, or the same configuration. Idempotent. */
+  | { outcome: "reuse"; job: BuildJobSummary }
+  /**
+   * An earlier publish of a DIFFERENT configuration is still running. The
+   * caller must refuse: the stale job is not this publish, its snapshot is
+   * immutable, and it is not cancelled or altered in any way.
+   */
+  | { outcome: "publish_in_progress"; job: BuildJobSummary }
+  /** An active job was found and the hash is needed to tell the two apart. */
+  | { outcome: "hash_required"; job: BuildJobSummary };
+
+export function decideExistingBuildJob(input: {
+  byRequestKey: BuildJobSummary | null;
+  activeForTarget: BuildJobSummary | null;
+  submittedConfigHash: string | null;
+}): ExistingBuildJobDecision {
+  // A request-key match is the SAME request arriving twice — a double-click, or
+  // a retried action. It must never create a second job and never needs a hash
+  // comparison, because it is not a new publish at all.
+  if (input.byRequestKey) {
+    return { outcome: "reuse", job: input.byRequestKey };
+  }
+
+  if (!input.activeForTarget) {
+    return { outcome: "create" };
+  }
+
+  if (input.submittedConfigHash === null) {
+    return { outcome: "hash_required", job: input.activeForTarget };
+  }
+
+  return input.activeForTarget.configHash === input.submittedConfigHash
+    ? { outcome: "reuse", job: input.activeForTarget }
+    : { outcome: "publish_in_progress", job: input.activeForTarget };
+}
+
+/**
+ * What the owner is told when an earlier publish is still running.
+ *
+ * A CONFLICT, NOT AN ERROR, and worded as one. It says three things the owner
+ * needs and nothing else: an earlier version is publishing, their latest
+ * changes are NOT in it, and what to do. It deliberately does not say their
+ * changes are queued — they are not, and nothing is holding them.
+ *
+ * No database or constraint wording ever appears here.
+ */
+export const PUBLISH_IN_PROGRESS_MESSAGE =
+  "A previous publish is still in progress. Wait for it to finish, then publish " +
+  "your latest changes again.";
 
 // Feature 15.3 — the pure retry-validation logic behind requirement E,
 // again separated from any Supabase query. A retry reference is valid only
