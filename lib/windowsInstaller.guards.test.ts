@@ -190,8 +190,13 @@ describe("the packaged identity matches the locked design", () => {
     expect(code(read(MAIN))).toContain('app.setName("POS Canvas")');
   });
 
-  it("version is 1.0.0", () => {
-    expect(shellPackage.version).toBe("1.0.0");
+  it("version is a semver, and the single source for the installer", () => {
+    // Feature 25.7 — was pinned to "1.0.0". The packaged identity this block
+    // guards is appId/productName/target, none of which move with a release;
+    // the version does, so it is checked for shape here and for VALUE in
+    // lib/releaseVersion.guards.test.ts, which keeps it in lockstep with
+    // build.gradle and the CI artifact name.
+    expect(shellPackage.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("Electron and electron-builder are pinned exactly", () => {
@@ -242,11 +247,15 @@ describe("the Windows target is x64 NSIS and nothing else", () => {
     );
 
     // The name the workflow and the future release metadata both expect.
+    // Feature 25.7 — resolved from the package version rather than compared to
+    // a frozen literal, so this asserts the TEMPLATE works for whatever version
+    // is being cut instead of asserting which version that is.
     const resolved = shellPackage.build.win.artifactName
       .replace("${version}", shellPackage.version)
       .replace("${ext}", "exe");
 
-    expect(resolved).toBe("POS-Canvas-Windows-v1.0.0.exe");
+    expect(resolved).toBe(`POS-Canvas-Windows-v${shellPackage.version}.exe`);
+    expect(resolved).toMatch(/^POS-Canvas-Windows-v\d+\.\d+\.\d+\.exe$/);
   });
 
   it("outputs to a predictable directory", () => {

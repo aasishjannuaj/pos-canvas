@@ -21,17 +21,44 @@ Two rules govern every step below:
 
 ## 0. Release version target
 
-| Surface | Current | Target | Ordering key |
+| Surface | In tree | Published | Ordering key |
 |---|---|---|---|
 | Web (Vercel) | continuous | continuous | n/a |
-| Android | `versionName 1.0.0`, `versionCode 1` | **1.1.0 / 2** | `versionCode` **must strictly increase** |
-| Windows | `1.0.0` | **1.1.0** | `version` in `windows-shell/package.json` |
+| Android | **`versionName 1.1.0`, `versionCode 2`** | 1.0.0 / 1 | `versionCode` **must strictly increase** |
+| Windows | **`1.1.0`** | 1.0.0 | `version` in `windows-shell/package.json` |
+
+**The bump is done in the tree (25.7 step 1); nothing is built or published.**
+The two columns differ on purpose and must keep differing until step 8.
+
+Every file that carries a release version, and what it is for:
+
+| File | Field | 1.0.0 → 1.1.0 |
+|---|---|---|
+| `android/app/build.gradle` | `versionCode` **2**, `versionName` **"1.1.0"** | **DONE** — the canonical Android version |
+| `windows-shell/package.json` | `"version": "1.1.0"` | **DONE** — drives `POS-Canvas-Windows-v${version}.exe` |
+| `.github/workflows/windows-app.yml` | `name: pos-canvas-windows-v1.1.0` | **DONE** — hardcoded, and it does not follow the version |
+| `windows-shell/README.md` | artifact/asset names in the release runbook | **DONE** — documentation only |
+| `DEPLOYMENT.md` | the Android release-history table | **DONE** — 1.1.0 / code 2 recorded as not-yet-built |
+| **`package.json` (root)** | `"version": "0.1.0"` | **No.** `private: true`, deploys continuously, and `build.gradle` states the Android version is *"deliberately not derived from package.json"* so a web release cannot force version churn. It has never been bumped for a release. |
+| `lib/androidRelease.ts` | `CURRENT_ANDROID_RELEASE` | **Not yet** — step 8 of §10, after the artifact is published and verified |
+| `lib/windowsRelease.ts` | `CURRENT_WINDOWS_RELEASE` | **Not yet** — same, and this is what closes P0-2 |
+
+> `DEPLOYMENT.md`'s table shows Minor = `1.1.0` / code `3`. That is an
+> illustration of how codes advance, not a mandate. Only one release has
+> shipped (code 1), so the next code is **2**. The rule is that it strictly
+> increases, nothing more.
 
 `versionCode` is what Android actually orders releases by; `versionName` is only
 a label. Windows has no equivalent, which is why the NSIS installer relies on
 `appId` + version alone.
 
-**Do not bump any version until every P0 in §12 is closed.**
+The four in-tree locations are kept in lockstep by
+`lib/releaseVersion.guards.test.ts`, which also fails if a release pointer is
+moved before its artifact exists. The CI artifact name is the one that needs a
+guard most: it is a literal and derives from nothing.
+
+**Do not update the release pointers until every artifact is built, downloadable
+and checksum-verified — step 8 of §10.**
 
 ---
 
@@ -231,19 +258,58 @@ Two migrations are committed and applied to **staging only**:
 
 ## 10. Release ordering
 
-See §10 of the 25.6 report for the full rationale. Summary order:
+1. Apply `20260823120000_device_voluntary_unpair.sql` to production; verify
+   `unpair_own_device` exists and `paired_devices.unpaired_at` is present,
+   nullable and unbackfilled.
+2. Apply `20260823130000_device_sales_history.sql`; verify
+   `get_device_recent_orders` and `orders_project_recent_idx`. **Timestamp
+   order matters.** Re-run the production Sales History check now — it is only
+   after this step that a pass means anything (§12b).
+3. **Verify the production publish worker before deploying anything that asks
+   owners to publish** (§10b). A queued job with no worker looks exactly like
+   the 25.6 defect from the owner's side.
+4. Deploy web.
+5. Build, verify and publish the **Android RC 1.1.0 / versionCode 2**.
+6. Build, verify and publish the **Windows RC 1.1.0** via the *Windows app*
+   workflow. Confirm `runtime ok:` in the log and a real runtime in `app.asar`.
+7. **Verify both artifacts** — SHA256, size, signer continuity (Android must
+   stay `7e32ec72…5b1b`), production ref present, staging ref and
+   `service_role` absent.
+8. Update `CURRENT_ANDROID_RELEASE` / `CURRENT_WINDOWS_RELEASE` **last**, only
+   once the binaries are downloadable and their checksums verified against the
+   served files. This closes P0-2.
 
-1. Apply `20260823120000` to production; verify
-2. Apply `20260823130000` to production; verify
-3. Deploy web
-4. Build, verify and publish the Android RC (**1.1.0 / versionCode 2**)
-5. Build, verify and publish the Windows RC (**1.1.0**)
-6. Update `CURRENT_ANDROID_RELEASE` / `CURRENT_WINDOWS_RELEASE` **last**, only
-   after the binaries are downloadable and their checksums verified
-
-Step 6 is deliberately last: the download page reads version, size, URL and
+Step 8 is deliberately last: the download page reads version, size, URL and
 checksum straight from those constants, so updating them before the artifacts
 exist advertises a download that 404s.
+
+### 10b. The production publish worker
+
+**`windows-app.yml` is NOT the publish worker.** It packages the desktop
+installer and never touches a build job.
+
+Publishing runs through a different chain, and every link must be configured in
+production or an owner's *Publish Configuration* queues forever:
+
+| Link | What it is | Must be set |
+|---|---|---|
+| Editor | Publishes with `target: "android"` (`EditorShell.tsx`) — the only target the UI creates | — |
+| `dispatchBuildWorkerWorkflow` | POS Canvas calls the GitHub API to dispatch `build-worker.yml` | **`GITHUB_BUILD_WORKER_TOKEN`** in the production web environment |
+| `build-worker.yml` | Runs `worker/once.ts --target android`, five one-shot attempts | Repository secrets **`NEXT_PUBLIC_SUPABASE_URL`** and **`SUPABASE_SERVICE_ROLE_KEY`** |
+
+Two failure modes to check for explicitly, because both are silent:
+
+- **No `GITHUB_BUILD_WORKER_TOKEN` in production** → no dispatch, the job sits
+  `queued`, and the owner sees the stepper stall. There is no schedule to catch
+  it: Feature 17.2 removed the 15-minute poll, so a dispatch is the only thing
+  that starts a worker.
+- **The repository secrets point at the wrong project** → the worker processes
+  the other database's queue and production publishes are never picked up. The
+  same workflow serves whichever project those secrets name, so confirm they
+  are **production** before the first production publish.
+
+Stale-job recovery also rides on dispatch rather than a clock, so a job stuck
+`building` is only reclaimed when a later publish dispatches a worker.
 
 ---
 
@@ -366,6 +432,40 @@ No schema change was required — `config_hash` was already stored and indexed.
 | 12 | `supabase/config.toml` scaffold hazard | P2 (documented, §8) |
 | 13 | Windows staging QA builds share `userData` with production | P2 (QA only) |
 | 14 | `windows-shell` `start:production` still uses POSIX inline env (`POS_CANVAS_DESKTOP_RELEASE=1 electron .`) — breaks for a Windows developer; not in any release path | P2 |
+
+---
+
+## 12b. Feature 25.6 final manual regression — PASSED 2026-08-27
+
+Run against the committed tree at `caa905d`.
+
+| Area | Result |
+|---|---|
+| Windows production artifact installs and opens | PASS |
+| Close / reopen | PASS |
+| Production pairing | PASS |
+| Cash sale | PASS |
+| Card sale | PASS |
+| Sales History (**staging**) | PASS |
+| Historical receipt / detail | PASS |
+| Historical reprint | PASS |
+| Offline OFF sale | PASS |
+| Reconnect OFF → ORD reconciliation | PASS |
+| Voluntary unpair | PASS |
+| Re-pair | PASS |
+| Publish-conflict P0 (Cases A/B/C) | PASS |
+
+**Sales History on PRODUCTION was NOT exercised and is NOT claimed to pass.**
+The production Windows check showed *Try Again*, because production still
+intentionally lacks `20260823130000_device_sales_history.sql`. That is an
+expected schema mismatch at this stage, not a client regression — and it is
+exactly the failure mode §9 predicts if the UI reaches production before its
+migration. It becomes a real pass only after step 2 of the rollout order, when
+the migration is applied and the check is repeated against production.
+
+**Feature 25.6 is complete except for the publication-only gate P0-2.** No code
+change remains; what is left is applying migrations, cutting 1.1.0 artifacts and
+publishing them.
 
 ---
 

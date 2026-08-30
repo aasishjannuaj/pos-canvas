@@ -456,11 +456,26 @@ Expect: package `com.poscanvas.app`; the URL exactly
 leaves the machine — Android refuses to install a lower code over a higher one.
 `versionName` is the user-facing label.
 
-| Release | versionName | versionCode |
+**Release history — what has actually shipped:**
+
+| Release | versionName | versionCode | Status |
+|---|---|---|---|
+| First | `1.0.0` | 1 | Published |
+| 25.7 RC | `1.1.0` | **2** | Version bumped; artifact not yet built or published |
+
+**How codes advance — an illustration, not a schedule:**
+
+| Kind | versionName | versionCode |
 |---|---|---|
 | First | `1.0.0` | 1 |
 | Patch | `1.0.1` | 2 |
 | Minor | `1.1.0` | 3 |
+
+> The second table shows only that the code increments on every release; the
+> numbers in it are examples. **It is not the next release value.** Read
+> literally it would put 1.1.0 at code 3, but only one release has shipped
+> (code 1), so the next code is **2** — which is what `build.gradle` carries.
+> The one rule is that `versionCode` strictly increases.
 
 **Updates.** An in-place upgrade requires the **same applicationId** and the
 **same signing key**, plus a higher `versionCode`. Install with

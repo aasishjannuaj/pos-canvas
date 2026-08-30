@@ -83,10 +83,16 @@ describe("Android identity still matches the shared brand", () => {
 
   it("the version is untouched by branding", () => {
     // 24.2 is artwork. A version bump belongs to a release, not an icon.
+    //
+    // Feature 25.7 — anchored to the SHAPE, not to 1.0.0. Pinning the literal
+    // made an ordinary release bump fail an artwork guard, which says nothing
+    // about artwork. What must stay true is that build.gradle carries a plain
+    // versionCode/versionName pair and derives neither from anywhere else;
+    // lib/releaseVersion.guards.test.ts owns the actual values.
     const gradle = read("android/app/build.gradle");
 
-    expect(gradle).toContain("versionCode 1");
-    expect(gradle).toContain('versionName "1.0.0"');
+    expect(gradle).toMatch(/^\s*versionCode\s+\d+\s*$/m);
+    expect(gradle).toMatch(/^\s*versionName\s+"\d+\.\d+\.\d+"\s*$/m);
   });
 
   it("the published release metadata is unchanged", () => {

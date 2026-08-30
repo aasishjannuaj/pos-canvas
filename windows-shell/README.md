@@ -315,17 +315,22 @@ catastrophic inside a customer-installable artifact.
 ### Running a build
 
 1. GitHub → **Actions** → **Windows app** → **Run workflow** → branch `main` → **Run workflow**.
-2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.0.0`**.
+2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.1.0`**.
 3. It contains two files:
-   - `POS-Canvas-Windows-v1.0.0.exe`
-   - `POS-Canvas-Windows-v1.0.0.exe.sha256`
+   - `POS-Canvas-Windows-v1.1.0.exe`
+   - `POS-Canvas-Windows-v1.1.0.exe.sha256`
 
 Check the log for `runtime ok:` before trusting the artifact.
+
+Both names follow `version` in `windows-shell/package.json` — the installer
+filename through `artifactName`, and the artifact name through a literal in the
+workflow that does **not** derive from it. `lib/releaseVersion.guards.test.ts`
+keeps the two in step, because nothing else does.
 
 ### Verifying the download
 
 ```bash
-shasum -a 256 -c POS-Canvas-Windows-v1.0.0.exe.sha256
+shasum -a 256 -c POS-Canvas-Windows-v1.1.0.exe.sha256
 ```
 
 The checksum file uses the standard two-column format, so `sha256sum -c` works on

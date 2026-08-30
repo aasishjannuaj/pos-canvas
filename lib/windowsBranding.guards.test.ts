@@ -191,7 +191,10 @@ describe("the icon reaches every Windows surface", () => {
   });
 
   it("does not touch the version branding was never allowed to move", () => {
-    expect(shellPackage.version).toBe("1.0.0");
+    // Feature 25.7 — the point is that ARTWORK does not move the version, not
+    // that the version is forever 1.0.0. Asserted as a semver rather than a
+    // literal so a release bump is not blocked by an icon guard.
+    expect(shellPackage.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
 
