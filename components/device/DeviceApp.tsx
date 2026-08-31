@@ -27,6 +27,7 @@ import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import DeviceSyncStatus from "@/components/device/DeviceSyncStatus";
 import {
+  applyDeviceConfigUpdate,
   completeDeviceSaleV3,
   fetchDeviceConfig,
   fetchDevicePairingState,
@@ -41,6 +42,7 @@ import {
 import {
   createDeviceError,
   decideConfigState,
+  NO_UPDATE_OFFER,
   DEVICE_ERROR_TITLES,
   decidePairingState,
   getDeviceDisplayName,
@@ -49,8 +51,8 @@ import {
   resolveDeviceIdentity,
   toDeviceDisplayConfig,
 } from "@/lib/deviceSession";
-import type { DevicePairing, DeviceState } from "@/lib/deviceSession";
-import { permitsOfflineFallback } from "@/lib/deviceConnectivity";
+import type { DevicePairing, DeviceState, DeviceUpdateOffer } from "@/lib/deviceSession";
+import { permitsOfflineFallback, readOnlineHint } from "@/lib/deviceConnectivity";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
   clearOfflineCache,
@@ -73,6 +75,13 @@ import {
   resolveOfflineCheckoutSession,
 } from "@/lib/offlineCheckoutSession";
 import { decideDeviceResetSafety } from "@/lib/offlineSaleStatus";
+import {
+  APPLY_FAILED_MESSAGE,
+  APPLY_RELOAD_FAILED_MESSAGE,
+  APPLY_UNREACHABLE_MESSAGE,
+  OFFER_WITHDRAWN_MESSAGE,
+  decideApplyUpdateSafety,
+} from "@/lib/deviceConfigUpdate";
 import RejectedSaleReview from "@/components/device/RejectedSaleReview";
 import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import OperatorMenu from "@/components/device/OperatorMenu";
@@ -171,6 +180,55 @@ export default function DeviceApp() {
    * till has no router, and this replaces the POS for as long as it is open.
    */
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /**
+   * Feature 26.2 — the offer the last authoritative pairing check reported.
+   *
+   * INFORMATIONAL. It decides whether an Apply button is rendered and nothing
+   * else: the pin this till prices from is state.pairing.buildJobId, and it
+   * moves only after the server says it moved.
+   */
+  const [updateOffer, setUpdateOffer] = useState<DeviceUpdateOffer>(NO_UPDATE_OFFER);
+  /**
+   * Feature 26.2 — the live cart size, and the ONLY cart value an Apply is
+   * authorized on.
+   *
+   * A ref and not React state, deliberately. PosRuntime writes it from a layout
+   * effect, so it is current as of the last commit rather than the last paint:
+   * a handler reading `.current` sees the cart as it is, not as it was when
+   * this component last rendered. There is deliberately no second, mirrored
+   * copy in state — an unused parallel signal beside this one would be exactly
+   * what a later edit reaches for by mistake.
+   *
+   * `null` means no runtime is mounted and the question cannot be answered,
+   * which decideApplyUpdateSafety treats as a refusal, never as an empty cart.
+   */
+  const liveCartLineCountRef = useRef<number | null>(null);
+  /**
+   * Feature 26.2 — one in-flight apply at a time, and the latch that enforces it.
+   *
+   * THE STATE IS FOR THE BUTTON. THE REF IS THE GUARD. React state does not
+   * update synchronously: five taps dispatched in a single tick all read the
+   * same `false` from their own closure and all proceed, and the button's
+   * `disabled` has not re-rendered yet either. Staging QA fired five
+   * apply_device_config_update requests through exactly that hole.
+   *
+   * A ref is written synchronously, so the second tap in the same tick sees the
+   * first one's mark. Same pattern as `resolving` above, for the same reason.
+   */
+  const applyingUpdateRef = useRef(false);
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
+  /**
+   * Feature 26.2 — the server repinned this device and it has not yet loaded
+   * what it repinned to.
+   *
+   * Set the moment an apply succeeds and cleared only by reaching `ready`. Its
+   * whole job is to make the blocking screen SAY THE RIGHT THING: without it a
+   * till that repinned and then lost the network would explain itself with
+   * "this till has not been set up for offline use yet", which is true of the
+   * cache and completely wrong about what just happened.
+   */
+  const [updateReloadPending, setUpdateReloadPending] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   /**
    * Feature 25.3 — Sales history, and the one sale being looked at.
    *
@@ -409,6 +467,13 @@ export default function DeviceApp() {
 
       const next = decidePairingState(pairingState.state);
 
+      // Feature 26.2 — recorded from the SAME authoritative response the pin
+      // comes from, so the offer and the build it would replace can never be
+      // read from two different moments. A non-paired answer carries no offer.
+      setUpdateOffer(
+        pairingState.state.paired ? pairingState.state.offer : NO_UPDATE_OFFER
+      );
+
       // Anything other than "load the config now" is terminal for this pass.
       if (next.status !== "loading_config") {
         // A confirmed revocation is a server answer, and the cache must not
@@ -476,6 +541,10 @@ export default function DeviceApp() {
       // Awaiting costs a few milliseconds once per authoritative start and
       // removes the race entirely.
       if (resolved.status === "ready") {
+        // Feature 26.2 — the till loaded a configuration from the server. Any
+        // half-finished update is finished.
+        setUpdateReloadPending(false);
+
         const persisted = await persistDeviceCache({
           deviceAuthUserId: sessionUserId,
           pairing: resolved.pairing,
@@ -673,6 +742,12 @@ export default function DeviceApp() {
       }
 
       const next = decidePairingState(pairingState.state);
+
+      // Feature 26.2 — the reconnect path is authoritative too: a till that
+      // has just regained the network learns about a waiting offer here.
+      setUpdateOffer(
+        pairingState.state.paired ? pairingState.state.offer : NO_UPDATE_OFFER
+      );
 
       if (next.status === "revoked") {
         readyPairingRef.current = null;
@@ -1109,6 +1184,134 @@ export default function DeviceApp() {
   }
 
   /**
+   * Feature 26.2 — the till adopts the configuration its owner offered it.
+   *
+   * THE ORDER OF THE STEPS IS THE FEATURE. Each one is only safe because the
+   * one before it succeeded, and every early return leaves the device exactly
+   * as it was:
+   *
+   *   1. refuse locally, on one decision, before any request exists
+   *   2. ask the server, which re-validates everything and owns the answer
+   *   3. drop the cache the moment the pin moves, because it is now stale
+   *   4. re-run the ordinary authoritative start, which is what actually loads
+   *      the new configuration and refreshes the offer
+   *
+   * WHY STEP 3 IS NOT OPTIONAL. The cached pairing assertion and the cached
+   * config are written together and therefore agree with each other — both name
+   * the OLD build. decideOfflineFallback checks that they agree, not that they
+   * are current, so a cache left in place would pass every integrity check it
+   * has. If step 4 then failed on transport, openOfflineOrFail would open this
+   * till offline on the old menu while the server prices its sales from the new
+   * build: the customer is shown 3.00 and the books record 9.00. Clearing first
+   * turns that outcome into `reconnect_required`, which sells nothing and
+   * recovers through the path that already exists for it.
+   *
+   * IT MOVES NO PIN LOCALLY. state.pairing.buildJobId is only ever written by
+   * resolveDeviceState from an authoritative response. Nothing here constructs
+   * a configuration, and the build id the RPC returns is not used to build one.
+   */
+  async function handleApplyUpdate() {
+    // A second press while the first is in flight is a no-op, not a queue.
+    // Checked and claimed on the REF, synchronously, so taps in the same tick
+    // cannot all pass; the disabled button is the affordance, never the guard.
+    if (applyingUpdateRef.current) {
+      return;
+    }
+
+    applyingUpdateRef.current = true;
+
+    setUpdateNotice(null);
+
+    // 1. THE LIVE CART, READ FIRST AND SYNCHRONOUSLY.
+    //
+    //    Not `cartLineCount`. That mirror arrives through a passive effect and
+    //    is therefore a value from the last committed render; this ref is
+    //    written from a layout effect inside the commit that changed the cart,
+    //    so it is what the cart IS. For the one action that moves this till's
+    //    pricing authority, the difference matters.
+    //
+    //    Read before the awaits below rather than after, so nothing has had a
+    //    chance to happen between the operator's press and the question.
+    const liveCartLineCount = liveCartLineCountRef.current;
+
+    // 2. THE DURABLE FINANCIAL READ, TAKEN NOW.
+    //
+    //    Not the rendered `saleStatus`, which was last refreshed whenever
+    //    something happened to ask. A queue that was clean when Device settings
+    //    opened can hold a pending sale by the time Apply is pressed, and the
+    //    decision has to describe this instant. Same function an unpair calls.
+    const status = await readOfflineSaleStatus();
+
+    setSaleStatus(status);
+
+    const safety = decideApplyUpdateSafety({
+      cartLineCount: liveCartLineCount,
+      saleStatus: status,
+      onlineHint: readOnlineHint(),
+    });
+
+    if (!safety.allowed) {
+      setUpdateNotice(safety.message);
+      applyingUpdateRef.current = false;
+      return;
+    }
+
+    setApplyingUpdate(true);
+
+    try {
+      // 2. THE SERVER'S ANSWER. It re-validates the offer at apply time, so a
+      //    build that stopped being usable between the offer and this press is
+      //    refused here rather than adopted.
+      const applied = await applyDeviceConfigUpdate();
+
+      if (!applied.ok) {
+        if (applied.retryable) {
+          setUpdateNotice(APPLY_UNREACHABLE_MESSAGE);
+          return;
+        }
+
+        // A device the server no longer recognizes is not an update problem.
+        // Hand it to the existing lifecycle: resolveDeviceState reads the
+        // authoritative pairing state and routes to the right screen, which is
+        // the same thing that happens when a revocation lands mid-session.
+        if (applied.error === "not_paired" || applied.error === "not_authenticated") {
+          setSettingsOpen(false);
+          await resolveDeviceState();
+          return;
+        }
+
+        // The offer went away, or its build did. Nothing is wrong with this
+        // till; refresh so the button stops being offered.
+        if (applied.error === "no_update_offered" || applied.error === "offer_unusable") {
+          setUpdateNotice(OFFER_WITHDRAWN_MESSAGE);
+          await resolveDeviceState();
+          return;
+        }
+
+        setUpdateNotice(APPLY_FAILED_MESSAGE);
+        return;
+      }
+
+      // 3. THE PIN HAS MOVED. Everything cached is now provably stale — its
+      //    build is `applied.previousBuildJobId`.
+      await clearOfflineCache();
+      setOfflinePrepared(null);
+      setUpdateReloadPending(true);
+
+      // 4. THE ORDINARY AUTHORITATIVE START, re-used whole. It re-reads pairing
+      //    (so update_available goes false), fetches get_device_config, decides
+      //    `ready` or `config_unavailable`, and rewrites the cache. A failure
+      //    here lands on reconnect_required or config_unavailable — both
+      //    blocking, neither selling.
+      setSettingsOpen(false);
+      await resolveDeviceState();
+    } finally {
+      applyingUpdateRef.current = false;
+      setApplyingUpdate(false);
+    }
+  }
+
+  /**
    * Feature 25.1 — the EMERGENCY reset, deliberately unchanged.
    *
    * Reached from `revoked`, `config_unavailable` and `reconnect_required` — the
@@ -1534,8 +1737,15 @@ export default function DeviceApp() {
     case "config_unavailable":
       return (
         <DeviceStatusScreen
-          title="Device configuration unavailable"
-          message="This device is paired, but its menu could not be loaded. The build it is pinned to may no longer be available."
+          title={updateReloadPending ? "Finish updating" : "Device configuration unavailable"}
+          // Feature 26.2 — same reasoning as reconnect_required. Either way this
+          // screen sells nothing, which is the property that matters; the words
+          // only decide whether the operator understands why.
+          message={
+            updateReloadPending
+              ? APPLY_RELOAD_FAILED_MESSAGE
+              : "This device is paired, but its menu could not be loaded. The build it is pinned to may no longer be available."
+          }
           onRetry={() => void resolveDeviceState()}
           onReset={handleReset}
           resetDisabled={resetBlocked}
@@ -1559,8 +1769,16 @@ export default function DeviceApp() {
     case "reconnect_required":
       return (
         <DeviceStatusScreen
-          title="Reconnect required"
-          message={OFFLINE_BLOCKED_MESSAGES[state.reason]}
+          // Feature 26.2 — a device that repinned and could not reload says so.
+          // The cache reason underneath is true but answers a question nobody
+          // asked; what the operator needs to know is that the update landed on
+          // the server and this till is mid-way through following it.
+          title={updateReloadPending ? "Finish updating" : "Reconnect required"}
+          message={
+            updateReloadPending
+              ? APPLY_RELOAD_FAILED_MESSAGE
+              : OFFLINE_BLOCKED_MESSAGES[state.reason]
+          }
           onRetry={() => void resolveDeviceState()}
           onReset={handleReset}
           resetDisabled={resetBlocked}
@@ -1584,6 +1802,10 @@ export default function DeviceApp() {
       //
       // Rendering above a still-mounted PosRuntime keeps the cart, the offline
       // state and the sync engine exactly where they were.
+      // Hoisted above `overlay` (Feature 26.2): the settings screen needs it to
+      // decide whether Apply update is even offered.
+      const offlineMode = getDeviceRuntimeMode(state) === "offline";
+
       const overlay =
         reviewing ? (
           <RejectedSaleReview
@@ -1613,13 +1835,22 @@ export default function DeviceApp() {
             unpairBlocked={resetBlocked}
             onClose={() => {
               setResetNotice(null);
+              setUpdateNotice(null);
               setSettingsOpen(false);
             }}
+            // Feature 26.2 — an offline runtime is shown no Apply button at
+            // all. It could not reach the server to apply, and its `offer` came
+            // from a cached start that carries none; rendering the control
+            // would be offering an action that cannot work.
+            updateAvailable={updateOffer.updateAvailable && !offlineMode}
+            offeredAt={updateOffer.offeredAt}
+            onApplyUpdate={() => void handleApplyUpdate()}
+            applying={applyingUpdate}
+            updateNotice={updateNotice}
           />
         ) : null;
 
       const offline = state.offline ?? null;
-      const offlineMode = getDeviceRuntimeMode(state) === "offline";
 
       // Feature 24.5E — offline checkout is permitted ONLY on an explicit
       // positive answer. An undecided device (null) and a refused one both
@@ -1738,6 +1969,7 @@ export default function DeviceApp() {
           armOnlineSale={armOnlineSale}
           resolveOnlineSale={resolveOnlineSale}
           persistedUncertainSale={uncertainSale}
+          cartLineCountRef={liveCartLineCountRef}
         />
           </div>
 

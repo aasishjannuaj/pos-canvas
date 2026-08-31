@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEVICE_ERROR_MESSAGES,
+  NO_UPDATE_OFFER,
   createDeviceError,
   decideConfigState,
   decidePairingState,
@@ -99,7 +100,12 @@ describe("parsePairingState", () => {
       active: true,
     });
 
-    expect(result).toEqual({ paired: true, pairing: PAIRING, active: true });
+    expect(result).toEqual({
+      paired: true,
+      pairing: PAIRING,
+      active: true,
+      offer: NO_UPDATE_OFFER,
+    });
   });
 
   it("derives active from revoked_at, never from the payload's own boolean", () => {
@@ -118,6 +124,7 @@ describe("parsePairingState", () => {
       paired: true,
       pairing: { ...PAIRING, deviceName: null, platform: null, createdAt: null, revokedAt: "2026-08-02T00:00:00Z" },
       active: false,
+      offer: NO_UPDATE_OFFER,
     });
   });
 
@@ -147,13 +154,13 @@ describe("parsePairingState", () => {
 describe("decidePairingState", () => {
   it("sends an active device to config loading", () => {
     expect(
-      decidePairingState({ paired: true, pairing: PAIRING, active: true })
+      decidePairingState({ paired: true, pairing: PAIRING, active: true, offer: NO_UPDATE_OFFER })
     ).toEqual({ status: "loading_config", pairing: PAIRING });
   });
 
   it("sends a revoked device to the revoked screen", () => {
     expect(
-      decidePairingState({ paired: true, pairing: PAIRING, active: false })
+      decidePairingState({ paired: true, pairing: PAIRING, active: false, offer: NO_UPDATE_OFFER })
     ).toEqual({ status: "revoked", pairing: PAIRING });
   });
 

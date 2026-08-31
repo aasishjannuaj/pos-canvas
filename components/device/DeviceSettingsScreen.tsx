@@ -44,6 +44,39 @@ export const UNPAIR_CONFIRM_LINES: readonly string[] = [
 
 export const UNPAIR_CONFIRM_ACTION = "Unpair device";
 
+// Feature 26.2 — the configuration update section.
+//
+// IT IS NOT A SOFTWARE UPDATE and must not read like one. Nothing is downloaded,
+// no app version changes, and the POS the operator is holding is the same POS
+// afterwards. What changes is the menu, prices and receipt details their owner
+// published — so the words are about the shop, not about the binary.
+export const UPDATE_AVAILABLE_HEADING = "Menu update";
+
+export const UPDATE_AVAILABLE_EXPLANATION =
+  "Your business owner has published changes to this POS. Apply them to start using the updated menu and prices.";
+
+export const APPLY_UPDATE_ACTION = "Apply update";
+
+export const APPLYING_UPDATE_LABEL = "Applying…";
+
+/**
+ * Renders "Offered 4 Sept, 09:12" from an ISO instant, or null when the server
+ * did not send one or sent something unparseable.
+ *
+ * A wrong time is worse than no time: an operator deciding whether to interrupt
+ * service wants to know if this appeared minutes or days ago, and a fabricated
+ * or misparsed instant answers that question incorrectly.
+ */
+export function formatOfferedAt(offeredAt: string | null): string | null {
+  if (offeredAt === null) {
+    return null;
+  }
+
+  const parsed = new Date(offeredAt);
+
+  return Number.isNaN(parsed.getTime()) ? null : `Offered ${parsed.toLocaleString()}`;
+}
+
 type DeviceSettingsScreenProps = {
   pairing: DevicePairing;
   /** DeviceApp's handleReset. The only safety decision in the flow. */
@@ -53,6 +86,23 @@ type DeviceSettingsScreenProps = {
   /** True when known state says evidence exists; an affordance, never the guard. */
   unpairBlocked: boolean;
   onClose: () => void;
+
+  /**
+   * Feature 26.2 — false renders NO update section at all.
+   *
+   * A permanent "no updates available" card would be noise on a screen a
+   * cashier opens for one reason; absence is the correct way to say nothing is
+   * waiting.
+   */
+  updateAvailable: boolean;
+  /** ISO instant the owner made the offer, when the server supplied one. */
+  offeredAt: string | null;
+  /** DeviceApp's handleApplyUpdate. Like onUnpair, it owns the safety decision. */
+  onApplyUpdate: () => void;
+  /** True while a request is in flight — disables the button and shows progress. */
+  applying: boolean;
+  /** What the apply attempt said, refusal or failure. Null when nothing to say. */
+  updateNotice: string | null;
 };
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -70,8 +120,14 @@ export default function DeviceSettingsScreen({
   notice,
   unpairBlocked,
   onClose,
+  updateAvailable,
+  offeredAt,
+  onApplyUpdate,
+  applying,
+  updateNotice,
 }: DeviceSettingsScreenProps) {
   const [confirming, setConfirming] = useState(false);
+  const offeredLabel = formatOfferedAt(offeredAt);
 
   return (
     <div className="flex min-h-screen flex-col bg-neutral-50 px-6 py-10">
@@ -97,6 +153,52 @@ export default function DeviceSettingsScreen({
             )}
           </div>
         </section>
+
+        {/* Feature 26.2 — present only when there is genuinely something to
+            apply. Placed above Pairing because it is the one thing on this
+            screen an operator may have come here to do. */}
+        {updateAvailable && (
+          <section className="mt-4 rounded-2xl border border-neutral-200 bg-white p-5">
+            <div className="flex items-center gap-2">
+              {/* Restrained on purpose: a dot, not a badge. This is routine
+                  shop admin, not an alert. */}
+              <span aria-hidden="true" className="h-2 w-2 rounded-full bg-emerald-500" />
+              <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                {UPDATE_AVAILABLE_HEADING}
+              </p>
+            </div>
+
+            <p className="mt-2 text-sm leading-relaxed text-neutral-600">
+              {UPDATE_AVAILABLE_EXPLANATION}
+            </p>
+
+            {offeredLabel !== null && (
+              <p className="mt-1 text-xs text-neutral-500">{offeredLabel}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={onApplyUpdate}
+              disabled={applying}
+              aria-busy={applying}
+              className="mt-4 w-full rounded-xl bg-neutral-900 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-400"
+            >
+              {applying ? APPLYING_UPDATE_LABEL : APPLY_UPDATE_ACTION}
+            </button>
+
+            {/* Amber, matching the unpair refusal: a till declining to repin
+                itself over an open cart or an unsynced sale is the system
+                working, and red would say something broke. */}
+            {updateNotice !== null && (
+              <p
+                aria-live="polite"
+                className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-900"
+              >
+                {updateNotice}
+              </p>
+            )}
+          </section>
+        )}
 
         <section className="mt-4 rounded-2xl border border-neutral-200 bg-white p-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">

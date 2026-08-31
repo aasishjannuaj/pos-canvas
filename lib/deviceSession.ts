@@ -178,8 +178,59 @@ export type PairingStateResult =
    * leaving the till unable to pair again.
    */
   | { paired: false; reason: "not_authenticated" | "not_paired" | "unpaired" }
-  | { paired: true; pairing: DevicePairing; active: boolean }
+  | { paired: true; pairing: DevicePairing; active: boolean; offer: DeviceUpdateOffer }
   | { paired: false; reason: "unreadable" };
+
+/**
+ * Feature 26.1/26.2 — an owner has offered this device a newer published build.
+ *
+ * INFORMATIONAL UNTIL APPLY, and deliberately kept OFF DevicePairing. That type
+ * is the device's identity, and it is also reconstructed from the offline cache
+ * where no offer can exist or be acted on. Keeping the offer beside it rather
+ * than inside it means there is no shape in which a cached start can appear to
+ * carry one.
+ *
+ * The offered build's configuration is never fetched and never used for
+ * pricing. `buildJobId` on DevicePairing remains the only pricing pin, and it
+ * moves only when the server says it has.
+ */
+export type DeviceUpdateOffer = {
+  updateAvailable: boolean;
+  /** Never shown to an operator; carried so a client can tell two offers apart. */
+  offeredBuildJobId: string | null;
+  offeredAt: string | null;
+};
+
+/** What a response with no offer keys — or an older server — means. */
+export const NO_UPDATE_OFFER: DeviceUpdateOffer = {
+  updateAvailable: false,
+  offeredBuildJobId: null,
+  offeredAt: null,
+};
+
+/**
+ * Reads the three additive Feature 26.1 keys.
+ *
+ * FAILS CLOSED IN BOTH DIRECTIONS. A missing or non-boolean `update_available`
+ * means no update, so a device running against a server without the feature
+ * behaves exactly as it did before. And an `update_available: true` with no
+ * offered build is also no update: the server would never send that pair, and
+ * offering Apply on the strength of a shape we do not understand is how a till
+ * ends up pressing a button that cannot work.
+ */
+export function parseUpdateOffer(raw: Record<string, unknown>): DeviceUpdateOffer {
+  const offeredBuildJobId = readString(raw, "offered_build_job_id");
+
+  if (raw.update_available !== true || offeredBuildJobId === null) {
+    return NO_UPDATE_OFFER;
+  }
+
+  return {
+    updateAvailable: true,
+    offeredBuildJobId,
+    offeredAt: readString(raw, "offered_at"),
+  };
+}
 
 function readString(source: Record<string, unknown>, key: string): string | null {
   const value = source[key];
@@ -241,6 +292,10 @@ export function parsePairingState(value: unknown): PairingStateResult {
     // payload's own boolean, so the two can never disagree in the device's
     // favour.
     active: revokedAt === null,
+    // Feature 26.2 — a revoked device is offered nothing. The server already
+    // gates update_available on revoked_at; this makes the same rule true on
+    // the client, so neither side alone decides it.
+    offer: revokedAt === null ? parseUpdateOffer(raw) : NO_UPDATE_OFFER,
   };
 }
 

@@ -1,6 +1,12 @@
 "use client";
 
-import { type ReactNode, useEffect, useState } from "react";
+import {
+  type MutableRefObject,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useState,
+} from "react";
 import Link from "next/link";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
 import { CURRENCY_SYMBOLS } from "@/lib/projectConfig";
@@ -90,6 +96,26 @@ type PosRuntimeProps = {
    */
   headerTrailing?: ReactNode;
 
+  /**
+   * Feature 26.2 — the LIVE cart size, for a host that must authorize on it.
+   *
+   * WHY A REF AND NOT THE COUNT ABOVE. `onCartLineCountChange` fires from a
+   * passive effect: React commits the new cart, paints, and only then runs it.
+   * Between the commit and that flush the host's mirrored count is stale, and
+   * for the one decision that moves a till's pricing authority "stale" is not a
+   * theoretical objection — it is the difference between refusing an update over
+   * an open cart and repricing that cart underneath the cashier.
+   *
+   * This is written from a LAYOUT effect instead, which React flushes
+   * synchronously as part of the same commit, before the browser paints and
+   * therefore before any subsequent click can be handled. A handler that reads
+   * `.current` reads what the cart is now, not what it was at last render.
+   *
+   * `null` means no runtime is mounted and the question cannot be answered. A
+   * reader must treat that as a refusal, never as an empty cart.
+   */
+  cartLineCountRef?: MutableRefObject<number | null>;
+
   // Feature 19 — the origin a stored logo path resolves against, supplied by
   // the host so this component never names Supabase. null = no logo rendering.
   logoBaseUrl: PosRuntimeLogoBaseUrl;
@@ -169,6 +195,7 @@ export default function PosRuntime({
   refreshStock,
   homeLink,
   headerTrailing,
+  cartLineCountRef,
   logoBaseUrl,
   onSaleRejected,
   checkoutBlockedReason = null,
@@ -287,6 +314,33 @@ export default function PosRuntime({
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [cart.length]);
+
+  // Feature 26.2 — the live cart size, for a host that must authorize on it.
+  //
+  // A layout effect is flushed synchronously inside the commit that changed the
+  // cart, before the browser paints and therefore before React can dispatch the
+  // next click. That is what makes "add an item, open settings, press Apply"
+  // impossible to slip through: by the time the settings click is handled, this
+  // has already run.
+  //
+  // NO DEPENDENCY ARRAY, deliberately. The value must be correct after EVERY
+  // commit, and a dependency list is a claim about which renders can change it —
+  // a claim a future edit could quietly falsify. Writing a number on every
+  // commit costs nothing and cannot drift.
+  //
+  // The cleanup nulls it on unmount so a host can never read a count belonging
+  // to a runtime that is no longer on screen.
+  useLayoutEffect(() => {
+    if (cartLineCountRef === undefined) {
+      return;
+    }
+
+    cartLineCountRef.current = cart.length;
+
+    return () => {
+      cartLineCountRef.current = null;
+    };
+  });
 
   // Feature 18.2 — every cart operation keys on lineKey, not itemId, so the
   // same product with two different modifier selections stays two independent

@@ -348,6 +348,117 @@ export async function fetchDevicePairingState(): Promise<
   }
 }
 
+// ---------------------------------------------------------------------------
+// Feature 26.2 — applying an offered configuration update
+// ---------------------------------------------------------------------------
+
+/** Every server-side refusal apply_device_config_update can return. */
+export type ApplyConfigUpdateError =
+  | "not_authenticated"
+  | "not_paired"
+  | "no_update_offered"
+  | "offer_unusable"
+  /** The response did not match the contract. Treated as a refusal, never a success. */
+  | "unreadable";
+
+export type ApplyConfigUpdateResult =
+  | {
+      ok: true;
+      /**
+       * The pin AFTER the move, straight from the server. Reported for logging
+       * and tests; the till still re-fetches get_device_config rather than
+       * building a configuration around this id.
+       */
+      buildJobId: string;
+      previousBuildJobId: string | null;
+    }
+  /** The server answered and said no. Pressing again will not change that. */
+  | { ok: false; retryable: false; error: ApplyConfigUpdateError }
+  /** We never got an answer. The pin may or may not have moved — see below. */
+  | { ok: false; retryable: true; error: "transport" };
+
+/**
+ * Feature 26.2 — the device adopts the build its owner offered it.
+ *
+ * ZERO ARGUMENTS, ON PURPOSE. apply_device_config_update() takes none: it
+ * resolves the device from auth.uid() and the build from that device's own
+ * offer row. There is no device id, build id or project id for a caller to
+ * supply and therefore none for a caller to get wrong or to forge. This wrapper
+ * keeps that property visible by having no parameters either.
+ *
+ * TRANSPORT FAILURE IS NOT A REFUSAL. If the request never lands, the pin may
+ * already have moved server-side. `retryable: true` says only "ask again" — and
+ * a retry is safe because a second apply of a consumed offer answers
+ * `no_update_offered`, which the caller resolves by refreshing state rather
+ * than by assuming anything.
+ *
+ * NOTHING LOCAL CHANGES HERE. This function returns; it does not touch the
+ * cache, the config or the pairing. That sequencing belongs to the caller,
+ * which is the only place that can order it correctly.
+ */
+export async function applyDeviceConfigUpdate(): Promise<ApplyConfigUpdateResult> {
+  try {
+    const { data, error, status } =
+      await getDeviceSupabaseClient().rpc("apply_device_config_update");
+
+    if (error) {
+      const kind = classifyDeviceFailure(withStatus(error, status));
+
+      return kind === "transport"
+        ? { ok: false, retryable: true, error: "transport" }
+        : { ok: false, retryable: false, error: "unreadable" };
+    }
+
+    return parseApplyConfigUpdate(data);
+  } catch (thrown) {
+    return classifyDeviceFailure(thrown) === "transport"
+      ? { ok: false, retryable: true, error: "transport" }
+      : { ok: false, retryable: false, error: "unreadable" };
+  }
+}
+
+/**
+ * Reads the RPC's jsonb.
+ *
+ * An unrecognized payload is `unreadable` and NEVER a success: a device must not
+ * repin itself on the strength of a shape it does not understand, and the cost
+ * of being wrong here is selling at the wrong price.
+ */
+export function parseApplyConfigUpdate(value: unknown): ApplyConfigUpdateResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, retryable: false, error: "unreadable" };
+  }
+
+  const raw = value as Record<string, unknown>;
+
+  if (raw.ok === true) {
+    const buildJobId = raw.build_job_id;
+
+    if (typeof buildJobId !== "string" || buildJobId.trim() === "") {
+      return { ok: false, retryable: false, error: "unreadable" };
+    }
+
+    const previous = raw.previous_build_job_id;
+
+    return {
+      ok: true,
+      buildJobId,
+      previousBuildJobId: typeof previous === "string" && previous !== "" ? previous : null,
+    };
+  }
+
+  const known: readonly ApplyConfigUpdateError[] = [
+    "not_authenticated",
+    "not_paired",
+    "no_update_offered",
+    "offer_unusable",
+  ];
+
+  const error = known.find((candidate) => candidate === raw.error) ?? "unreadable";
+
+  return { ok: false, retryable: false, error };
+}
+
 /**
  * Redeems a pairing code.
  *
