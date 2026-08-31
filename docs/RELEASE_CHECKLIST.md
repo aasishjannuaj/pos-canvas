@@ -375,7 +375,7 @@ Requires two repository variables: `NEXT_PUBLIC_SUPABASE_URL` and
 reaching the pairing screen rather than the offline page. The bytes are right;
 running it is a separate confirmation.
 
-### P0-2 — stale published Windows v1.0.0 — OPEN PUBLICATION GATE
+### P0-2 — stale published Windows v1.0.0 — CLOSED IN CODE, PENDING DEPLOY
 
 `CURRENT_WINDOWS_RELEASE` advertises a binary built **2026-08-16**, which
 predates the local-runtime architecture (`ab38942`, 2026-08-21). Its checksum
@@ -385,6 +385,64 @@ matches no artifact this repository can currently produce.
 Windows release after 1.1.0 is published.** Closing this is step 6 of the rollout
 order (§10): update `lib/windowsRelease.ts` only once the 1.1.0 installer is
 downloadable and its checksum verified against the served file.
+
+### 1.1.0 published artifacts — verified from their SERVED URLs
+
+Both releases were downloaded from their **public GitHub URLs** — the bytes
+GitHub actually serves, not a local copy — and verified before either pointer
+moved.
+
+| | Android | Windows |
+|---|---|---|
+| Tag | `v1.1.0` | `windows-v1.1.0` |
+| Asset | `POS-Canvas-v1.1.0.apk` | `POS-Canvas-Windows-v1.1.0.exe` (+ `.sha256`) |
+| SHA256 | `00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1` | `c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe` |
+| Size | 4,121,584 bytes | 100,260,898 bytes |
+| Published | `2026-08-31T18:03:31Z` | `2026-08-31T18:12:54Z` |
+| Prerelease | false | **false** |
+| Served download | HTTP 200, hash + size match | HTTP 200, hash + size match |
+
+The Windows `.sha256` names the correct asset and `shasum -a 256 -c` returns
+**OK** against the served installer. The served APK was additionally re-read as
+an APK: `com.poscanvas.app`, `versionCode 2`, `versionName 1.1.0`, signer
+`7e32ec72…5b1b` — signer continuity intact, so it installs over 1.0.0.
+
+**P0-2 is closed in code**: `CURRENT_WINDOWS_RELEASE` no longer advertises the
+2026-08-16 binary. It is **not closed in production** until the web deploy ships
+these pointers — until then the live download page still serves 1.0.0.
+
+**Deployment and final smoke have NOT happened yet.**
+
+### Signing status is now independent of pre-release status
+
+Publishing `windows-v1.1.0` as a full release exposed a coupling: one flag,
+`isPrerelease`, carried two facts, and one badge said both — *"Pre-release ·
+Unsigned build"*. Setting `isPrerelease: false` was correct (GitHub says
+`prerelease=false`) and it removed the only warning that the installer is
+unsigned. The installer had not changed.
+
+`PlatformRelease` now carries **`isUnsigned?: boolean`** alongside
+`isPrerelease?: boolean`. Both are optional and absent means the benign default,
+so Android — signed, stable — declares neither and is unaffected. Windows 1.1.0
+declares `isUnsigned: true`.
+
+| Release | isPrerelease | isUnsigned | Badges shown |
+|---|---|---|---|
+| Android 1.1.0 | absent | absent | none |
+| Windows 1.0.0 (historical) | true | true | Pre-release + Unsigned |
+| **Windows 1.1.0 (current)** | **false** | **true** | **Unsigned only** |
+| A future signed pre-release | true | false | Pre-release only |
+
+Labels: `PRERELEASE_BADGE_LABEL` is now just `"Pre-release"`;
+`UNSIGNED_BADGE_LABEL` is `"Unsigned · Windows may show a SmartScreen warning"` —
+it names the consequence a user will actually meet.
+
+Six regression guards replace the temporary KNOWN GAP assertion, including one
+that fails if either flag's value is ever derived from the other, and one
+asserting the release declares itself unsigned for as long as `windows-shell`
+carries no signing configuration. **Code signing remains deferred, not
+cancelled** — when it lands, `isUnsigned` comes out in the same change that
+publishes the signed artifact.
 
 ### P0-3 — publish reported success for a stale snapshot — CLOSED
 

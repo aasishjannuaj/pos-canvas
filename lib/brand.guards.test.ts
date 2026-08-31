@@ -444,22 +444,22 @@ describe("brand assets are approved artwork, in one place", () => {
 
   it("the Android release is unchanged", () => {
     expect(CURRENT_ANDROID_RELEASE).toEqual({
-      versionName: "1.0.0",
-      versionCode: 1,
+      versionName: "1.1.0",
+      versionCode: 2,
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.0.0/POS-Canvas-v1.0.0.apk",
-      checksum: "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125",
-      fileSizeBytes: 3169762,
-      releasedAt: "2026-08-14T23:52:46Z",
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.1.0/POS-Canvas-v1.1.0.apk",
+      checksum: "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1",
+      fileSizeBytes: 4121584,
+      releasedAt: "2026-08-31T18:03:31Z",
     });
   });
 
   it("the Windows release and its pre-release status are unchanged", () => {
     expect(CURRENT_WINDOWS_RELEASE?.checksum).toBe(
-      "03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d"
+      "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe"
     );
-    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(99637338);
-    expect(CURRENT_WINDOWS_RELEASE?.isPrerelease).toBe(true);
+    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(100260898);
+    expect(CURRENT_WINDOWS_RELEASE?.isPrerelease).toBe(false);
   });
 
   it("no signing configuration appeared", () => {

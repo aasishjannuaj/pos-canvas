@@ -48,18 +48,54 @@ export type PlatformRelease = {
    * place instead of hardcoding the same sentence three times.
    */
   isPrerelease?: boolean;
+  /**
+   * Feature 25.7 — true when the published binary carries no code signature.
+   *
+   * A SEPARATE FACT FROM `isPrerelease`, and separated because conflating them
+   * caused a real regression. 1.0.0 was an unsigned pre-release, so one flag
+   * carried both meanings and one badge said both things. When 1.1.0 shipped as
+   * a full release, setting `isPrerelease: false` was correct — GitHub says
+   * prerelease=false — and it silently removed the only warning that the
+   * installer is unsigned. The installer had not changed at all.
+   *
+   * The two vary independently: a release can be stable-and-unsigned (Windows
+   * 1.1.0 today), pre-release-and-unsigned (Windows 1.0.0), or stable-and-signed
+   * (Android, which is signed with the release keystore). Nothing may derive one
+   * from the other again.
+   *
+   * OPTIONAL, AND ABSENT MEANS SIGNED — the same shape as `isPrerelease`, where
+   * the badge appears only when someone says so explicitly. Android omits it and
+   * is unaffected. A guard asserts the current Windows release declares it, so
+   * the field cannot be dropped by accident while the build is still unsigned.
+   */
+  isUnsigned?: boolean;
 };
 
 /**
  * The qualifier shown beside a pre-release download.
  *
- * Deliberately short and plain. It has to be honest — this build is unsigned and
- * Windows will say so in its own way — without being the kind of developer
- * jargon that makes an owner afraid to install it. It also must never be
- * softened into a claim this build cannot support: nothing here says "verified",
- * "securely signed" or "trusted publisher", because none of that is true yet.
+ * Feature 25.7 — this used to read "Pre-release · Unsigned build", carrying two
+ * independent facts in one string. It now says only what its own flag means, so
+ * a stable-but-unsigned release gets the unsigned warning and no misleading
+ * "Pre-release", and a pre-release that is eventually signed loses the unsigned
+ * warning without losing this one.
  */
-export const PRERELEASE_BADGE_LABEL = "Pre-release · Unsigned build";
+export const PRERELEASE_BADGE_LABEL = "Pre-release";
+
+/**
+ * The qualifier shown beside a download with no code signature.
+ *
+ * Deliberately short and plain. It has to be honest — Windows will say so in its
+ * own way, and an owner who is not warned first will read SmartScreen as the app
+ * being broken — without being the kind of developer jargon that makes them
+ * afraid to install it. It names the consequence they will actually see.
+ *
+ * It must never be softened into a claim this build cannot support: nothing here
+ * says "verified", "securely signed" or "trusted publisher", because none of
+ * that is true yet.
+ */
+export const UNSIGNED_BADGE_LABEL =
+  "Unsigned · Windows may show a SmartScreen warning";
 
 export const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const SEMVER = /^\d+\.\d+\.\d+$/;
@@ -102,7 +138,8 @@ export function isPlatformRelease(value: unknown): value is PlatformRelease {
     // Optional, but if present it must be a real boolean — a truthy string
     // would silently label a stable release as pre-release, or worse, fail to
     // label a pre-release one.
-    (release.isPrerelease === undefined || typeof release.isPrerelease === "boolean")
+    (release.isPrerelease === undefined || typeof release.isPrerelease === "boolean") &&
+    (release.isUnsigned === undefined || typeof release.isUnsigned === "boolean")
   );
 }
 

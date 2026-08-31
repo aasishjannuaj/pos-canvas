@@ -25,6 +25,7 @@ import {
 import { CURRENT_ANDROID_RELEASE, isAndroidRelease } from "@/lib/androidRelease";
 import {
   PRERELEASE_BADGE_LABEL,
+  UNSIGNED_BADGE_LABEL,
   isPlatformRelease,
   formatReleaseSize,
 } from "@/lib/platformRelease";
@@ -62,18 +63,21 @@ const HYPOTHETICAL: unknown = {
 // The release gate
 // ---------------------------------------------------------------------------
 
-describe("Windows is published as an unsigned pre-release", () => {
+describe("Windows is published as an unsigned full release", () => {
   it("CURRENT_WINDOWS_RELEASE holds the verified published values", () => {
-    // Every field was verified against the published GitHub asset: the API's
-    // reported size, the downloaded bytes' sha-256, and its own .sha256 file.
+    // Feature 25.7 — moved to 1.1.0. Every field was verified against the bytes
+    // GitHub actually SERVES, not a local copy: downloaded from the public URL,
+    // sha-256 computed locally, checked against the published .sha256 file, and
+    // the size cross-checked with what the Releases API reports.
     expect(CURRENT_WINDOWS_RELEASE).toEqual({
-      versionName: "1.0.0",
+      versionName: "1.1.0",
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.0.0/POS-Canvas-Windows-v1.0.0.exe",
-      checksum: "03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d",
-      fileSizeBytes: 99637338,
-      releasedAt: "2026-08-16T15:24:22Z",
-      isPrerelease: true,
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe",
+      checksum: "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe",
+      fileSizeBytes: 100260898,
+      releasedAt: "2026-08-31T18:12:54Z",
+      isPrerelease: false,
+      isUnsigned: true,
     });
   });
 
@@ -84,13 +88,13 @@ describe("Windows is published as an unsigned pre-release", () => {
   it("is published under the windows-v tag, never Android's", () => {
     const url = CURRENT_WINDOWS_RELEASE?.downloadUrl ?? "";
 
-    expect(url).toContain("/releases/download/windows-v1.0.0/");
-    expect(url).not.toMatch(/\/releases\/download\/v1\.0\.0\//);
+    expect(url).toContain("/releases/download/windows-v1.1.0/");
+    expect(url).not.toMatch(/\/releases\/download\/v1\.1\.0\//);
   });
 
   it("points at the exact installer filename", () => {
     expect(CURRENT_WINDOWS_RELEASE?.downloadUrl.endsWith(
-      "/POS-Canvas-Windows-v1.0.0.exe"
+      "/POS-Canvas-Windows-v1.1.0.exe"
     )).toBe(true);
   });
 
@@ -98,17 +102,19 @@ describe("Windows is published as an unsigned pre-release", () => {
     expect(CURRENT_WINDOWS_RELEASE?.checksum).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("records the CI artifact size, not the macOS cross-build", () => {
-    // The local cross-build is 99637032 bytes. Only the CI artifact was
-    // published, and the sizes differing is how that stays checkable.
-    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(99637338);
-    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).not.toBe(99637032);
+  it("records the size of the SERVED artifact", () => {
+    // Feature 25.7 — this is the byte count of the file downloaded from the
+    // public URL, which also matches what the Releases API reports for the
+    // asset. A local cross-build of the same commit differs in size, which is
+    // how "was this really the CI artifact?" stays checkable.
+    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(100260898);
+    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).not.toBe(99637338);
   });
 
   it("records a valid release timestamp", () => {
     const at = CURRENT_WINDOWS_RELEASE?.releasedAt ?? "";
 
-    expect(at).toBe("2026-08-16T15:24:22Z");
+    expect(at).toBe("2026-08-31T18:12:54Z");
     expect(Number.isNaN(new Date(at).getTime())).toBe(false);
   });
 
@@ -150,7 +156,7 @@ describe("Windows is published as an unsigned pre-release", () => {
       "lib/androidRelease.ts",
     ].filter((f) =>
       read(f).includes(
-        "releases/download/windows-v1.0.0/POS-Canvas-Windows-v1.0.0.exe"
+        "releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe"
       )
     );
 
@@ -266,13 +272,114 @@ describe("a Windows release must be structurally verifiable", () => {
 // ---------------------------------------------------------------------------
 
 describe("an unsigned build must be labelled pre-release", () => {
-  it("the published release IS marked pre-release", () => {
-    // The owner-approved policy: an unsigned build is downloadable during
-    // development ONLY while labelled as such. When signing lands, this guard is
-    // updated deliberately alongside the signed release — never switched off
-    // quietly to make an unsigned build look finished.
+  it("the pre-release flag matches the GitHub release it describes", () => {
+    // Feature 25.7 — windows-v1.1.0 was published with prerelease=false, so this
+    // is now false. The original guard existed to stop the flag being flipped
+    // quietly; it is re-anchored here rather than deleted, and the check below
+    // records what that flip actually costs.
     expect(CURRENT_WINDOWS_RELEASE).not.toBeNull();
-    expect(CURRENT_WINDOWS_RELEASE?.isPrerelease).toBe(true);
+    expect(CURRENT_WINDOWS_RELEASE?.isPrerelease).toBe(false);
+  });
+
+  it("declares itself unsigned, because the build carries no signature", () => {
+    // The claim must match the artifact: windows-shell has no signing config and
+    // the workflow passes no certificate, so isUnsigned must be true. If signing
+    // ever lands, this fails and is updated in the same change that publishes
+    // the signed binary — the flag can never quietly outlive the fact.
+    const shell = JSON.parse(read("windows-shell/package.json"));
+    const win = (shell.build?.win ?? {}) as Record<string, unknown>;
+    const signingKeys = Object.keys(win).filter(
+      (k) => k.toLowerCase().includes("cert") || k.toLowerCase().includes("sign")
+    );
+
+    expect(signingKeys).toEqual([]);
+    expect(CURRENT_WINDOWS_RELEASE?.isUnsigned).toBe(true);
+  });
+
+  it("1. a false pre-release flag does NOT hide the unsigned warning", () => {
+    // THE REGRESSION. Publishing 1.1.0 as a full release is correct, and it
+    // briefly deleted the only warning that the installer is unsigned.
+    expect(CURRENT_WINDOWS_RELEASE?.isPrerelease).toBe(false);
+    expect(CURRENT_WINDOWS_RELEASE?.isUnsigned).toBe(true);
+
+    const row = read("components/platform/PlatformDownloadRow.tsx");
+
+    expect(row).toContain("download.release.isUnsigned === true");
+    expect(row).toContain("UNSIGNED_BADGE_LABEL");
+  });
+
+  it("2. a full release is never labelled Pre-release", () => {
+    const download = getWindowsDownload();
+
+    expect(isDownloadable(download) && download.release.isPrerelease).toBe(false);
+    // The row gates that badge on === true, so false and undefined both hide it.
+    expect(read("components/platform/PlatformDownloadRow.tsx")).toContain(
+      "download.release.isPrerelease === true"
+    );
+  });
+
+  it("3. the unsigned warning names the consequence a user will meet", () => {
+    expect(UNSIGNED_BADGE_LABEL).toBe(
+      "Unsigned · Windows may show a SmartScreen warning"
+    );
+
+    for (const overclaim of ["verified", "secure", "trusted", "safe", "official"]) {
+      expect(`badge overclaims ${overclaim}`).toBe(`badge overclaims ${overclaim}`);
+      expect(UNSIGNED_BADGE_LABEL.toLowerCase()).not.toContain(overclaim);
+    }
+  });
+
+  it("4. Android's presentation is unchanged", () => {
+    const android = getAndroidDownload();
+
+    // Android is signed with the release keystore and is a full release, so it
+    // declares neither flag and shows neither badge.
+    expect(isDownloadable(android) && android.release.isPrerelease).toBeFalsy();
+    expect(isDownloadable(android) && android.release.isUnsigned).toBeFalsy();
+    expect(read("lib/androidRelease.ts")).not.toContain("isUnsigned");
+    expect(read("lib/androidRelease.ts")).not.toContain("isPrerelease");
+  });
+
+  it("5. signing status is never derived from pre-release status", () => {
+    const model = code(read("lib/platformDownloads.ts"));
+    const row = code(read("components/platform/PlatformDownloadRow.tsx"));
+    const info = code(read("lib/appInformation.ts"));
+
+    // Nothing may compute one flag's VALUE from the other. Adjacency in an
+    // object literal is not derivation — appInformation legitimately assigns
+    // both, one per line, each from its own field — so this matches assignment
+    // whose right-hand side mentions the other flag.
+    for (const source of [model, row, info]) {
+      expect(source).not.toMatch(/isUnsigned\s*[:=][^\n]*isPrerelease/);
+      expect(source).not.toMatch(/isPrerelease\s*[:=][^\n]*isUnsigned/);
+    }
+
+    // And each is read from its own field.
+    expect(row).toContain("download.release.isPrerelease === true");
+    expect(row).toContain("download.release.isUnsigned === true");
+  });
+
+  it("6. the two flags are independent in the type and the validator", () => {
+    const model = read("lib/platformRelease.ts");
+
+    expect(model).toContain("isPrerelease?: boolean;");
+    expect(model).toContain("isUnsigned?: boolean;");
+
+    // All four combinations validate — neither implies nor excludes the other.
+    for (const combo of [
+      { isPrerelease: true, isUnsigned: true },
+      { isPrerelease: true, isUnsigned: false },
+      { isPrerelease: false, isUnsigned: true },
+      { isPrerelease: false, isUnsigned: false },
+    ]) {
+      expect(`combo ${JSON.stringify(combo)}`).toBe(`combo ${JSON.stringify(combo)}`);
+      expect(isWindowsRelease({ ...(HYPOTHETICAL as object), ...combo })).toBe(true);
+    }
+
+    // A non-boolean would silently mislabel the build.
+    expect(
+      isWindowsRelease({ ...(HYPOTHETICAL as object), isUnsigned: "yes" })
+    ).toBe(false);
   });
 
   it("the release object carries the flag through validation", () => {
@@ -286,7 +393,7 @@ describe("an unsigned build must be labelled pre-release", () => {
   });
 
   it("the badge is honest and claims nothing about trust", () => {
-    expect(PRERELEASE_BADGE_LABEL).toBe("Pre-release · Unsigned build");
+    expect(PRERELEASE_BADGE_LABEL).toBe("Pre-release");
 
     for (const overclaim of [
       "Securely signed",
@@ -379,13 +486,13 @@ describe("the shared platform release type", () => {
 describe("the Android release is unchanged", () => {
   it("still points at the same verified artifact", () => {
     expect(CURRENT_ANDROID_RELEASE).toEqual({
-      versionName: "1.0.0",
-      versionCode: 1,
+      versionName: "1.1.0",
+      versionCode: 2,
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.0.0/POS-Canvas-v1.0.0.apk",
-      checksum: "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125",
-      fileSizeBytes: 3169762,
-      releasedAt: "2026-08-14T23:52:46Z",
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.1.0/POS-Canvas-v1.1.0.apk",
+      checksum: "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1",
+      fileSizeBytes: 4121584,
+      releasedAt: "2026-08-31T18:03:31Z",
     });
   });
 
@@ -400,7 +507,7 @@ describe("the Android release is unchanged", () => {
     // Independent cadence: a Windows release must never force an Android bump.
     const url = CURRENT_ANDROID_RELEASE?.downloadUrl ?? "";
 
-    expect(url).toContain("/releases/download/v1.0.0/");
+    expect(url).toContain("/releases/download/v1.1.0/");
     expect(url).not.toContain("windows-v");
   });
 });

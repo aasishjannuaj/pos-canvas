@@ -110,15 +110,16 @@ describe("Windows carries a download only when a real release exists", () => {
     expect(comingSoon.description).toBe("POS Canvas for Windows");
   });
 
-  it("is available today, from the published pre-release", () => {
-    // The live default. Feature 23.6 published windows-v1.0.0, so every surface
-    // now renders a real download — and it is labelled as an unsigned
-    // pre-release, because it is one.
+  it("is available today, from the published release", () => {
+    // The live default. Feature 25.7 published windows-v1.1.0 as a FULL release
+    // (prerelease=false), so every surface renders a real download and no
+    // pre-release chip. The build is still unsigned — see the KNOWN GAP guard in
+    // windowsRelease.guards.test.ts, which pins that the badge is now absent.
     const live = getWindowsDownload();
 
     expect(live.status).toBe("available");
     expect(CURRENT_WINDOWS_RELEASE).not.toBeNull();
-    expect(isDownloadable(live) && live.release.isPrerelease).toBe(true);
+    expect(isDownloadable(live) && live.release.isPrerelease).toBe(false);
   });
 
   it("becomes a real download when a verified release is supplied", () => {

@@ -363,9 +363,9 @@ describe("24.5C changed nothing it was not meant to", () => {
       '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
     );
     expect(exists("windows-shell/build/icon.ico")).toBe(true);
-    expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: true");
+    expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: false");
     expect(read("lib/androidRelease.ts")).toContain(
-      "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125"
+      "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1"
     );
   });
 });

@@ -328,6 +328,6 @@ describe("24.5D changed nothing it was not meant to", () => {
       '<item name="windowSplashScreenBackground">@color/ic_launcher_background</item>'
     );
     expect(exists("windows-shell/build/icon.ico")).toBe(true);
-    expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: true");
+    expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: false");
   });
 });

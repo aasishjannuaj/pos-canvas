@@ -634,7 +634,7 @@ describe("Feature 23.2 stops where it was scoped to stop", () => {
     // it is labelled as an unsigned pre-release.
     expect(model).toContain("export function getWindowsDownload(");
     expect(model).toContain('status: "available"');
-    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: false");
   });
 
   it("adds no signing work", () => {
@@ -662,7 +662,7 @@ describe("Feature 23.2 stops where it was scoped to stop", () => {
     expect(code(read("lib/windowsRelease.ts"))).toContain(
       "export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {"
     );
-    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: false");
   });
 
   it("leaves the root dependency tree untouched", () => {

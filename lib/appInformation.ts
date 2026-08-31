@@ -28,6 +28,12 @@ export type AppPlatformInformation = {
   requirement: string | null;
   /** True while the published build is a development pre-release. */
   isPrerelease: boolean;
+  /**
+   * Feature 25.7 — true when the published binary carries no code signature.
+   * Independent of `isPrerelease`; see PlatformRelease.isUnsigned for why the
+   * two must never be derived from one another.
+   */
+  isUnsigned: boolean;
 };
 
 export type AppInformation = {
@@ -49,6 +55,7 @@ function toPlatformInformation(download: PlatformDownload): AppPlatformInformati
       versionName: null,
       requirement: null,
       isPrerelease: false,
+      isUnsigned: false,
     };
   }
 
@@ -57,6 +64,7 @@ function toPlatformInformation(download: PlatformDownload): AppPlatformInformati
     versionName: download.release.versionName,
     requirement: download.requirement,
     isPrerelease: download.release.isPrerelease === true,
+    isUnsigned: download.release.isUnsigned === true,
   };
 }
 

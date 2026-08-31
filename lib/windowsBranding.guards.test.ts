@@ -476,13 +476,14 @@ describe("Feature 24.3 changes artwork and nothing else", () => {
     // 24.3 prepares the NEXT installer. The v1.0.0 asset already on GitHub is
     // the older pre-branding binary and must keep describing itself accurately.
     expect(CURRENT_WINDOWS_RELEASE).toEqual({
-      versionName: "1.0.0",
+      versionName: "1.1.0",
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.0.0/POS-Canvas-Windows-v1.0.0.exe",
-      checksum: "03b88e35d12b01ffbf62116519817c554b18f8a8e51c21064b9f6e82a748855d",
-      fileSizeBytes: 99637338,
-      releasedAt: "2026-08-16T15:24:22Z",
-      isPrerelease: true,
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe",
+      checksum: "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe",
+      fileSizeBytes: 100260898,
+      releasedAt: "2026-08-31T18:12:54Z",
+      isPrerelease: false,
+      isUnsigned: true,
     });
   });
 
@@ -490,10 +491,10 @@ describe("Feature 24.3 changes artwork and nothing else", () => {
     // Typed nullable because a release may not exist yet; 24.3 must not be the
     // thing that removes one, so the presence is asserted before the values.
     expect(CURRENT_ANDROID_RELEASE).not.toBeNull();
-    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe("1.0.0");
-    expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(1);
+    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe("1.1.0");
+    expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(2);
     expect(CURRENT_ANDROID_RELEASE?.checksum).toBe(
-      "aded13d8db6eaed8a4fdeb5e56cf1a12036df24b64f54eec8f98ff2feb910125"
+      "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1"
     );
   });
 

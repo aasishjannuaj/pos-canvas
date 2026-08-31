@@ -1630,8 +1630,14 @@ function AboutPosCanvas() {
               ) : (
                 <>
                   Version {platform.versionName}
+                  {/* Feature 25.7 — two independent facts. Before this, the
+                      unsigned warning rode on isPrerelease, so a stable
+                      unsigned build showed nothing at all. */}
                   {platform.isPrerelease && (
                     <span className="ml-1 text-amber-700">· Pre-release</span>
+                  )}
+                  {platform.isUnsigned && (
+                    <span className="ml-1 text-amber-700">· Unsigned</span>
                   )}
                 </>
               )}

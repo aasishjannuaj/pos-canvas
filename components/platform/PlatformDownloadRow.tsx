@@ -1,5 +1,5 @@
 import { formatReleaseSize } from "@/lib/androidRelease";
-import { PRERELEASE_BADGE_LABEL } from "@/lib/platformRelease";
+import { PRERELEASE_BADGE_LABEL, UNSIGNED_BADGE_LABEL } from "@/lib/platformRelease";
 import { isDownloadable } from "@/lib/platformDownloads";
 import type { PlatformDownload } from "@/lib/platformDownloads";
 
@@ -62,15 +62,28 @@ export default function PlatformDownloadRow({
           </span>
         )}
 
-        {/* Feature 23.6 — the pre-release qualifier, read from the release
-            itself so all three surfaces say the same thing without any of them
-            hardcoding it. Absent on a stable release, so Android is unaffected.
-            Rendered as text rather than a coloured warning: it is a fact about
-            the build, not an error, and an alarming treatment would discourage
-            the very testing this build exists for. */}
+        {/* Feature 23.6 — qualifiers read from the release itself, so all three
+            surfaces say the same thing without any of them hardcoding it.
+            Absent on a stable signed release, so Android is unaffected.
+            Rendered as text rather than a coloured warning: these are facts
+            about the build, not errors, and an alarming treatment would
+            discourage the very testing this build exists for.
+
+            Feature 25.7 — TWO INDEPENDENT FLAGS, TWO INDEPENDENT LINES. They
+            used to be one string behind `isPrerelease`, so publishing Windows
+            1.1.0 as a full release — which it is — deleted the only warning
+            that the installer is unsigned. A release can be stable-and-unsigned,
+            pre-release-and-unsigned, or stable-and-signed; each fact now renders
+            on its own terms and neither is derived from the other. */}
         {isDownloadable(download) && download.release.isPrerelease === true && (
           <span className="text-xs font-medium text-amber-700">
             {PRERELEASE_BADGE_LABEL}
+          </span>
+        )}
+
+        {isDownloadable(download) && download.release.isUnsigned === true && (
+          <span className="text-xs font-medium text-amber-700">
+            {UNSIGNED_BADGE_LABEL}
           </span>
         )}
       </div>

@@ -88,12 +88,18 @@ describe("the native release version is one value, in four places", () => {
 });
 
 describe("versionCode only ever moves forward", () => {
-  it("3. is strictly greater than the published Android release", () => {
-    // Android refuses to install a lower or equal code over an installed one,
-    // so a release that does not advance it cannot be installed as an upgrade.
+  it("3. is never lower than the published Android release", () => {
+    // Android refuses to install a lower or equal code over an installed one.
+    // While a release is being cut the tree must be strictly ahead; once it is
+    // published the pointer catches up and the two are equal. Lower is the only
+    // state that is always wrong, and it is the one that breaks upgrades.
     const published = CURRENT_ANDROID_RELEASE?.versionCode ?? 0;
 
-    expect(androidVersionCode()).toBeGreaterThan(published);
+    expect(androidVersionCode()).toBeGreaterThanOrEqual(published);
+  });
+
+  it("the published versionCode matches the tree once shipped", () => {
+    expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(androidVersionCode());
   });
 
   it("is a positive integer", () => {
@@ -141,16 +147,19 @@ describe("the web version is independent of the native release", () => {
   });
 });
 
-describe("the public download pointers lag until publication", () => {
-  it("4. they still describe the PREVIOUS release, not the one being cut", () => {
-    // Deliberate. lib/*Release.ts is what the download page serves; updating it
-    // before the artifact exists advertises a 404. It is step 8 of the rollout,
-    // and updating the Windows one is what closes P0-2.
-    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe("1.0.0");
-    expect(CURRENT_WINDOWS_RELEASE?.versionName).toBe("1.0.0");
+describe("the public download pointers describe what is actually published", () => {
+  it("4. they now match the version in the tree, because it shipped", () => {
+    // These deliberately LAGGED while 1.1.0 was being cut: lib/*Release.ts is
+    // what the download page serves, so moving it before the artifact exists
+    // advertises a 404. Both artifacts are now published and their SERVED bytes
+    // verified, so the pointers match — which is what closes P0-2.
+    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe(androidVersionName());
+    expect(CURRENT_WINDOWS_RELEASE?.versionName).toBe(windowsVersion());
   });
 
-  it("the pointers are behind the version being built, never ahead", () => {
+  it("a pointer never advertises a version that was never built", () => {
+    // The failure this replaces: a pointer ahead of the tree is a 404 on the
+    // download page. Equal is correct after publication; ahead never is.
     const building = windowsVersion();
 
     for (const published of [
@@ -160,7 +169,7 @@ describe("the public download pointers lag until publication", () => {
       expect(`published ${published} vs building ${building}`).toBe(
         `published ${published} vs building ${building}`
       );
-      expect(published).not.toBe(building);
+      expect(published).toBe(building);
     }
   });
 

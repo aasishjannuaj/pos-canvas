@@ -636,7 +636,7 @@ describe("Feature 23.4 stops where it was scoped to stop", () => {
     expect(code(read("lib/windowsRelease.ts"))).toContain(
       "export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {"
     );
-    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: false");
   });
 
   it("Windows is a published pre-release download", () => {
@@ -647,7 +647,7 @@ describe("Feature 23.4 stops where it was scoped to stop", () => {
     // it is labelled as an unsigned pre-release.
     expect(model).toContain("export function getWindowsDownload(");
     expect(model).toContain('status: "available"');
-    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: true");
+    expect(code(read("lib/windowsRelease.ts"))).toContain("isPrerelease: false");
     // No installer URL has been published, so none may appear anywhere.
     expect(model).not.toContain(".exe");
   });
