@@ -2658,11 +2658,12 @@ and it is why no duplicate order is reachable on any path exercised above.
 
 None of these blocked 24.5F.
 
-1. **Fresh-install error copy.** On a device with no prior session, a *server*
-   rejection during anonymous sign-in still renders "No connection". The
-   classifier is correct (`server_rejected`); the fresh-install branch discards
-   the classification before choosing the copy. Cost a full diagnostic cycle
-   during staging setup — worth fixing, cosmetic in effect.
+1. ~~**Fresh-install auth rejection reported as "No connection".**~~ **FIXED in
+   Feature 25.4** (`c052b1b`). The classifier was always correct
+   (`server_rejected`); the fresh-install branch discarded it before choosing
+   the copy, and the persisted-session branch did the same one path over. Both
+   now consult `classifyStartupFailure`, so only positive transport evidence
+   earns "No connection" and a refused start says "Unable to start this device".
 2. **§6c clock skew.** `occurred_at` is device-clock and `revoked_at` is
    server-clock, compared with a bare `>=` and no allowance, where §6b grants
    ±5 minutes on its other bounds. A till running fast can have a genuinely

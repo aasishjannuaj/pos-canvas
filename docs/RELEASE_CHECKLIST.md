@@ -1,7 +1,30 @@
 # POS Canvas — MVP Release Checklist
 
-**Target release: 1.1.0** (web, Android, Windows)
-**Baseline commit at the time of writing: `ee29ce1`**
+> ## Release 1.1.0 — COMPLETE and live (2026-08-31)
+>
+> | | |
+> |---|---|
+> | Final release commit | `d82b32d` — *feat: point downloads at 1.1.0, and stop hiding that Windows is unsigned* |
+> | Android | `versionName 1.1.0`, `versionCode 2` — tag **`v1.1.0`**, published `2026-08-31T18:03:31Z` |
+> | Android asset | `POS-Canvas-v1.1.0.apk` — `00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1`, 4,121,584 bytes |
+> | Android signer | `7e32ec72c659dfacdab880d7fbe68991cf6104d11434f15d0c516bb9c6525b1b` — unchanged since 1.0.0, so 1.1.0 installs in place |
+> | Windows | `1.1.0` — tag **`windows-v1.1.0`**, published `2026-08-31T18:12:54Z`, `prerelease=false` |
+> | Windows asset | `POS-Canvas-Windows-v1.1.0.exe` — `c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe`, 100,260,898 bytes, **unsigned** |
+> | Production migrations | `20260823120000_device_voluntary_unpair.sql` and `20260823130000_device_sales_history.sql` — **both applied and verified** |
+> | Production web | **deployed**; publish worker verified; Sales History verified against production |
+> | Final smoke | **PASS** |
+> | P0-1 Windows CI runtime generation | **CLOSED** |
+> | P0-2 stale published Windows v1.0.0 | **CLOSED** |
+> | P0-3 publish reported a stale snapshot | **CLOSED** |
+>
+> Both checksums were verified against the bytes GitHub actually **serves**, not
+> local copies. Everything below this banner is the standing process; the
+> per-item history is preserved as written.
+
+
+**Shipped release: 1.1.0** (web, Android, Windows) — see the banner above.
+**Baseline commit when this document was written: `ee29ce1`.**
+**Final release commit: `d82b32d`.**
 
 This document is the gate for a production release. It is written against the
 architecture as it actually is today, not as it was designed. Where something is
@@ -375,7 +398,7 @@ Requires two repository variables: `NEXT_PUBLIC_SUPABASE_URL` and
 reaching the pairing screen rather than the offline page. The bytes are right;
 running it is a separate confirmation.
 
-### P0-2 — stale published Windows v1.0.0 — CLOSED IN CODE, PENDING DEPLOY
+### P0-2 — stale published Windows v1.0.0 — CLOSED
 
 `CURRENT_WINDOWS_RELEASE` advertises a binary built **2026-08-16**, which
 predates the local-runtime architecture (`ab38942`, 2026-08-21). Its checksum
@@ -407,11 +430,9 @@ The Windows `.sha256` names the correct asset and `shasum -a 256 -c` returns
 an APK: `com.poscanvas.app`, `versionCode 2`, `versionName 1.1.0`, signer
 `7e32ec72…5b1b` — signer continuity intact, so it installs over 1.0.0.
 
-**P0-2 is closed in code**: `CURRENT_WINDOWS_RELEASE` no longer advertises the
-2026-08-16 binary. It is **not closed in production** until the web deploy ships
-these pointers — until then the live download page still serves 1.0.0.
-
-**Deployment and final smoke have NOT happened yet.**
+**P0-2 is CLOSED.** `CURRENT_WINDOWS_RELEASE` advertises 1.1.0, the web deploy
+shipped it, and the final production smoke passed. The 2026-08-16 binary is no
+longer offered anywhere.
 
 ### Signing status is now independent of pre-release status
 
@@ -475,10 +496,10 @@ No schema change was required — `config_hash` was already stored and indexed.
 | # | Item | Class |
 |---|---|---|
 | 1 | Windows CI never builds `windows-shell/runtime` → installer with no POS | **P0 — CLOSED.** CI green; artifact verified to contain a real runtime |
-| 2 | Published Windows v1.0.0 predates the local-runtime architecture | **P0 — OPEN PUBLICATION GATE** |
+| 2 | Published Windows v1.0.0 predates the local-runtime architecture | **P0 — CLOSED.** Pointers moved to 1.1.0 and deployed |
 | 2b | Publish reported success for a stale snapshot | **P0 — CLOSED.** Manually verified on staging |
 | 2c | A paired till does not receive a newly published config without re-pairing (Cause 2) | **P1 — OPEN.** Documented, intentional pin; not a silent failure |
-| 3 | Windows installer unsigned (SmartScreen) | P1 |
+| 3 | Windows installer unsigned (SmartScreen) — now **labelled** on every surface, but still unsigned | P1 |
 | 4 | Stalled `queued` publish polls while the editor is open | P1 |
 | 5 | Historical receipt currency symbol comes from current pinned config | P1 |
 | 6 | Android native printing unavailable | P2 (documented) |
