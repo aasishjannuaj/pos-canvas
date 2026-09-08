@@ -9,8 +9,10 @@ import {
   createDevicePairingToken,
   getProjectPairedDevices,
   offerDeviceConfigUpdate,
+  offerDeviceConfigUpdateToAll,
   revokePairedDevice,
 } from "@/lib/devicePairing.server";
+import type { BulkOfferResult } from "@/lib/devicePairing.server";
 
 // Feature 16.3, Migration B — the only server boundary the browser can reach
 // for device pairing. Same thin-wrapper convention as
@@ -115,6 +117,27 @@ export async function offerDeviceUpdate(input: {
     deviceId: input.deviceId,
     buildJobId: input.buildJobId,
   });
+}
+
+/**
+ * Feature 26.4 — offers the latest published configuration to every eligible
+ * paired device on a project.
+ *
+ * Takes ONE argument, and it is not a device list. The server resolves both the
+ * latest build and the eligible devices from the database, so a caller cannot
+ * name a device it should not touch, cannot name a build that is not current,
+ * and cannot be told a count that differs from what was acted on.
+ *
+ * Partial success is a success: the counts say what happened.
+ */
+export async function offerDeviceUpdateToAll(
+  projectId: string
+): Promise<BulkOfferResult> {
+  if (!isValidUuid(projectId)) {
+    return { ok: false, message: "A valid project is required." };
+  }
+
+  return offerDeviceConfigUpdateToAll(projectId);
 }
 
 /**

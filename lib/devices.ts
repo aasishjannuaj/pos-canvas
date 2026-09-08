@@ -191,6 +191,71 @@ export function canOfferDeviceUpdate(
   return resolveDeviceUpdateState(device, latestBuildJobId) === "update_available";
 }
 
+/**
+ * Feature 26.4 — the devices a bulk offer would actually act on.
+ *
+ * DERIVED FROM THE SAME PREDICATE as the per-device button, deliberately. The
+ * count shown next to "Offer update to all" and the set the server loops over
+ * must never be two different ideas of "eligible", or the owner is told one
+ * number and something else happens.
+ *
+ * Everything not `update_available` is skipped, which by construction means an
+ * up-to-date device is not re-offered, a device already holding this exact
+ * offer is not re-offered, and a revoked or unpaired device is not touched at
+ * all. A device with a STALE offer — offered B2 while B3 is now latest — IS
+ * eligible, because re-pointing it at B3 is precisely what the owner wants.
+ */
+export function selectOfferableDevices(
+  devices: readonly PairedDeviceSummary[],
+  latestBuildJobId: string | null
+): PairedDeviceSummary[] {
+  return devices.filter((device) => canOfferDeviceUpdate(device, latestBuildJobId));
+}
+
+/**
+ * Feature 26.4 — what the owner is told after a bulk offer.
+ *
+ * SAYS BOTH NUMBERS WHENEVER THEY DIFFER. "Update offered to 5 of 6 devices"
+ * is the honest sentence; "Update offered" alone would hide a device that did
+ * not get one, and an owner who believes every till was reached is exactly the
+ * person who will not check.
+ *
+ * Pure and separate from the component so the wording is testable against
+ * counts rather than only readable in a browser.
+ */
+export function describeBulkOfferOutcome(input: {
+  eligible: number;
+  offered: number;
+  failed: number;
+}): string {
+  const attempted = input.offered + input.failed;
+  const remaining = Math.max(0, input.eligible - attempted);
+  const devices = (n: number) => (n === 1 ? "1 device" : `${n} devices`);
+
+  if (attempted === 0) {
+    return "No devices needed this update.";
+  }
+
+  const sentences: string[] = [
+    input.failed === 0
+      ? `Update offered to ${devices(input.offered)}.`
+      : `Update offered to ${input.offered} of ${devices(attempted)}.`,
+  ];
+
+  if (input.failed > 0) {
+    sentences.push(
+      `${devices(input.failed)} could not be updated. Refresh to see the current state.`
+    );
+  }
+
+  // The batch cap, stated rather than hidden. Pressing again finishes the job.
+  if (remaining > 0) {
+    sentences.push(`${devices(remaining)} still need this update — offer again.`);
+  }
+
+  return sentences.join(" ");
+}
+
 const DEVICE_UPDATE_STATE_LABELS: Record<DeviceUpdateState, string | null> = {
   none: null,
   up_to_date: "Up to date",

@@ -81,7 +81,9 @@ import {
   APPLY_UNREACHABLE_MESSAGE,
   OFFER_WITHDRAWN_MESSAGE,
   decideApplyUpdateSafety,
+  describeCheckForUpdatesResult,
 } from "@/lib/deviceConfigUpdate";
+import type { CheckForUpdatesOutcome } from "@/lib/deviceConfigUpdate";
 import RejectedSaleReview from "@/components/device/RejectedSaleReview";
 import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import OperatorMenu from "@/components/device/OperatorMenu";
@@ -228,6 +230,21 @@ export default function DeviceApp() {
    * cache and completely wrong about what just happened.
    */
   const [updateReloadPending, setUpdateReloadPending] = useState(false);
+  /** Feature 26.5 — a manual check is in flight, for the button's label. */
+  const [checkingForUpdates, setCheckingForUpdates] = useState(false);
+  /** What the last manual check found, or null before any check. */
+  const [checkOutcome, setCheckOutcome] = useState<CheckForUpdatesOutcome | null>(
+    null
+  );
+  /**
+   * Feature 26.5 — the check's own synchronous latch.
+   *
+   * Separate from applyingUpdateRef on purpose. A check must never be able to
+   * block an apply — discovering an offer is the lesser action, and the spec
+   * for this feature is explicit that Apply keeps its own latch untouched.
+   * This one only stops a second check.
+   */
+  const checkingRef = useRef(false);
   const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   /**
    * Feature 25.3 — Sales history, and the one sale being looked at.
@@ -1184,6 +1201,81 @@ export default function DeviceApp() {
   }
 
   /**
+   * Feature 26.5 — the operator asks whether an update has been offered.
+   *
+   * WHY THIS EXISTS. `updateOffer` is written in exactly two places —
+   * resolveDeviceState and returnOnlineFromReconnect — so a till that is
+   * already running holds the answer it captured at launch. An owner who offers
+   * an update mid-shift changes nothing this device can see until something
+   * happens to re-resolve it: a relaunch, a reconnect, or a sale rejected in a
+   * way that looks like lost authorization. That is exactly what staging saw.
+   *
+   * WHY IT IS NOT resolveDeviceState(). That function begins by setting
+   * `checking`, which unmounts PosRuntime and destroys the cashier's cart — the
+   * same reason enterOfflineFromTransportFailure refuses to call it. A button
+   * an operator may tap mid-order must not be able to throw away an order. This
+   * transitions nothing: it re-reads the SAME authoritative pairing state and
+   * updates the offer beside the running POS.
+   *
+   * IT DISCOVERS, IT DOES NOT ACT. No config fetch, no cache write, no
+   * apply_device_config_update, and `state.pairing.buildJobId` — the pin every
+   * sale is priced from — is never assigned here. The only thing that can move
+   * that pin is still an explicit Apply.
+   */
+  async function handleCheckForUpdates() {
+    // Its own latch, checked and claimed synchronously so taps in one tick
+    // cannot all pass. It also stands down while an apply is running, because
+    // an apply ends by re-resolving everything anyway and a check landing
+    // mid-apply could write a pre-apply snapshot over a fresher answer.
+    if (checkingRef.current || applyingUpdateRef.current) {
+      return;
+    }
+
+    checkingRef.current = true;
+    setCheckingForUpdates(true);
+    setCheckOutcome(null);
+
+    try {
+      // A browser certain it has no network is right about that, and skipping a
+      // doomed request keeps the operator out of a pointless timeout. Same
+      // reasoning, and the same helper, as the apply safety decision.
+      if (readOnlineHint() === false) {
+        setCheckOutcome("offline");
+        return;
+      }
+
+      const result = await fetchDevicePairingState();
+
+      if (!result.ok) {
+        // Transport or server, it makes no difference to what the operator can
+        // do: nothing changed, try again. The failure kind is not surfaced.
+        setCheckOutcome("failed");
+        return;
+      }
+
+      if (!result.state.paired) {
+        // An authoritative "this device is not paired any more". Half an answer
+        // is not an answer, so it goes to the existing lifecycle rather than
+        // being discarded — the same handling a revocation-shaped sale
+        // rejection already gets.
+        setSettingsOpen(false);
+        await resolveDeviceState();
+        return;
+      }
+
+      setUpdateOffer(result.state.offer);
+      setCheckOutcome(
+        result.state.offer.updateAvailable ? "update_found" : "up_to_date"
+      );
+    } catch {
+      setCheckOutcome("failed");
+    } finally {
+      checkingRef.current = false;
+      setCheckingForUpdates(false);
+    }
+  }
+
+  /**
    * Feature 26.2 — the till adopts the configuration its owner offered it.
    *
    * THE ORDER OF THE STEPS IS THE FEATURE. Each one is only safe because the
@@ -1836,6 +1928,7 @@ export default function DeviceApp() {
             onClose={() => {
               setResetNotice(null);
               setUpdateNotice(null);
+              setCheckOutcome(null);
               setSettingsOpen(false);
             }}
             // Feature 26.2 — an offline runtime is shown no Apply button at
@@ -1847,6 +1940,11 @@ export default function DeviceApp() {
             onApplyUpdate={() => void handleApplyUpdate()}
             applying={applyingUpdate}
             updateNotice={updateNotice}
+            onCheckForUpdates={() => void handleCheckForUpdates()}
+            checking={checkingForUpdates}
+            checkNotice={
+              checkOutcome === null ? null : describeCheckForUpdatesResult(checkOutcome)
+            }
           />
         ) : null;
 

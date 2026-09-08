@@ -59,6 +59,13 @@ export const APPLY_UPDATE_ACTION = "Apply update";
 
 export const APPLYING_UPDATE_LABEL = "Applying…";
 
+// Feature 26.5 — asking the server whether anything has been offered. Worded as
+// a question about this shop's menu, not about software, for the same reason
+// the section above is.
+export const CHECK_FOR_UPDATES_ACTION = "Check for updates";
+
+export const CHECKING_FOR_UPDATES_LABEL = "Checking…";
+
 /**
  * Renders "Offered 4 Sept, 09:12" from an ISO instant, or null when the server
  * did not send one or sent something unparseable.
@@ -103,6 +110,18 @@ type DeviceSettingsScreenProps = {
   applying: boolean;
   /** What the apply attempt said, refusal or failure. Null when nothing to say. */
   updateNotice: string | null;
+
+  /**
+   * Feature 26.5 — the manual check.
+   *
+   * Always available on an active till, whether or not an update is waiting:
+   * "is there anything for me?" is a question an operator asks precisely when
+   * the answer on screen is no.
+   */
+  onCheckForUpdates: () => void;
+  checking: boolean;
+  /** The sentence from the last check, or null before one has run. */
+  checkNotice: string | null;
 };
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -125,6 +144,9 @@ export default function DeviceSettingsScreen({
   onApplyUpdate,
   applying,
   updateNotice,
+  onCheckForUpdates,
+  checking,
+  checkNotice,
 }: DeviceSettingsScreenProps) {
   const [confirming, setConfirming] = useState(false);
   const offeredLabel = formatOfferedAt(offeredAt);
@@ -199,6 +221,43 @@ export default function DeviceSettingsScreen({
             )}
           </section>
         )}
+
+        {/* Feature 26.5 — always present, unlike the Menu update section above.
+            An operator taps this precisely when nothing is on screen: the owner
+            said they published something, and the till has not noticed yet.
+            It only asks a question — nothing here can change what this device
+            is pinned to, and an update it finds still has to be applied
+            deliberately by the button above. */}
+        <section className="mt-4 rounded-2xl border border-neutral-200 bg-white p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+            Configuration
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-neutral-600">
+            Ask POS Canvas whether your business owner has published anything
+            new for this device.
+          </p>
+
+          <button
+            type="button"
+            onClick={onCheckForUpdates}
+            disabled={checking}
+            aria-busy={checking}
+            className="mt-4 w-full rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-300"
+          >
+            {checking ? CHECKING_FOR_UPDATES_LABEL : CHECK_FOR_UPDATES_ACTION}
+          </button>
+
+          {/* Neutral, not amber: "up to date" is good news and a failed check
+              broke nothing. The till is on the same menu either way. */}
+          {checkNotice !== null && (
+            <p
+              aria-live="polite"
+              className="mt-3 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-relaxed text-neutral-700"
+            >
+              {checkNotice}
+            </p>
+          )}
+        </section>
 
         <section className="mt-4 rounded-2xl border border-neutral-200 bg-white p-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">

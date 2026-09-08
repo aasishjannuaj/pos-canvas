@@ -29,14 +29,40 @@ import type { BuildJobSummary } from "@/lib/buildJobs";
 export function selectLatestSucceededBuild(
   jobs: BuildJobSummary[]
 ): BuildJobSummary | null {
-  const succeeded = jobs.filter((job) => job.status === "succeeded");
+  return latestSucceeded(jobs);
+}
+
+/**
+ * Feature 26.4 — the SAME rule, for a caller holding narrower rows.
+ *
+ * The bulk offer resolves the latest build server-side rather than trusting a
+ * baseline the browser sends, and it selects only the columns it needs. That
+ * must not become a second definition of "latest": a bulk offer and a
+ * single-device offer disagreeing about which build is newest would be a
+ * genuinely confusing bug, so both go through `latestSucceeded` below.
+ */
+export function selectLatestSucceededBuildId(
+  candidates: ReadonlyArray<{ id: string; status: string; createdAt: string }>
+): string | null {
+  return latestSucceeded(candidates)?.id ?? null;
+}
+
+/**
+ * The one rule. Filters to succeeded, then takes the newest by createdAt —
+ * never by arrival order, because the pinned build decides what a till
+ * charges and "latest" must be a property of the data.
+ */
+function latestSucceeded<T extends { status: string; createdAt: string }>(
+  items: ReadonlyArray<T>
+): T | null {
+  const succeeded = items.filter((item) => item.status === "succeeded");
 
   if (succeeded.length === 0) {
     return null;
   }
 
-  return succeeded.reduce((latest, job) =>
-    Date.parse(job.createdAt) > Date.parse(latest.createdAt) ? job : latest
+  return succeeded.reduce((latest, item) =>
+    Date.parse(item.createdAt) > Date.parse(latest.createdAt) ? item : latest
   );
 }
 

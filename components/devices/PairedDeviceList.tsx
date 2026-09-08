@@ -33,6 +33,16 @@ type PairedDeviceListProps = {
    * newer" question that went unanswered.
    */
   buildsErrorMessage: string | null;
+  /**
+   * Feature 26.4 — how many active devices would actually be offered an update.
+   * Zero renders no bulk control at all: a button that would act on nothing is
+   * worse than no button, because it implies there is something to do.
+   */
+  offerableCount: number;
+  onOfferUpdateToAll: () => void;
+  bulkOffering: boolean;
+  /** The counts sentence from the last bulk offer. */
+  bulkNotice: string | null;
 };
 
 export default function PairedDeviceList({
@@ -47,6 +57,10 @@ export default function PairedDeviceList({
   offeringDeviceId,
   offerErrorMessage,
   buildsErrorMessage,
+  offerableCount,
+  onOfferUpdateToAll,
+  bulkOffering,
+  bulkNotice,
 }: PairedDeviceListProps) {
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-6">
@@ -65,6 +79,40 @@ export default function PairedDeviceList({
       {errorMessage !== null && (
         <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
           {errorMessage}
+        </p>
+      )}
+
+      {/* Feature 26.4 — the bulk control, present only when it would do
+          something. It states the count in its own label so the owner knows
+          the size of what they are about to do before they press it, and it is
+          disabled while ANY offer is in flight, including a single-row one. */}
+      {offerableCount > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3">
+          <p className="text-sm text-neutral-700">
+            {offerableCount === 1
+              ? "1 device can be updated to the latest configuration."
+              : `${offerableCount} devices can be updated to the latest configuration.`}
+          </p>
+          <button
+            type="button"
+            onClick={onOfferUpdateToAll}
+            disabled={bulkOffering || offeringDeviceId !== null}
+            aria-busy={bulkOffering}
+            className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-neutral-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed disabled:bg-neutral-400"
+          >
+            {bulkOffering ? "Offering…" : "Offer update to all"}
+          </button>
+        </div>
+      )}
+
+      {/* What the server actually did. Neutral, not green: a partial result is
+          not a success story, and the sentence itself carries both numbers. */}
+      {bulkNotice !== null && (
+        <p
+          role="status"
+          className="mt-4 rounded-lg bg-neutral-100 px-3 py-2 text-sm text-neutral-800"
+        >
+          {bulkNotice}
         </p>
       )}
 
@@ -101,7 +149,7 @@ export default function PairedDeviceList({
               latestBuildJobId={latestBuildJobId}
               onOfferUpdate={onOfferUpdate}
               isOffering={offeringDeviceId === device.id}
-              anyOfferInFlight={offeringDeviceId !== null}
+              anyOfferInFlight={offeringDeviceId !== null || bulkOffering}
             />
           ))}
         </ul>

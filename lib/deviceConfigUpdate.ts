@@ -76,6 +76,50 @@ export const OFFER_WITHDRAWN_MESSAGE =
   "This update is no longer available. This device is still using its current menu.";
 
 /**
+ * Feature 26.5 — what a manual "Check for updates" found.
+ *
+ * DISCOVERY ONLY. Every outcome here is a sentence; none of them changes what
+ * this till is pinned to, and the one that matters most — an offer exists —
+ * has no message at all, because the answer is the Menu update section
+ * appearing above the button. Saying "an update is available" beside a card
+ * that already says so would be noise.
+ */
+export type CheckForUpdatesOutcome =
+  | "up_to_date"
+  | "update_found"
+  | "offline"
+  | "failed";
+
+export const CHECK_UP_TO_DATE_MESSAGE = "This device is up to date.";
+
+export const CHECK_OFFLINE_MESSAGE =
+  "This device needs an internet connection to check for updates. Reconnect and try again.";
+
+export const CHECK_FAILED_MESSAGE =
+  "Could not check for updates just now. This device is still using its current menu. Try again in a moment.";
+
+/**
+ * The line shown under the button, or null when the UI says it better.
+ *
+ * `update_found` returns null deliberately: the Menu update section is the
+ * answer, and it appears in the same render.
+ */
+export function describeCheckForUpdatesResult(
+  outcome: CheckForUpdatesOutcome
+): string | null {
+  switch (outcome) {
+    case "up_to_date":
+      return CHECK_UP_TO_DATE_MESSAGE;
+    case "offline":
+      return CHECK_OFFLINE_MESSAGE;
+    case "failed":
+      return CHECK_FAILED_MESSAGE;
+    case "update_found":
+      return null;
+  }
+}
+
+/**
  * Feature 26.2 — the server repinned, and then this device could not load what
  * it repinned to.
  *

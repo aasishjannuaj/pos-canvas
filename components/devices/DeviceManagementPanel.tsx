@@ -34,11 +34,16 @@ import {
   cancelPairingToken,
   listProjectPairedDevices,
   offerDeviceUpdate,
+  offerDeviceUpdateToAll,
   requestDevicePairingToken,
   revokeDevice,
 } from "@/lib/devicePairing.actions";
 import type { PairedDeviceSummary } from "@/lib/devices";
-import { canOfferDeviceUpdate } from "@/lib/devices";
+import {
+  canOfferDeviceUpdate,
+  describeBulkOfferOutcome,
+  selectOfferableDevices,
+} from "@/lib/devices";
 // The one message this component owns. Every other refusal string comes back
 // from the server already sanitized.
 const OFFER_UNAVAILABLE_MESSAGE =
@@ -94,12 +99,21 @@ export default function DeviceManagementPanel({
    * Feature 26.3 — the latch the guard actually reads.
    *
    * `offeringDeviceId` above drives the button; it cannot drive the guard.
+   *
+   * Feature 26.4 — ONE latch covers BOTH the per-device offer and the bulk
+   * offer, in both directions. They write the same rows through the same RPC,
+   * so letting a bulk run overlap a single press (or the reverse) would mean
+   * two flows racing on one device's offer columns for no benefit at all.
    * React state is not written synchronously, so several taps dispatched in one
    * tick all read the same `null` and all proceed — Feature 26.2 shipped that
    * exact hole and staging fired five apply requests through it. A ref is
    * written the instant it is set, so the second tap in the same tick loses.
    */
   const offeringRef = useRef(false);
+  /** Feature 26.4 — bulk offer in flight, for the button's own label. */
+  const [bulkOffering, setBulkOffering] = useState(false);
+  /** The counts sentence from the last bulk offer, or null. */
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
 
   const [deviceToRevoke, setDeviceToRevoke] = useState<PairedDeviceSummary | null>(
     null
@@ -199,6 +213,63 @@ export default function DeviceManagementPanel({
   // the android and desktop builds of one publish carry identical snapshots and
   // nothing on the device reads `target`.
   const latestBuildJobId = selectLatestSucceededBuild(jobs)?.id ?? null;
+
+  // Feature 26.4 — the same predicate every row uses, so the count beside the
+  // bulk button and the rows showing "Update available" can never disagree.
+  // A stale baseline makes this zero, which is also why the button disappears
+  // rather than offering something that could not be verified.
+  const offerableCount =
+    buildsError !== null ? 0 : selectOfferableDevices(devices, latestBuildJobId).length;
+
+  /**
+   * Feature 26.4 — offer the latest configuration to every eligible device.
+   *
+   * The browser sends only the project id. The server resolves the build and
+   * the eligible set itself, so this handler's count is an affordance and the
+   * server's counts are the truth — which is why the notice below is built
+   * from what came back, not from what was displayed.
+   */
+  async function handleOfferUpdateToAll() {
+    if (
+      offeringRef.current ||
+      buildsError !== null ||
+      projectId === null ||
+      offerableCount === 0
+    ) {
+      return;
+    }
+
+    offeringRef.current = true;
+    setBulkOffering(true);
+    setBulkNotice(null);
+    setOfferError(null);
+
+    let result: Awaited<ReturnType<typeof offerDeviceUpdateToAll>> | null = null;
+
+    try {
+      result = await offerDeviceUpdateToAll(projectId);
+    } catch {
+      setOfferError(OFFER_UNAVAILABLE_MESSAGE);
+    } finally {
+      offeringRef.current = false;
+      setBulkOffering(false);
+    }
+
+    if (result !== null) {
+      if (result.ok) {
+        setBulkNotice(describeBulkOfferOutcome(result));
+      } else {
+        setOfferError(result.message);
+      }
+    }
+
+    // ONE refresh, on every path, deliberately. A partial run changed some rows
+    // and not others; a refusal may be because the world moved; and a THROW is
+    // the worst case of all, because devices may have been offered before the
+    // request came apart. Only the database knows which, so it is asked either
+    // way rather than on the paths that happened to be easy to reason about.
+    await refreshAll();
+  }
 
   async function handleOfferUpdate(device: PairedDeviceSummary) {
     // Three reasons to refuse before a request exists: one is already in
@@ -453,6 +524,10 @@ export default function DeviceManagementPanel({
             offeringDeviceId={offeringDeviceId}
             offerErrorMessage={offerError}
             buildsErrorMessage={buildsError}
+            offerableCount={offerableCount}
+            onOfferUpdateToAll={() => void handleOfferUpdateToAll()}
+            bulkOffering={bulkOffering}
+            bulkNotice={bulkNotice}
           />
         )}
       </div>

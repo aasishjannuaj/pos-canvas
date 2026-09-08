@@ -39,6 +39,24 @@ function code(source: string): string {
     .replace(/^\s*\/\/.*$/gm, "");
 }
 
+/**
+ * One exported function's source, ending at the NEXT top-level export.
+ *
+ * Feature 26.4 inserted offerDeviceConfigUpdateToAll between this function and
+ * the one these tests used as an end anchor, which silently widened the slice
+ * and made a sanitisation assertion read the bulk function's messages. Ending
+ * at the next export removes that whole class of drift.
+ */
+function exportedFunction(source: string, name: string): string {
+  const start = source.indexOf(`export async function ${name}`);
+
+  expect(start, `${name} not found`).toBeGreaterThan(-1);
+
+  const next = source.indexOf("\nexport ", start + 1);
+
+  return next === -1 ? source.slice(start) : source.slice(start, next);
+}
+
 const B1 = "11111111-1111-4111-8111-111111111111";
 const B2 = "22222222-2222-4222-8222-222222222222";
 const B3 = "33333333-3333-4333-8333-333333333333";
@@ -201,10 +219,7 @@ describe("the offer goes through the server boundary and nowhere else", () => {
   });
 
   it("the server function calls the RPC, not the table", () => {
-    const fn = server.slice(
-      server.indexOf("export async function offerDeviceConfigUpdate"),
-      server.indexOf("export async function cancelDevicePairingToken")
-    );
+    const fn = exportedFunction(server, "offerDeviceConfigUpdate");
 
     // Whitespace-normalised: the call is formatted across lines, and how it is
     // wrapped is not a property worth pinning.
@@ -219,10 +234,7 @@ describe("the offer goes through the server boundary and nowhere else", () => {
   });
 
   it("sends no owner id — the database derives it from auth.uid()", () => {
-    const fn = server.slice(
-      server.indexOf("export async function offerDeviceConfigUpdate"),
-      server.indexOf("export async function cancelDevicePairingToken")
-    );
+    const fn = exportedFunction(server, "offerDeviceConfigUpdate");
 
     expect(fn).not.toContain("p_owner");
     expect(fn).not.toContain("ownerId");
@@ -240,10 +252,7 @@ describe("the offer goes through the server boundary and nowhere else", () => {
     // SECOND-PASS FIX. createDevicePairingToken has always been wrapped; this
     // was not. A throw from createClient or the transport escaped the action,
     // rejected the caller's await, and left the button spinning forever.
-    const fn = server.slice(
-      server.indexOf("export async function offerDeviceConfigUpdate"),
-      server.indexOf("export async function cancelDevicePairingToken")
-    );
+    const fn = exportedFunction(server, "offerDeviceConfigUpdate");
 
     expect(fn).toContain("try {");
     expect(fn).toContain("} catch {");
@@ -262,10 +271,7 @@ describe("the offer goes through the server boundary and nowhere else", () => {
   });
 
   it("returns a sanitized message, never the Postgres error", () => {
-    const fn = server.slice(
-      server.indexOf("export async function offerDeviceConfigUpdate"),
-      server.indexOf("export async function cancelDevicePairingToken")
-    );
+    const fn = exportedFunction(server, "offerDeviceConfigUpdate");
 
     // ENUMERATED, NOT BLOCKLISTED. An earlier version of this test banned the
     // two spellings I happened to think of, and `(error as {message: string})
@@ -293,10 +299,7 @@ describe("the offer goes through the server boundary and nowhere else", () => {
   });
 
   it("treats already_offered as success rather than an error", () => {
-    const fn = server.slice(
-      server.indexOf("export async function offerDeviceConfigUpdate"),
-      server.indexOf("export async function cancelDevicePairingToken")
-    );
+    const fn = exportedFunction(server, "offerDeviceConfigUpdate");
 
     expect(fn).toContain("already_offered");
     expect(fn).toContain("ok: true, alreadyOffered");
@@ -372,8 +375,10 @@ describe("the panel refuses before it requests", () => {
 
     expect(row).toContain("disabled={anyOfferInFlight}");
     expect(row).toContain('{isOffering ? "Offering…" : "Offer update"}');
+    // Feature 26.4 widened this: a bulk offer counts as in flight too, so a
+    // row button cannot look clickable while the bulk run owns the latch.
     expect(code(read("components/devices/PairedDeviceList.tsx"))).toContain(
-      "anyOfferInFlight={offeringDeviceId !== null}"
+      "anyOfferInFlight={offeringDeviceId !== null || bulkOffering}"
     );
   });
 

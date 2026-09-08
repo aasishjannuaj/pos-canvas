@@ -11,6 +11,8 @@ import type { CreatePairingTokenResult } from "@/lib/devicePairing";
 import type { PairedDeviceSummary } from "@/lib/devices";
 import { mapPairedDeviceRow } from "@/lib/devices";
 import type { PairedDeviceRow } from "@/lib/devices";
+import { selectOfferableDevices } from "@/lib/devices";
+import { selectLatestSucceededBuildId } from "@/lib/devicePairing.owner";
 
 // Feature 16.3, Migration B — the server-authoritative pairing boundary.
 //
@@ -33,6 +35,25 @@ const GENERIC_FAILURE = "A pairing code could not be created right now.";
 // changed) without confirming whether the device or the build exists.
 const OFFER_FAILURE_MESSAGE =
   "This update could not be offered to this device. Refresh and try again.";
+
+/**
+ * Feature 26.4 — the ceiling on one bulk call.
+ *
+ * The loop below is sequential and server-side, so a shop with a handful of
+ * tills costs a handful of fast single-row updates. This exists so the number
+ * can never be unbounded: an account that has accumulated hundreds of paired
+ * devices over years would otherwise hold one server action open for as long as
+ * it took. Anything above the cap simply stays eligible and is reported, so a
+ * second press finishes the job — truncating silently would be worse than
+ * either refusing or continuing.
+ */
+export const MAX_BULK_OFFER_DEVICES = 50;
+
+const BULK_OFFER_UNAVAILABLE_MESSAGE =
+  "This update could not be offered right now. Refresh and try again.";
+
+const BULK_OFFER_NO_BUILD_MESSAGE =
+  "There is no published configuration to offer yet.";
 
 function extractUserId(claims: unknown): string | null {
   if (!claims || typeof claims !== "object") {
@@ -355,6 +376,126 @@ export async function offerDeviceConfigUpdate(input: {
   // deliberately does not move offered_at, so a second press reports the
   // original offer rather than restarting the clock on it.
   return { ok: true, alreadyOffered: result.already_offered === true };
+}
+
+/**
+ * Feature 26.4 — offers the latest published configuration to every eligible
+ * paired device on a project.
+ *
+ * THE BROWSER NAMES ONLY THE PROJECT. Not the build, and not the devices. This
+ * function resolves the latest succeeded build and the eligible set from the
+ * database itself, which does two things: there is no id list for a caller to
+ * tamper with, and the bulk path structurally cannot repeat Feature 26.3's
+ * stale-baseline bug, where a frozen client-side "latest" could offer a build
+ * a newer publish had already superseded.
+ *
+ * THE LOOP IS HERE, NOT IN THE BROWSER. One request arrives however many
+ * devices are eligible; the fan-out is N fast single-row updates inside one
+ * server action, sequential so nothing floods the connection pool. Each
+ * iteration is the SAME offer_device_config_update the single-device button
+ * calls, so ownership, active-device and succeeded-build enforcement are
+ * per-device and identical — this function grants no authority the one-device
+ * path does not already have.
+ *
+ * PARTIAL SUCCESS, NOT ALL-OR-NOTHING. Each offer is an independent idempotent
+ * write. Undoing earlier successes because a later device failed would require
+ * compensating writes that can themselves fail, and would throw away offers
+ * that are perfectly good. The counts are reported instead, and pressing again
+ * is safe: a device already holding this offer answers already_offered and is
+ * not re-offered anyway.
+ */
+export type BulkOfferResult =
+  | {
+      ok: true;
+      /** Eligible devices found, which may exceed what one call attempts. */
+      eligible: number;
+      /** Devices the server accepted the offer for. */
+      offered: number;
+      /** Devices attempted whose offer was refused. */
+      failed: number;
+    }
+  | { ok: false; message: string };
+
+export async function offerDeviceConfigUpdateToAll(
+  projectId: string
+): Promise<BulkOfferResult> {
+  if (typeof projectId !== "string" || projectId.trim() === "") {
+    return { ok: false, message: "A valid project is required." };
+  }
+
+  try {
+    const supabase = await createClient();
+
+    const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+
+    if (claimsError || !claimsData?.claims) {
+      return { ok: false, message: "You must be signed in to offer updates." };
+    }
+
+    // The build baseline, from the database. RLS scopes this to the caller's
+    // own project, so someone else's project simply yields no builds.
+    const { data: buildRows, error: buildError } = await supabase
+      .from("build_jobs")
+      .select("id, status, created_at")
+      .eq("project_id", projectId)
+      .eq("status", "succeeded");
+
+    if (buildError) {
+      return { ok: false, message: BULK_OFFER_UNAVAILABLE_MESSAGE };
+    }
+
+    // FAIL CLOSED. No verifiable baseline means nothing is offered — never a
+    // guess, and never the client's idea of what is latest.
+    const latestBuildJobId = selectLatestSucceededBuildId(
+      (buildRows ?? []).map((row) => ({
+        id: String(row.id),
+        status: String(row.status),
+        createdAt: String(row.created_at),
+      }))
+    );
+
+    if (latestBuildJobId === null) {
+      return { ok: false, message: BULK_OFFER_NO_BUILD_MESSAGE };
+    }
+
+    const { devices, error: devicesError } = await getProjectPairedDevices(projectId);
+
+    if (devicesError !== null) {
+      return { ok: false, message: BULK_OFFER_UNAVAILABLE_MESSAGE };
+    }
+
+    // The same predicate the per-device button uses. Up-to-date, already-offered,
+    // revoked and unpaired devices are all excluded here.
+    const eligible = selectOfferableDevices(devices, latestBuildJobId);
+    const batch = eligible.slice(0, MAX_BULK_OFFER_DEVICES);
+
+    let offered = 0;
+    let failed = 0;
+
+    for (const device of batch) {
+      const result = await offerDeviceConfigUpdate({
+        deviceId: device.id,
+        buildJobId: latestBuildJobId,
+      });
+
+      if (result.ok) {
+        offered += 1;
+      } else {
+        failed += 1;
+      }
+    }
+
+    return { ok: true, eligible: eligible.length, offered, failed };
+  } catch {
+    console.error(
+      JSON.stringify({
+        event: "device_config_bulk_offer_failed",
+        projectId,
+        category: "threw",
+      })
+    );
+    return { ok: false, message: BULK_OFFER_UNAVAILABLE_MESSAGE };
+  }
 }
 
 /**
