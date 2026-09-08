@@ -29,6 +29,11 @@ import type { PairedDeviceRow } from "@/lib/devices";
 
 const GENERIC_FAILURE = "A pairing code could not be created right now.";
 
+// Feature 26.3 — one message for every refusal. Says what is true (nothing
+// changed) without confirming whether the device or the build exists.
+const OFFER_FAILURE_MESSAGE =
+  "This update could not be offered to this device. Refresh and try again.";
+
 function extractUserId(claims: unknown): string | null {
   if (!claims || typeof claims !== "object") {
     return null;
@@ -202,8 +207,11 @@ export async function getProjectPairedDevices(projectId: string): Promise<{
 
   const { data, error } = await supabase
     .from("paired_devices")
+    // Feature 26.3 — the two offer columns are additive. Both name builds this
+    // owner already owns and can already list, so neither widens what the
+    // browser can learn; auth_user_id and owner_id remain unselected.
     .select(
-      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at, unpaired_at"
+      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at, unpaired_at, offered_build_job_id, offered_at"
     )
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
@@ -255,6 +263,98 @@ export async function revokePairedDevice(
   }
 
   return { ok: true, alreadyRevoked: result.already_revoked === true };
+}
+
+/**
+ * Feature 26.3 — offers a published configuration to ONE paired device.
+ *
+ * WHAT THIS DOES NOT DO. It does not repin the device, does not touch
+ * build_job_id, and does not make the till use anything: an offer is a message,
+ * and Feature 26.2's Apply on the device is the only thing that moves a pricing
+ * pin. Nothing here can change what a till charges.
+ *
+ * OWNERSHIP IS THE DATABASE'S, NOT THIS FUNCTION'S. offer_device_config_update
+ * is SECURITY DEFINER and resolves the owner from auth.uid(), then requires the
+ * device AND the build to belong to that caller, the device to be active, the
+ * build to belong to the device's own project, and its status to be
+ * 'succeeded'. No owner id is passed, so there is none to forge — the ordinary
+ * cookie-scoped client is sufficient and no service-role client is used here or
+ * anywhere in this module.
+ *
+ * EVERY REFUSAL IS ONE MESSAGE. The RPC raises for a device that is missing,
+ * someone else's, revoked or unpaired, and for a build that is missing,
+ * someone else's, from another project or not succeeded. Those are collapsed
+ * deliberately: distinguishing them would let a caller use the error as an
+ * oracle for which device and build ids exist, which is the same reason
+ * redemption failures collapse to `invalid_code`. The raw Postgres message is
+ * never returned — it names the device, the build, and the failing check.
+ */
+export async function offerDeviceConfigUpdate(input: {
+  deviceId: string;
+  buildJobId: string;
+}): Promise<
+  { ok: true; alreadyOffered: boolean } | { ok: false; message: string }
+> {
+  if (
+    typeof input.deviceId !== "string" ||
+    input.deviceId.trim() === "" ||
+    typeof input.buildJobId !== "string" ||
+    input.buildJobId.trim() === ""
+  ) {
+    return { ok: false, message: "A valid device and configuration are required." };
+  }
+
+  // Wrapped, matching createDevicePairingToken. Without it a throw from
+  // createClient or from the transport escapes the server action, the caller's
+  // await rejects, and the owner is left with a button that never finishes and
+  // no message at all. The thrown value is not even bound, so nothing it
+  // carries can reach the response.
+  let data: unknown;
+
+  try {
+    const supabase = await createClient();
+
+    const { data: rpcData, error } = await supabase.rpc(
+      "offer_device_config_update",
+      {
+        p_device_id: input.deviceId,
+        p_build_job_id: input.buildJobId,
+      }
+    );
+
+    if (error) {
+      console.error(
+        JSON.stringify({
+          event: "device_config_offer_failed",
+          deviceId: input.deviceId,
+          category: "rpc_failed",
+        })
+      );
+      return { ok: false, message: OFFER_FAILURE_MESSAGE };
+    }
+
+    data = rpcData;
+  } catch {
+    console.error(
+      JSON.stringify({
+        event: "device_config_offer_failed",
+        deviceId: input.deviceId,
+        category: "threw",
+      })
+    );
+    return { ok: false, message: OFFER_FAILURE_MESSAGE };
+  }
+
+  const result = data as { ok?: boolean; already_offered?: boolean } | null;
+
+  if (!result?.ok) {
+    return { ok: false, message: OFFER_FAILURE_MESSAGE };
+  }
+
+  // already_offered is a SUCCESS. The RPC is idempotent for the same build and
+  // deliberately does not move offered_at, so a second press reports the
+  // original offer rather than restarting the clock on it.
+  return { ok: true, alreadyOffered: result.already_offered === true };
 }
 
 /**

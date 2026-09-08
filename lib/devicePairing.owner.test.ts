@@ -235,6 +235,9 @@ describe("paired device mapping feeding the list", () => {
       "deviceName",
       "id",
       "lastSeenAt",
+      // Feature 26.3 — build ids the owner already owns and can already list.
+      "offeredAt",
+      "offeredBuildJobId",
       "platform",
       "projectId",
       "revokedAt",

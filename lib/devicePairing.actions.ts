@@ -1,5 +1,6 @@
 "use server";
 
+import { isValidUuid } from "@/lib/buildJobs";
 import type { CreatePairingTokenResult } from "@/lib/devicePairing";
 import { createPairingFailure } from "@/lib/devicePairing";
 import type { PairedDeviceSummary } from "@/lib/devices";
@@ -7,6 +8,7 @@ import {
   cancelDevicePairingToken,
   createDevicePairingToken,
   getProjectPairedDevices,
+  offerDeviceConfigUpdate,
   revokePairedDevice,
 } from "@/lib/devicePairing.server";
 
@@ -83,6 +85,36 @@ export async function revokeDevice(
   }
 
   return revokePairedDevice(deviceId);
+}
+
+/**
+ * Feature 26.3 — offers a published configuration to one paired device.
+ *
+ * Takes the two ids a caller is allowed to name and nothing else: no owner id,
+ * no project id, no configuration. Both are re-checked against the caller's own
+ * ownership inside offer_device_config_update, so these shape checks exist to
+ * fail early, not to authorize.
+ *
+ * An offer changes no prices. The device applies it, or does not.
+ */
+export async function offerDeviceUpdate(input: {
+  deviceId: string;
+  buildJobId: string;
+}): Promise<
+  { ok: true; alreadyOffered: boolean } | { ok: false; message: string }
+> {
+  // Both columns are uuid. A malformed value would otherwise reach Postgres as
+  // an invalid-input-syntax error rather than as a row that does not match —
+  // the same correction Feature 15.7 applied to downloadBuildArtifact. It fails
+  // closed either way; this keeps a typo from becoming a database round trip.
+  if (!isValidUuid(input?.deviceId) || !isValidUuid(input?.buildJobId)) {
+    return { ok: false, message: "A valid device and configuration are required." };
+  }
+
+  return offerDeviceConfigUpdate({
+    deviceId: input.deviceId,
+    buildJobId: input.buildJobId,
+  });
 }
 
 /**

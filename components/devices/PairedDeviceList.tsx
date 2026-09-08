@@ -15,6 +15,24 @@ type PairedDeviceListProps = {
   onRefresh: () => void;
   onRevoke: (device: PairedDeviceSummary) => void;
   busyDeviceId: string | null;
+  /** Feature 26.3 — passed straight through; this list derives nothing. */
+  latestBuildJobId: string | null;
+  onOfferUpdate: (device: PairedDeviceSummary) => void;
+  offeringDeviceId: string | null;
+  /**
+   * Feature 26.3 — kept SEPARATE from errorMessage above. That one means the
+   * list could not be loaded; this one means the list is fine and one offer
+   * did not go through. Collapsing them would tell an owner their devices are
+   * unreadable when they are looking straight at them.
+   */
+  offerErrorMessage: string | null;
+  /**
+   * Feature 26.3 — the build list could not be loaded, so what these rows say
+   * about updates may be out of date. Shown as a warning rather than an error:
+   * the devices below are real and correct, it is only the "is there something
+   * newer" question that went unanswered.
+   */
+  buildsErrorMessage: string | null;
 };
 
 export default function PairedDeviceList({
@@ -24,6 +42,11 @@ export default function PairedDeviceList({
   onRefresh,
   onRevoke,
   busyDeviceId,
+  latestBuildJobId,
+  onOfferUpdate,
+  offeringDeviceId,
+  offerErrorMessage,
+  buildsErrorMessage,
 }: PairedDeviceListProps) {
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-6">
@@ -45,6 +68,22 @@ export default function PairedDeviceList({
         </p>
       )}
 
+      {buildsErrorMessage !== null && (
+        <p
+          role="status"
+          className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          Could not check for a newer configuration, so the update status below
+          may be out of date. Refresh to try again.
+        </p>
+      )}
+
+      {offerErrorMessage !== null && (
+        <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          {offerErrorMessage}
+        </p>
+      )}
+
       {devices.length === 0 && errorMessage === null ? (
         <p className="mt-4 text-sm text-neutral-500">
           {isLoading
@@ -59,6 +98,10 @@ export default function PairedDeviceList({
               device={device}
               onRevoke={onRevoke}
               isBusy={busyDeviceId === device.id}
+              latestBuildJobId={latestBuildJobId}
+              onOfferUpdate={onOfferUpdate}
+              isOffering={offeringDeviceId === device.id}
+              anyOfferInFlight={offeringDeviceId !== null}
             />
           ))}
         </ul>

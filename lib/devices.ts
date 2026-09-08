@@ -21,6 +21,7 @@ export type PairedDeviceStatus = "active" | "unpaired" | "revoked";
 export type PairedDeviceSummary = {
   id: string;
   projectId: string;
+  /** The PINNED build. What this till currently prices from. */
   buildJobId: string;
   deviceName: string | null;
   platform: string | null;
@@ -29,6 +30,16 @@ export type PairedDeviceSummary = {
   lastSeenAt: string | null;
   unpairedAt: string | null;
   revokedAt: string | null;
+  /**
+   * Feature 26.3 — the build the owner has OFFERED, if any.
+   *
+   * Not a pin and not a promise: the till decides whether and when to apply it
+   * (Feature 26.2), and until it does, `buildJobId` above is still what every
+   * sale prices from. Both fields are safe for the owner's own browser — they
+   * name builds the owner already owns and can already list.
+   */
+  offeredBuildJobId: string | null;
+  offeredAt: string | null;
 };
 
 // The exact narrow row shape lib/devicePairing.server.ts selects. Note the
@@ -44,6 +55,11 @@ export type PairedDeviceRow = {
   last_seen_at: string | null;
   unpaired_at?: string | null;
   revoked_at: string | null;
+  // Feature 26.3 — optional for the same reason unpaired_at is: a query written
+  // before these columns existed simply omits them, and must keep reading as
+  // "no offer" rather than becoming unmappable.
+  offered_build_job_id?: string | null;
+  offered_at?: string | null;
 };
 
 function isNonEmptyString(value: unknown): value is string {
@@ -88,6 +104,12 @@ export function mapPairedDeviceRow(
     lastSeenAt: row.last_seen_at,
     unpairedAt: row.unpaired_at ?? null,
     revokedAt: row.revoked_at,
+    // An empty string is not an offer. Normalised here so no caller has to
+    // decide whether "" means anything.
+    offeredBuildJobId: isNonEmptyString(row.offered_build_job_id)
+      ? row.offered_build_job_id
+      : null,
+    offeredAt: isNonEmptyString(row.offered_at) ? row.offered_at : null,
   };
 }
 
@@ -103,6 +125,82 @@ const DEVICE_STATUS_LABELS: Record<PairedDeviceStatus, string> = {
 
 export function getPairedDeviceStatusLabel(status: PairedDeviceStatus): string {
   return DEVICE_STATUS_LABELS[status];
+}
+
+// ---------------------------------------------------------------------------
+// Feature 26.3 — what the owner may do about this device's configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * The four answers, only one of which is actionable.
+ *
+ * `none` is not "up to date" — it is "this row has no configuration story to
+ * tell", which is true of a revoked or unpaired device and of a project with no
+ * succeeded build yet. Keeping it separate from `up_to_date` stops the list
+ * reassuring an owner about a till that is not running at all.
+ */
+export type DeviceUpdateState =
+  | "none"
+  | "up_to_date"
+  | "update_available"
+  | "update_offered";
+
+/**
+ * Derived, never stored. Given the device and the build the owner would offer,
+ * says which of the four states this row is in.
+ *
+ * THE BOUNDARY IS THE SERVER'S OWN. offer_device_config_update reports
+ * `already_offered` when — and only when — the offered build equals the one
+ * being offered again, and overwrites the offer otherwise. So `update_offered`
+ * means exactly "offering again would be a no-op", and every other case where
+ * the pin is behind is actionable. That includes a device holding a STALE offer
+ * (offered B2 while B3 is now latest): the owner can re-point it at B3, which
+ * is what the RPC does, rather than being stranded until the till applies an
+ * offer they have already superseded.
+ *
+ * Inactive devices are `none` before anything else is considered. The server
+ * refuses to offer to them (revoked_at or unpaired_at set), so showing an
+ * action would be showing a button that cannot work.
+ */
+export function resolveDeviceUpdateState(
+  device: PairedDeviceSummary,
+  latestBuildJobId: string | null
+): DeviceUpdateState {
+  if (!isPairedDeviceActive(device)) {
+    return "none";
+  }
+
+  if (!isNonEmptyString(latestBuildJobId)) {
+    return "none";
+  }
+
+  if (device.buildJobId === latestBuildJobId) {
+    return "up_to_date";
+  }
+
+  return device.offeredBuildJobId === latestBuildJobId
+    ? "update_offered"
+    : "update_available";
+}
+
+/** True only for the one state that has a button. */
+export function canOfferDeviceUpdate(
+  device: PairedDeviceSummary,
+  latestBuildJobId: string | null
+): boolean {
+  return resolveDeviceUpdateState(device, latestBuildJobId) === "update_available";
+}
+
+const DEVICE_UPDATE_STATE_LABELS: Record<DeviceUpdateState, string | null> = {
+  none: null,
+  up_to_date: "Up to date",
+  update_available: "Update available",
+  update_offered: "Update offered",
+};
+
+/** null means render no configuration chip at all for this row. */
+export function getDeviceUpdateStateLabel(state: DeviceUpdateState): string | null {
+  return DEVICE_UPDATE_STATE_LABELS[state];
 }
 
 // A device with no name is still identifiable in the owner's list.

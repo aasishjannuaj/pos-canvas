@@ -22,7 +22,7 @@
 // THE PLAINTEXT PAIRING CODE lives only in this component's React state. It is
 // never written to storage, a URL, or the console, and clearing it is
 // irreversible by design — the owner creates a new code instead.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import PairDeviceDialog from "@/components/devices/PairDeviceDialog";
 import PairedDeviceList from "@/components/devices/PairedDeviceList";
 import PairingCodeCard from "@/components/devices/PairingCodeCard";
@@ -33,11 +33,20 @@ import type { BuildJobSummary } from "@/lib/buildJobs";
 import {
   cancelPairingToken,
   listProjectPairedDevices,
+  offerDeviceUpdate,
   requestDevicePairingToken,
   revokeDevice,
 } from "@/lib/devicePairing.actions";
 import type { PairedDeviceSummary } from "@/lib/devices";
-import { resolvePairingReadiness } from "@/lib/devicePairing.owner";
+import { canOfferDeviceUpdate } from "@/lib/devices";
+// The one message this component owns. Every other refusal string comes back
+// from the server already sanitized.
+const OFFER_UNAVAILABLE_MESSAGE =
+  "This update could not be offered right now. Refresh and try again.";
+import {
+  resolvePairingReadiness,
+  selectLatestSucceededBuild,
+} from "@/lib/devicePairing.owner";
 
 /** The live code, held in memory only. `tokenId` is what Cancel acts on. */
 type ActivePairingCode = {
@@ -62,6 +71,12 @@ export default function DeviceManagementPanel({
   // synchronously (react-hooks/set-state-in-effect).
   const [isLoading, setIsLoading] = useState(projectId !== null);
   const [listError, setListError] = useState<string | null>(null);
+  /**
+   * Feature 26.3 — set when the build list could not be loaded. Distinct from
+   * listError, which is about the devices: one means "I cannot tell you what
+   * is published", the other "I cannot tell you what is paired".
+   */
+  const [buildsError, setBuildsError] = useState<string | null>(null);
 
   const [pairDialogOpen, setPairDialogOpen] = useState(false);
   const [isCreatingCode, setIsCreatingCode] = useState(false);
@@ -70,6 +85,21 @@ export default function DeviceManagementPanel({
 
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+
+  // Feature 26.3 — which device has an offer in flight, and what went wrong.
+  // One id rather than a boolean: two rows must not both read as busy.
+  const [offeringDeviceId, setOfferingDeviceId] = useState<string | null>(null);
+  const [offerError, setOfferError] = useState<string | null>(null);
+  /**
+   * Feature 26.3 — the latch the guard actually reads.
+   *
+   * `offeringDeviceId` above drives the button; it cannot drive the guard.
+   * React state is not written synchronously, so several taps dispatched in one
+   * tick all read the same `null` and all proceed — Feature 26.2 shipped that
+   * exact hole and staging fired five apply requests through it. A ref is
+   * written the instant it is set, so the second tap in the same tick loses.
+   */
+  const offeringRef = useRef(false);
 
   const [deviceToRevoke, setDeviceToRevoke] = useState<PairedDeviceSummary | null>(
     null
@@ -97,26 +127,133 @@ export default function DeviceManagementPanel({
     setIsLoading(false);
   }, [projectId]);
 
+  /**
+   * Feature 26.3 — a failed build load must not read as "there are no builds".
+   *
+   * This used to do `setJobs(result.ok ? result.jobs : [])`. An empty list is a
+   * STATEMENT — it says this project has never published — and on a transient
+   * failure it was a false one with real consequences: latestBuildJobId became
+   * null, every row silently lost its chip and its Offer button, and an owner
+   * with a genuinely newer configuration was told, in effect, that everything
+   * was fine. Nothing on screen said a load had failed.
+   *
+   * So the last known jobs are KEPT and the failure is RECORDED instead. What
+   * the rows show may now be stale, which is why buildsError also blocks
+   * offering: the panel says what it last knew, admits it could not check, and
+   * refuses to act on a baseline it cannot vouch for.
+   */
   const loadBuilds = useCallback(async () => {
     if (projectId === null) {
       return;
     }
 
     const result = await listProjectBuildJobs(projectId);
-    setJobs(result.ok ? result.jobs : []);
+
+    if (!result.ok) {
+      setBuildsError(result.message);
+      return;
+    }
+
+    setJobs(result.jobs);
+    setBuildsError(null);
   }, [projectId]);
 
-  useEffect(() => {
-    // Sequenced inside an async IIFE so no state write is synchronously
-    // reachable from the effect body: the builds settle first (they gate the
-    // Pair button), then the device list.
-    void (async () => {
-      await loadBuilds();
-      await loadDevices();
-    })();
+  /**
+   * Feature 26.3 — builds AND devices, in that order.
+   *
+   * WHY BOTH, EVERY TIME. `latestBuildJobId` is derived from `jobs`, and it is
+   * what the Offer button sends to the server. Reloading devices alone leaves
+   * that baseline frozen at whatever it was when this panel mounted, which is
+   * how an owner ends up offering a build that a newer publish has already
+   * superseded — the server accepts it, because it is still a real succeeded
+   * build of this project, and the till is quietly offered last week's menu.
+   *
+   * Builds first: they decide what every row's state MEANS, so settling them
+   * before the devices arrive avoids a frame where rows are judged against a
+   * baseline that is about to change.
+   */
+  const refreshAll = useCallback(async () => {
+    await loadBuilds();
+    await loadDevices();
   }, [loadBuilds, loadDevices]);
 
+  useEffect(() => {
+    // Still wrapped in an async IIFE, deliberately. react-hooks/set-state-in-effect
+    // traces loadBuilds' setJobs back to this line otherwise; the IIFE is what
+    // makes the write unreachable synchronously from the effect body, and it is
+    // the same shape this effect has always had.
+    void (async () => {
+      await refreshAll();
+    })();
+  }, [refreshAll]);
+
   const readiness = resolvePairingReadiness({ projectId, jobs });
+
+  // Feature 26.3 — the SAME build a new pairing would pin, resolved by the same
+  // helper. Reusing it is the point: a till paired today and a till offered an
+  // update today must land on one configuration, and two selectors would be two
+  // chances to disagree about which.
+  //
+  // Target is deliberately not consulted, exactly as pairing does not consult
+  // it: config_snapshot is generated from the project's configuration alone, so
+  // the android and desktop builds of one publish carry identical snapshots and
+  // nothing on the device reads `target`.
+  const latestBuildJobId = selectLatestSucceededBuild(jobs)?.id ?? null;
+
+  async function handleOfferUpdate(device: PairedDeviceSummary) {
+    // Three reasons to refuse before a request exists: one is already in
+    // flight, this row is not actually offerable, or there is no build. The
+    // second is re-derived here rather than trusted from the row that rendered
+    // the button — the list may have gone stale since it was drawn, and the
+    // server would refuse anyway.
+    if (
+      offeringRef.current ||
+      // The baseline could not be checked this pass. Offering now could send a
+      // build a newer publish has already superseded, which is the exact
+      // failure this feature's second pass existed to close.
+      buildsError !== null ||
+      latestBuildJobId === null ||
+      !canOfferDeviceUpdate(device, latestBuildJobId)
+    ) {
+      return;
+    }
+
+    offeringRef.current = true;
+    setOfferingDeviceId(device.id);
+    setOfferError(null);
+
+    // try/finally, so a throw cannot strand the latch. Without it a rejected
+    // action leaves offeringRef true and the row stuck on "Offering…" until
+    // this panel is remounted, with nothing on screen saying why.
+    let result: Awaited<ReturnType<typeof offerDeviceUpdate>>;
+
+    try {
+      result = await offerDeviceUpdate({
+        deviceId: device.id,
+        buildJobId: latestBuildJobId,
+      });
+    } catch {
+      setOfferError(OFFER_UNAVAILABLE_MESSAGE);
+      return;
+    } finally {
+      offeringRef.current = false;
+      setOfferingDeviceId(null);
+    }
+
+    if (!result.ok) {
+      setOfferError(result.message);
+      return;
+    }
+
+    // Reloaded rather than patched locally: the row's state comes from
+    // offered_build_job_id on the server, and inventing it here would let the
+    // list claim an offer the database does not have. alreadyOffered is a
+    // success and needs no separate branch — the reload renders the truth
+    // either way. Builds come too: the row's verdict is offered-vs-latest, so
+    // judging it against a stale latest right after the owner acted is exactly
+    // when a wrong answer is most believed.
+    await refreshAll();
+  }
 
   async function handleCreateCode() {
     if (readiness.state !== "ready" || projectId === null || isCreatingCode) {
@@ -304,13 +441,18 @@ export default function DeviceManagementPanel({
             errorMessage={listError}
             onRefresh={() => {
               setIsLoading(true);
-              void loadDevices();
+              void refreshAll();
             }}
             onRevoke={(device) => {
               setRevokeError(null);
               setDeviceToRevoke(device);
             }}
             busyDeviceId={isRevoking ? deviceToRevoke?.id ?? null : null}
+            latestBuildJobId={latestBuildJobId}
+            onOfferUpdate={(device) => void handleOfferUpdate(device)}
+            offeringDeviceId={offeringDeviceId}
+            offerErrorMessage={offerError}
+            buildsErrorMessage={buildsError}
           />
         )}
       </div>

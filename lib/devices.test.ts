@@ -36,6 +36,10 @@ describe("mapPairedDeviceRow", () => {
       lastSeenAt: null,
       revokedAt: null,
       unpairedAt: null,
+      // Feature 26.3 — a row selected without the offer columns reads as no
+      // offer, which is what it was before those columns existed.
+      offeredBuildJobId: null,
+      offeredAt: null,
     });
   });
 
@@ -69,12 +73,19 @@ describe("mapPairedDeviceRow", () => {
   it("never exposes auth_user_id, owner_id or revoked_by", () => {
     const device = mapPairedDeviceRow(makeRow()) as PairedDeviceSummary;
 
+    // An allowlist, deliberately exhaustive: a new field here is a decision to
+    // send something else to a browser, and it should have to be made on
+    // purpose. Feature 26.3 added the two offer fields, which name builds this
+    // owner already owns and can already list through listProjectBuildJobs —
+    // they carry no identity and widen nothing.
     expect(Object.keys(device).sort()).toEqual([
       "buildJobId",
       "createdAt",
       "deviceName",
       "id",
       "lastSeenAt",
+      "offeredAt",
+      "offeredBuildJobId",
       "platform",
       "projectId",
       "revokedAt",
