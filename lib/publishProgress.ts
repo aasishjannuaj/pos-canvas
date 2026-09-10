@@ -18,7 +18,11 @@
 //
 // PURE. No React, no timers, no network. The panel renders what this decides.
 
-import type { BuildJobSummary, BuildRequestStatus } from "@/lib/buildJobs";
+import type {
+  BuildFailureCode,
+  BuildJobSummary,
+  BuildRequestStatus,
+} from "@/lib/buildJobs";
 
 /**
  * How often a running publish is re-read.
@@ -186,4 +190,43 @@ export function describePublishProgress(progress: PublishProgress): string | nul
     case "request_failed":
       return progress.message ?? "The publish request could not be sent.";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 27 — what a publish that ran out of recovery attempts should say
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner-facing sentence for a failed build.
+ *
+ * WHY THE DATABASE MESSAGE IS NOT ENOUGH ON ITS OWN. claim_next_build_job
+ * writes "Build processing stopped before completion." when it force-fails a
+ * job that exhausted its three attempts. That is a precise audit record and a
+ * poor instruction: it tells an owner what happened and not one thing about
+ * what to do, and the thing to do is genuinely simple — publish again, which
+ * the button beside it already allows, because a failed job is not `active`
+ * and so no longer blocks its project+target.
+ *
+ * DONE HERE RATHER THAN IN SQL on purpose. Changing the stored string would
+ * mean a migration, and Feature 26.1's migration is still waiting on its own
+ * production rollout; a second undeployed migration to reword one sentence is
+ * not a trade worth making. The stored message stays the audit record and this
+ * adds the instruction, so neither has to be a compromise between the two.
+ *
+ * Every other failure keeps the server's own message verbatim: those describe
+ * something specific about the build — an invalid configuration, a signing
+ * failure — and replacing them with generic advice would be a downgrade.
+ */
+export const PUBLISH_TIMED_OUT_MESSAGE =
+  "Publishing stopped before it finished, and POS Canvas has already retried automatically. Publish again to try once more.";
+
+export function describePublishFailure(input: {
+  failureCode: BuildFailureCode | null;
+  failureMessage: string | null;
+}): string | null {
+  if (input.failureCode === "worker_timeout") {
+    return PUBLISH_TIMED_OUT_MESSAGE;
+  }
+
+  return input.failureMessage;
 }

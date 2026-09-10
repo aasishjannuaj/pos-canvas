@@ -32,9 +32,9 @@ const wf = raw
 /**
  * The shell body of the WORKER step, comments stripped.
  *
- * lastIndexOf, not indexOf: the backend preflight's own `run: |` block now
- * comes first, and anchoring on the first one would silently point every batch
- * assertion below at the wrong script.
+ * lastIndexOf, not indexOf: Feature 27 added a preflight step whose own
+ * `run: |` block now comes first, and anchoring on the first one would have
+ * silently pointed every batch assertion below at the wrong script.
  */
 const script = (wf.slice(wf.lastIndexOf("run: |")) || "")
   .split("\n")
@@ -80,38 +80,56 @@ describe("triggers", () => {
     expect(wf).not.toMatch(/^\s{2}push:$/m);
   });
 
-  it("declares no trigger beyond workflow_dispatch", () => {
+  it("declares no trigger beyond dispatch and the Feature 27 schedule", () => {
     // Top-level trigger keys are the two-space entries between `on:` and the
     // `permissions:` block. An allowlist, so an unconsidered trigger is caught.
     const triggerBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));
     const keys = [...triggerBlock.matchAll(/^ {2}([a-z_]+):/gm)].map((m) => m[1]);
-    expect(keys.sort()).toEqual(["workflow_dispatch"]);
+    expect(keys.sort()).toEqual(["schedule", "workflow_dispatch"]);
   });
 });
 
-describe("Feature 17.2 — the schedule is gone", () => {
-  // The point of 17.2 is that GitHub creates a run ONLY when POS Canvas
-  // dispatches one, or when an operator clicks Run workflow. A schedule
-  // reintroduced by a later edit would restore the 15-minute polling this
-  // feature exists to remove, and would do it silently: everything would still
-  // work, just wastefully. These four assertions are the tripwire.
+describe("Feature 27 — the schedule is a bounded safety net", () => {
+  // 17.2 removed a 15-minute schedule and its reasoning still holds: demand
+  // dispatch is the delivery mechanism and normal publishes must never wait for
+  // a clock. What 17.2 could not do was recover a job when nobody publishes
+  // again — every reclaim and every force-fail lives inside
+  // claim_next_build_job, so with dispatch as the only trigger they were all
+  // gated on an owner clicking Build. These assertions keep the safety net
+  // present AND keep it from growing back into a polling loop.
 
-  it("declares no schedule trigger", () => {
-    expect(wf).not.toMatch(/^\s{2}schedule:$/m);
-    expect(wf).not.toContain("schedule:");
+  it("declares exactly one schedule trigger", () => {
+    expect(wf).toMatch(/^\s{2}schedule:$/m);
+    expect([...wf.matchAll(/^\s+- cron:/gm)]).toHaveLength(1);
   });
 
-  it("contains no cron expression at all", () => {
-    expect(wf).not.toContain("cron");
-    expect([...wf.matchAll(/cron:/g)]).toHaveLength(0);
+  it("runs hourly at most — never a polling cadence", () => {
+    const cron = wf.match(/- cron:\s*"([^"]+)"/)?.[1];
+
+    expect(cron).toBeDefined();
+
+    const [minute, hour] = (cron ?? "").split(" ");
+
+    // A step or a list in the minute field is sub-hourly by definition, and
+    // that is the 15-minute polling 17.2 removed.
+    expect(minute).not.toContain("*");
+    expect(minute).not.toContain("/");
+    expect(minute).not.toContain(",");
+    expect(minute).not.toContain("-");
+    // Every hour, so recovery is guaranteed within one.
+    expect(hour).toBe("*");
   });
 
-  it("has no trigger that fires without an explicit request", () => {
-    // Every event that can start a run on its own. workflow_dispatch and
-    // repository_dispatch are the two request-driven ones; only the first is
-    // allowed here (repository_dispatch would need a differently scoped token).
+  it("keeps dispatch as the primary path, not a fallback the cron replaced", () => {
+    expect(wf).toMatch(/^\s{2}workflow_dispatch:$/m);
+    // The dispatcher still exists and is still what a queued job triggers.
+    expect(
+      readFileSync(join(repoRoot, "lib/buildJobs.actions.ts"), "utf-8")
+    ).toContain("dispatchBuildWorkerWorkflow()");
+  });
+
+  it("adds no trigger beyond dispatch and the schedule", () => {
     for (const event of [
-      "schedule",
       "push",
       "pull_request",
       "pull_request_target",
@@ -124,12 +142,6 @@ describe("Feature 17.2 — the schedule is gone", () => {
       expect(wf).not.toMatch(new RegExp(`^\\s{2}${event}:`, "m"));
     }
   });
-
-  it("keeps manual dispatch as the emergency fallback", () => {
-    // If POS Canvas cannot reach the GitHub API, this is the only remaining way
-    // to drain the queue — so removing it would leave no recovery path at all.
-    expect(wf).toMatch(/^\s{2}workflow_dispatch:$/m);
-  });
 });
 
 describe("which backend a run may touch", () => {
@@ -141,7 +153,7 @@ describe("which backend a run may touch", () => {
   });
 
   it("defaults that choice to staging, so production is always deliberate", () => {
-    const inputs = wf.slice(wf.indexOf("inputs:"), wf.indexOf("permissions:"));
+    const inputs = wf.slice(wf.indexOf("inputs:"), wf.indexOf("schedule:"));
 
     expect(inputs).toContain("default: staging");
     expect(inputs).toContain("required: true");
@@ -154,14 +166,12 @@ describe("which backend a run may touch", () => {
     expect(jobHeader).toContain("environment: ${{");
   });
 
-  it("resolves a manual run to whatever was chosen", () => {
-    expect(jobHeader).toContain("|| inputs.environment");
+  it("resolves a SCHEDULED run to production", () => {
+    expect(jobHeader).toContain("github.event_name == 'schedule' && 'production'");
   });
 
-  it("already decides that a scheduled run would mean production", () => {
-    // Inert until a schedule exists. Written now so that behaviour is settled
-    // in review rather than in the commit that adds the cron.
-    expect(jobHeader).toContain("github.event_name == 'schedule' && 'production'");
+  it("resolves a MANUAL run to whatever was chosen", () => {
+    expect(jobHeader).toContain("|| inputs.environment");
   });
 
   it("uses one secret name per variable — no staging/production ternary", () => {
@@ -174,7 +184,7 @@ describe("which backend a run may touch", () => {
   });
 });
 
-describe("the rollout gate is in place before there is anything to gate", () => {
+describe("Feature 27 — the rollout gate", () => {
   it("gates scheduled runs on an explicit repository variable", () => {
     expect(jobHeader).toContain(
       "if: github.event_name != 'schedule' || vars.BUILD_WORKER_SCHEDULE_ENABLED == 'true'"
@@ -182,17 +192,20 @@ describe("the rollout gate is in place before there is anything to gate", () => 
   });
 
   it("treats an unset variable as disabled", () => {
-    // `== 'true'` against an unset variable compares with the empty string, so
-    // absent means off. A truthiness check would have meant absent reads as on
-    // for anything non-empty.
+    // `== 'true'` against an unset variable is a comparison with the empty
+    // string, so absent means off. A truthiness check would have meant absent
+    // reads as on for anything non-empty.
     expect(jobHeader).toContain("== 'true'");
+    expect(jobHeader).not.toMatch(/vars\.BUILD_WORKER_SCHEDULE_ENABLED\s*(&&|\)|$)/m);
   });
 
   it("leaves manual dispatch ungated", () => {
+    // The gate holds back autonomous recovery; it must never remove the
+    // operator's fallback.
     expect(jobHeader).toContain("github.event_name != 'schedule' ||");
   });
 
-  it("gates at job level, so a disabled run would cost no runner minutes", () => {
+  it("gates at job level, so a disabled run costs no runner minutes", () => {
     const ifAt = jobHeader.indexOf("if: github.event_name");
     const stepsAt = wf.indexOf("    steps:");
 
@@ -229,6 +242,7 @@ describe("the fail-closed backend preflight", () => {
   it("takes the expected ref from repository variables, not this public file", () => {
     expect(wf).toContain("vars.PRODUCTION_PROJECT_REF");
     expect(wf).toContain("vars.STAGING_PROJECT_REF");
+    // The refs themselves must not be hardcoded here.
     expect(wf).not.toContain("xhjadcffrgjpkobniiwz");
     expect(wf).not.toContain("pkwlpstqdqscegfkjnel");
   });
@@ -296,9 +310,24 @@ describe("batch semantics", () => {
     expect(script).toContain("set -euo pipefail");
   });
 
-  it("targets Android only", () => {
-    expect(script).toContain("--target android");
-    expect(script).not.toContain("--target desktop");
+  it("processes BOTH targets", () => {
+    // claim_next_build_job is scoped to p_target: an android worker cannot
+    // claim a desktop row, cannot reclaim a stale desktop build, and cannot
+    // force-fail an exhausted one. Running android only meant desktop jobs sat
+    // queued until a human ran the worker by hand.
+    expect(script).toContain("for target in android desktop");
+    expect(script).toContain('npm run worker:run -- --target "${target}"');
+  });
+
+  it("interleaves targets so a backlog on one cannot starve the other", () => {
+    // The attempt loop must be OUTSIDE the target loop: five android
+    // invocations followed by five desktop ones would let a busy android queue
+    // consume the whole run.
+    const attemptAt = script.indexOf("for attempt in");
+    const targetAt = script.indexOf("for target in");
+
+    expect(attemptAt).toBeGreaterThan(-1);
+    expect(targetAt).toBeGreaterThan(attemptAt);
   });
 
   it("does not parse worker stdout to decide anything", () => {
@@ -322,8 +351,8 @@ describe("secrets handling", () => {
     // lib/supabase/adminConfig.ts reads these two. Anything more would put an
     // unnecessary credential into the environment.
     // The WORKER step's env block: the last `env:` before the last `run: |`.
-    // The preflight added an earlier env block, and anchoring on the first one
-    // pointed this assertion at the wrong step.
+    // Feature 27's preflight added an earlier env block, and anchoring on the
+    // first one pointed this assertion at the wrong step.
     const workerRunAt = wf.lastIndexOf("run: |");
     const envBlock = wf.slice(wf.lastIndexOf("env:", workerRunAt), workerRunAt);
     const keys = [...envBlock.matchAll(/^\s+([A-Z_]+):/gm)].map((m) => m[1]);

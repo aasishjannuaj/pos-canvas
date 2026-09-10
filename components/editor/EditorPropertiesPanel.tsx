@@ -30,6 +30,7 @@ import { getAppInformation } from "@/lib/appInformation";
 import PublishProgressSteps from "@/components/editor/PublishProgressSteps";
 import {
   PUBLISH_SUCCESS_MESSAGE,
+  describePublishFailure,
   describePublishProgress,
 } from "@/lib/publishProgress";
 import type { PublishProgress } from "@/lib/publishProgress";
@@ -1518,10 +1519,14 @@ export default function EditorPropertiesPanel({
                         </div>
                       )}
 
+                      {/* Feature 27 — a build that exhausted its automatic
+                          retries says so and says what to do about it. Every
+                          other failure keeps the server's own message, which
+                          is more specific than any advice could be. */}
                       {latestBuildJob.status === "failed" &&
-                        latestBuildJob.failureMessage && (
+                        describePublishFailure(latestBuildJob) !== null && (
                           <p className="mt-1 text-red-600">
-                            {latestBuildJob.failureMessage}
+                            {describePublishFailure(latestBuildJob)}
                           </p>
                         )}
 

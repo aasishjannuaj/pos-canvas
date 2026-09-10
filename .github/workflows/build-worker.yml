@@ -22,24 +22,37 @@
 # noise. That property is what makes an occasional duplicate dispatch — a
 # double-clicked Build button — harmless rather than something to prevent.
 #
-# STALE-JOB RECOVERY NOW RIDES ON DEMAND, NOT ON A CLOCK. Reclaiming a build
-# whose worker died, and force-failing one that has exhausted its 3 attempts,
-# both still happen INSIDE claim_next_build_job, and nothing else performs that
-# recovery. With no schedule, that recovery only runs when this workflow is
-# dispatched. POS Canvas therefore dispatches for a job in `building` as well
-# as one in `queued` (lib/buildJobs.ts::needsBuildProcessing) — a job stuck
-# `building` after a dead worker also blocks its project's active-job index, so
-# every later Build click resolves to it, and each of those clicks is what
-# brings a worker back to reclaim it. Manual `Run workflow` below remains the
-# operator's fallback if POS Canvas itself cannot reach GitHub.
+# Feature 27 — A BOUNDED SAFETY-NET SCHEDULE IS BACK, and 17.2's reasoning is
+# worth restating rather than deleting, because it was not wrong.
+#
+# 17.2 removed a 15-minute schedule because owners waited up to 15 minutes for
+# a build that takes seconds, and ~96 runs a day fired against an empty queue.
+# Demand dispatch fixed the latency completely and is still the primary path:
+# an ordinary publish reaches a worker in seconds and never waits for a clock.
+#
+# WHAT DEMAND DISPATCH CANNOT DO is recover a job when nobody publishes again.
+# Reclaiming a build whose worker died, and force-failing one that exhausted its
+# 3 attempts, both happen INSIDE claim_next_build_job — so with dispatch as the
+# only trigger, every recovery path was gated on an owner clicking Build. A
+# publish abandoned at 6pm whose dispatch failed, or whose runner died, stayed
+# stuck until a human noticed and ran the worker by hand. That is exactly what
+# staging kept hitting.
+#
+# So the schedule returns as a SAFETY NET, not as the delivery mechanism, and
+# hourly rather than every 15 minutes: recovery is guaranteed without anyone
+# watching, at roughly a quarter of the runner cost 17.2 objected to. Normal
+# publishes never wait for it.
+#
+# IT NEEDS NO NEW RECOVERY CODE. Reclaim, the 3-attempt cap, force-failing to
+# worker_timeout, exclusive claim tokens and fail-closed leases all already
+# exist in claim_next_build_job and are unchanged. This file only guarantees
+# that something calls it.
 
 name: Build worker
 
 on:
-  # The emergency fallback, and the ONLY trigger. Used when POS Canvas cannot
-  # reach the GitHub API, or to catch up a backlog by hand.
-  #
-  # Every ordinary run arrives through this same trigger via the REST API:
+  # The primary path AND the manual fallback. Every ordinary run arrives here
+  # via the REST API the moment a job is queued:
   # POST /repos/:owner/:repo/actions/workflows/build-worker.yml/dispatches.
   workflow_dispatch:
     inputs:
@@ -55,18 +68,31 @@ on:
         default: staging
         required: true
 
-# No `schedule`, no `push`, no `pull_request`, and never `pull_request_target`.
-# This repository is PUBLIC, so a fork's pull request must never be able to
-# start a run that holds a service-role credential, and the absence of those
-# triggers is what guarantees it.
+  # Feature 27 — the safety net. Hourly, at :17 rather than :00 to stay off the
+  # crowded top of the hour, where GitHub delays scheduled runs most.
+  #
+  # ONE entry, deliberately. A second cron line would be a second cadence to
+  # reason about, and this one exists only to guarantee that claim_next_build_job
+  # is called even when nobody publishes.
+  #
+  # It is INERT until BUILD_WORKER_SCHEDULE_ENABLED is set to 'true' — see the
+  # job-level `if` below. Merging this file therefore does not start recovering
+  # production; that is a separate, deliberate switch.
+  schedule:
+    - cron: "17 * * * *"
+
+# No `push`, no `pull_request`, and never `pull_request_target`. This repository
+# is PUBLIC, so a fork's pull request must never be able to start a run that
+# holds a service-role credential, and the absence of those triggers is what
+# guarantees it.
 #
-# CORRECTION. An earlier version of this comment claimed that "dispatched runs
-# execute only from the default branch, so a workflow edited on a side branch
-# cannot run with these secrets until it is merged." That is WRONG, and relying
-# on it would have been a real hole: workflow_dispatch accepts a `ref`, runs the
-# workflow file and the code from that ref, and repository secrets are available
-# to branch dispatches — the fork restriction applies to pull_request, not to
-# this.
+# CORRECTION (Feature 27). An earlier version of this comment claimed that
+# "dispatched runs execute only from the default branch, so a workflow edited on
+# a side branch cannot run with these secrets until it is merged." That is
+# WRONG, and relying on it would have been a real hole: workflow_dispatch
+# accepts a `ref`, runs the workflow file and the code from that ref, and repo
+# secrets are available to branch dispatches — the fork restriction applies to
+# pull_request, not to this.
 #
 # What actually confines production credentials to `main` is the `production`
 # GitHub Environment's deployment-branch rule. That is a platform-enforced
@@ -94,22 +120,23 @@ concurrency:
 
 jobs:
   process-queue:
-    name: Process queued Android builds
+    name: Process queued builds
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # THE ROLLOUT GATE, in place BEFORE there is anything to gate.
+    # THE ROLLOUT GATE. A scheduled run does nothing until someone deliberately
+    # sets BUILD_WORKER_SCHEDULE_ENABLED to 'true' in repository variables. An
+    # unset variable is an empty string, so absent reads as disabled — the safe
+    # direction, and the state this merges in.
     #
-    # There is no `schedule` trigger yet, so `github.event_name` is never
-    # 'schedule' and this condition is always true today — it changes nothing
-    # about how this workflow behaves. It is here first on purpose: when a
-    # schedule is added later, it arrives already gated, rather than existing
-    # ungated for however long it takes to add the guard.
+    # It is a JOB-LEVEL `if` rather than a step guard so a disabled run is
+    # SKIPPED outright: no runner is allocated, no minutes are spent, and the
+    # run still appears in the list as evidence the cron itself is firing. That
+    # visible-but-inert state is what makes it possible to prove the schedule
+    # works before it is allowed to touch production.
     #
-    # An unset BUILD_WORKER_SCHEDULE_ENABLED is an empty string, so absent reads
-    # as disabled — the safe direction, and the state this merges in. Manual
-    # dispatch is deliberately never gated: the gate exists to hold back
-    # autonomous recovery, not to take away the operator's fallback.
+    # Manual dispatch is deliberately NOT gated. The gate exists to hold back
+    # autonomous recovery, never to take away the operator's fallback.
     if: github.event_name != 'schedule' || vars.BUILD_WORKER_SCHEDULE_ENABLED == 'true'
 
     # WHICH BACKEND THIS RUN MAY TOUCH, and the only thing that decides it.
@@ -120,9 +147,9 @@ jobs:
     # expression juggling — and therefore no `||` that could silently fall
     # through to production if a staging secret were missing.
     #
-    # The 'schedule' branch of this expression is likewise inert until a
-    # schedule exists; it is written now so the eventual behaviour is decided
-    # here, in review, rather than in the commit that adds the cron.
+    # A scheduled run has no inputs, so it resolves to production. That is safe
+    # precisely because the production Environment is restricted to `main`: a
+    # branch cannot obtain those credentials even by asking for them.
     environment: ${{ github.event_name == 'schedule' && 'production' || inputs.environment }}
 
     steps:
@@ -144,9 +171,6 @@ jobs:
       # The expected refs live in repository VARIABLES rather than in this file
       # because the repository is public: they are not sensitive, but there is
       # no reason to publish them.
-      #
-      # Placed FIRST so a misconfigured run fails in seconds rather than after
-      # a checkout and a full npm install.
       - name: Confirm which backend this run will touch
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
@@ -171,10 +195,10 @@ jobs:
             exit 1
           fi
 
-      # Checks out the ref this run was triggered on — the dispatched branch for
-      # a manual run. Named accordingly: the earlier name claimed it was always
-      # the default branch, which was the same mistake as the trigger comment
-      # above.
+      # Checks out the ref this run was triggered on: the default branch for a
+      # scheduled run, or the dispatched branch for a manual one. Named
+      # accordingly — an earlier name claimed it was always the default branch,
+      # which was the same mistake as the trigger comment above.
       - name: Check out the triggering ref
         uses: actions/checkout@v4
         with:
@@ -191,7 +215,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Process up to 5 queued Android builds
+      - name: Process up to 5 queued builds per target
         env:
           # Injected as environment values, never interpolated into the command
           # text below — an interpolated secret can surface in a trace or an
@@ -215,7 +239,20 @@ jobs:
           #
           # A non-zero exit IS the contract, and `set -e` stops the batch and
           # fails the run on the first one.
+          # Feature 27 — BOTH TARGETS, because claim_next_build_job is scoped
+          # to p_target. An android worker cannot claim a desktop row, cannot
+          # reclaim a stale desktop build, and cannot force-fail an exhausted
+          # one. Running android only meant every desktop job sat queued until
+          # somebody ran the worker by hand — and the recovery machinery for
+          # desktop had, in effect, never run at all.
+          #
+          # Sequential, and the outer loop is over targets so a backlog on one
+          # cannot starve the other: each pass gives android one invocation and
+          # desktop one. Still bounded and finite — 5 passes, 2 invocations
+          # each, no polling loop.
           for attempt in 1 2 3 4 5; do
-            echo "worker invocation ${attempt} of 5"
-            npm run worker:run -- --target android
+            for target in android desktop; do
+              echo "worker invocation ${attempt} of 5 (${target})"
+              npm run worker:run -- --target "${target}"
+            done
           done
