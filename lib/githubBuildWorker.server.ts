@@ -5,6 +5,7 @@ import {
   GITHUB_BUILD_WORKER_USER_AGENT,
   buildWorkflowDispatchBody,
   interpretWorkflowDispatchStatus,
+  parseBuildWorkerEnvironment,
 } from "@/lib/githubBuildWorker";
 import type { WorkflowDispatchOutcome } from "@/lib/githubBuildWorker";
 
@@ -33,6 +34,23 @@ import type { WorkflowDispatchOutcome } from "@/lib/githubBuildWorker";
 const TOKEN_ENV_VAR = "GITHUB_BUILD_WORKER_TOKEN";
 
 /**
+ * Which backend this deployment's builds belong to. Set to exactly `staging` or
+ * `production` in the hosting environment.
+ *
+ * WHY A DEDICATED VARIABLE rather than inferring it. Nothing already in this
+ * app can tell the two apart honestly: there is no VERCEL_ENV or APP_ENV in
+ * use, NODE_ENV is `production` on a staging deployment too, and deriving it
+ * from NEXT_PUBLIC_SUPABASE_URL would mean hardcoding the production project
+ * ref into the application — more configuration than simply declaring the
+ * answer, and a value that goes stale silently if a project is ever migrated.
+ *
+ * It is also deliberately NOT NEXT_PUBLIC_. The browser has no business
+ * choosing which database a build worker processes, and a NEXT_PUBLIC_ variable
+ * is inlined into client JavaScript by definition.
+ */
+const ENVIRONMENT_ENV_VAR = "BUILD_WORKER_ENVIRONMENT";
+
+/**
  * A build request must not hang on GitHub. The owner's Build click already
  * awaits this call, and the queued row is already committed by the time we get
  * here — so a slow GitHub should degrade to the retry path quickly rather than
@@ -53,6 +71,26 @@ const DISPATCH_TIMEOUT_MS = 10_000;
  * must never turn a successfully queued build into a failed request.
  */
 export async function dispatchBuildWorkerWorkflow(): Promise<WorkflowDispatchOutcome> {
+  // RESOLVED FIRST, AND FAIL CLOSED. A dispatch that cannot say which backend
+  // it means must not happen at all: the workflow applies its own
+  // `default: staging` to any omitted input, so an unstated environment is not
+  // an unknown — it is silently staging, which for a production deployment
+  // means its builds stop being processed while Actions stays green.
+  //
+  // Refusing here is recoverable and visible instead: the build row is already
+  // committed and untouched, the caller is told `unavailable`, and the Builder
+  // offers "Retry processing" for that same row — exactly what a missing token
+  // already does.
+  const environment = parseBuildWorkerEnvironment(process.env[ENVIRONMENT_ENV_VAR]);
+
+  if (environment === null) {
+    console.error(
+      `dispatchBuildWorkerWorkflow: ${ENVIRONMENT_ENV_VAR} is not set to ` +
+        "'staging' or 'production'; no build worker run was requested."
+    );
+    return { ok: false, reason: "not_configured" };
+  }
+
   const token = process.env[TOKEN_ENV_VAR];
 
   if (typeof token !== "string" || token.trim() === "") {
@@ -77,7 +115,7 @@ export async function dispatchBuildWorkerWorkflow(): Promise<WorkflowDispatchOut
         "User-Agent": GITHUB_BUILD_WORKER_USER_AGENT,
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
       },
-      body: buildWorkflowDispatchBody(),
+      body: buildWorkflowDispatchBody(environment),
       // Next.js caches fetch responses in some server contexts. A dispatch is a
       // side effect; a cached one would silently stop reaching GitHub.
       cache: "no-store",

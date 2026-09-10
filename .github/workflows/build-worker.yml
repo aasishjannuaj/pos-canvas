@@ -36,18 +36,42 @@
 name: Build worker
 
 on:
-  # The emergency fallback, and the ONLY trigger left. Used when POS Canvas
-  # cannot reach the GitHub API, or to catch up a backlog by hand.
+  # The emergency fallback, and the ONLY trigger. Used when POS Canvas cannot
+  # reach the GitHub API, or to catch up a backlog by hand.
   #
   # Every ordinary run arrives through this same trigger via the REST API:
   # POST /repos/:owner/:repo/actions/workflows/build-worker.yml/dispatches.
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Which backend to process
+        type: choice
+        options:
+          - staging
+          - production
+        # STAGING BY DEFAULT, so the dangerous option is always the one someone
+        # had to choose on purpose. A dispatch that forgets to say which backend
+        # it means gets the harmless answer.
+        default: staging
+        required: true
 
 # No `schedule`, no `push`, no `pull_request`, and never `pull_request_target`.
-# The production service-role credential must never be reachable from code in a
-# pull request, least of all a fork's. Dispatched runs execute only from the
-# default branch, so a workflow edited on a side branch cannot run with these
-# secrets until it is merged.
+# This repository is PUBLIC, so a fork's pull request must never be able to
+# start a run that holds a service-role credential, and the absence of those
+# triggers is what guarantees it.
+#
+# CORRECTION. An earlier version of this comment claimed that "dispatched runs
+# execute only from the default branch, so a workflow edited on a side branch
+# cannot run with these secrets until it is merged." That is WRONG, and relying
+# on it would have been a real hole: workflow_dispatch accepts a `ref`, runs the
+# workflow file and the code from that ref, and repository secrets are available
+# to branch dispatches — the fork restriction applies to pull_request, not to
+# this.
+#
+# What actually confines production credentials to `main` is the `production`
+# GitHub Environment's deployment-branch rule. That is a platform-enforced
+# guarantee rather than a property of this file, which is why the job below
+# selects an environment instead of reading repository secrets directly.
 
 # Least privilege. The worker reads and writes Supabase, never this repository.
 permissions:
@@ -74,8 +98,84 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # THE ROLLOUT GATE, in place BEFORE there is anything to gate.
+    #
+    # There is no `schedule` trigger yet, so `github.event_name` is never
+    # 'schedule' and this condition is always true today — it changes nothing
+    # about how this workflow behaves. It is here first on purpose: when a
+    # schedule is added later, it arrives already gated, rather than existing
+    # ungated for however long it takes to add the guard.
+    #
+    # An unset BUILD_WORKER_SCHEDULE_ENABLED is an empty string, so absent reads
+    # as disabled — the safe direction, and the state this merges in. Manual
+    # dispatch is deliberately never gated: the gate exists to hold back
+    # autonomous recovery, not to take away the operator's fallback.
+    if: github.event_name != 'schedule' || vars.BUILD_WORKER_SCHEDULE_ENABLED == 'true'
+
+    # WHICH BACKEND THIS RUN MAY TOUCH, and the only thing that decides it.
+    #
+    # Selecting an Environment is what makes the choice enforceable rather than
+    # conventional: `staging` and `production` hold their own copies of the two
+    # secrets, so the same variable names resolve to different backends with no
+    # expression juggling — and therefore no `||` that could silently fall
+    # through to production if a staging secret were missing.
+    #
+    # The 'schedule' branch of this expression is likewise inert until a
+    # schedule exists; it is written now so the eventual behaviour is decided
+    # here, in review, rather than in the commit that adds the cron.
+    environment: ${{ github.event_name == 'schedule' && 'production' || inputs.environment }}
+
     steps:
-      - name: Check out the default branch
+      # FAIL CLOSED BEFORE ANY WORKER CALL.
+      #
+      # The Environment already decides which secrets this run gets, so this is
+      # not the primary control — it is the one that catches the failure the
+      # Environment cannot: a staging Environment whose URL was pasted wrong, or
+      # a production value typed into it. Without this, such a run would process
+      # the wrong backend while its log said otherwise.
+      #
+      # WHAT IT PRINTS is the Supabase project ref and nothing else. That ref is
+      # not a secret — it is the subdomain of NEXT_PUBLIC_SUPABASE_URL, which is
+      # shipped to every browser by definition. The service-role key is never
+      # echoed, never derived from, and never passed to this step at all; only
+      # the URL is. GitHub would mask it regardless, and this does not rely on
+      # that.
+      #
+      # The expected refs live in repository VARIABLES rather than in this file
+      # because the repository is public: they are not sensitive, but there is
+      # no reason to publish them.
+      #
+      # Placed FIRST so a misconfigured run fails in seconds rather than after
+      # a checkout and a full npm install.
+      - name: Confirm which backend this run will touch
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          EXPECTED_REF: ${{ github.event_name == 'schedule' && vars.PRODUCTION_PROJECT_REF || (inputs.environment == 'production' && vars.PRODUCTION_PROJECT_REF || vars.STAGING_PROJECT_REF) }}
+        run: |
+          set -euo pipefail
+
+          ref="${NEXT_PUBLIC_SUPABASE_URL#https://}"
+          ref="${ref%%.*}"
+
+          echo "Resolved Supabase project ref: ${ref}"
+          echo "Expected for this run:        ${EXPECTED_REF}"
+
+          # An unset expectation is a misconfiguration, not a licence to guess.
+          if [ -z "${EXPECTED_REF}" ]; then
+            echo "::error::No expected project ref is configured for this run."
+            exit 1
+          fi
+
+          if [ "${ref}" != "${EXPECTED_REF}" ]; then
+            echo "::error::This run resolved to project ${ref}, which is not the expected backend. Refusing to process any build."
+            exit 1
+          fi
+
+      # Checks out the ref this run was triggered on — the dispatched branch for
+      # a manual run. Named accordingly: the earlier name claimed it was always
+      # the default branch, which was the same mistake as the trigger comment
+      # above.
+      - name: Check out the triggering ref
         uses: actions/checkout@v4
         with:
           persist-credentials: false

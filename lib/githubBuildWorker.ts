@@ -67,13 +67,63 @@ export type WorkflowDispatchOutcome =
   | { ok: false; reason: WorkflowDispatchFailureReason };
 
 /**
- * The entire request body. `ref` is the only field sent: this workflow declares
- * no `inputs`, and GitHub rejects a dispatch carrying inputs the workflow does
- * not declare. Nothing about the build job — no id, no project, no owner — is
- * sent to GitHub; the worker discovers its work by claiming from Postgres.
+ * Which backend a dispatched run may process.
+ *
+ * NOT DERIVED FROM ANYTHING. Not from the Supabase URL, not from NODE_ENV, not
+ * from a request. A deployment states which one it is, and if it does not say,
+ * nothing is dispatched — see readBuildWorkerEnvironment in the .server module.
  */
-export function buildWorkflowDispatchBody(): string {
-  return JSON.stringify({ ref: GITHUB_BUILD_WORKER_REF });
+export type BuildWorkerEnvironment = "staging" | "production";
+
+export const BUILD_WORKER_ENVIRONMENTS: readonly BuildWorkerEnvironment[] = [
+  "staging",
+  "production",
+];
+
+/**
+ * Reads the declared environment, or null when it is absent or unrecognized.
+ *
+ * FAIL CLOSED, AND DELIBERATELY NOT "DEFAULT TO SOMETHING". Both possible
+ * defaults are wrong: defaulting to production would let a misconfigured
+ * staging deployment process real customer builds, and defaulting to staging is
+ * exactly the bug this function exists to prevent — a production deployment
+ * silently sending its builds to the staging database, where they would never
+ * be processed. Null means "do not dispatch", which is recoverable and visible.
+ */
+export function parseBuildWorkerEnvironment(
+  value: unknown
+): BuildWorkerEnvironment | null {
+  return typeof value === "string" &&
+    (BUILD_WORKER_ENVIRONMENTS as readonly string[]).includes(value)
+    ? (value as BuildWorkerEnvironment)
+    : null;
+}
+
+/**
+ * The entire request body.
+ *
+ * THE `environment` INPUT IS REQUIRED, and its absence was a real bug. The
+ * workflow declares `environment` with `default: staging`, and GitHub applies a
+ * workflow file's default whenever a dispatch omits that input — so a body of
+ * `{ ref }` alone, which is what this used to send, would have resolved every
+ * production Publish to the STAGING environment. The run would then have picked
+ * up staging credentials, found no production build to claim, and exited
+ * successfully. Production builds would simply have stopped being processed,
+ * with a green run in Actions saying nothing was wrong.
+ *
+ * Passing it explicitly is what makes the caller's intent, rather than a file
+ * default, decide which database a run touches.
+ *
+ * Nothing about the build job — no id, no project, no owner — is sent to
+ * GitHub; the worker still discovers its work by claiming from Postgres.
+ */
+export function buildWorkflowDispatchBody(
+  environment: BuildWorkerEnvironment
+): string {
+  return JSON.stringify({
+    ref: GITHUB_BUILD_WORKER_REF,
+    inputs: { environment },
+  });
 }
 
 /**

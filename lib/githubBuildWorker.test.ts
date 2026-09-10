@@ -14,6 +14,7 @@ import {
   GITHUB_BUILD_WORKER_REPO,
   GITHUB_BUILD_WORKER_WORKFLOW_FILE,
   buildWorkflowDispatchBody,
+  parseBuildWorkerEnvironment,
   interpretWorkflowDispatchStatus,
 } from "@/lib/githubBuildWorker";
 import { needsBuildProcessing } from "@/lib/buildJobs";
@@ -54,21 +55,60 @@ describe("the dispatch endpoint", () => {
 describe("the dispatch body", () => {
   it("sends the default branch as the ref", () => {
     expect(GITHUB_BUILD_WORKER_REF).toBe("main");
-    expect(JSON.parse(buildWorkflowDispatchBody())).toEqual({ ref: "main" });
+    expect(JSON.parse(buildWorkflowDispatchBody("production"))).toEqual({
+      ref: "main",
+      inputs: { environment: "production" },
+    });
   });
 
-  it("sends nothing but the ref", () => {
-    // The workflow declares no `inputs`, and GitHub rejects a dispatch that
-    // carries inputs the workflow does not declare.
-    expect(Object.keys(JSON.parse(buildWorkflowDispatchBody()))).toEqual(["ref"]);
+  it("ALWAYS names the environment explicitly", () => {
+    // The bug this replaced: the body was `{ ref }` alone, and GitHub applies a
+    // workflow file's `default:` to any omitted input. With the workflow
+    // defaulting to staging, every production Publish would have dispatched a
+    // run that read the STAGING database, found nothing to claim, and exited
+    // green — production builds silently never processed.
+    for (const environment of ["staging", "production"] as const) {
+      const body = JSON.parse(buildWorkflowDispatchBody(environment));
+
+      expect(body.inputs.environment).toBe(environment);
+      expect(Object.keys(body).sort()).toEqual(["inputs", "ref"]);
+      expect(Object.keys(body.inputs)).toEqual(["environment"]);
+    }
   });
 
   it("tells GitHub nothing about the customer whose build this is", () => {
     // A dispatch is a content-free "there is work" signal; the worker finds its
     // job by claiming from Postgres. No id of any kind may travel to GitHub.
-    const body = buildWorkflowDispatchBody();
+    const body = buildWorkflowDispatchBody("production");
     for (const leak of ["project", "owner", "job", "config", "user", "email"]) {
       expect(body.toLowerCase()).not.toContain(leak);
+    }
+  });
+});
+
+describe("the declared environment", () => {
+  it("accepts exactly the two known backends", () => {
+    expect(parseBuildWorkerEnvironment("staging")).toBe("staging");
+    expect(parseBuildWorkerEnvironment("production")).toBe("production");
+  });
+
+  it("REFUSES anything else, rather than choosing a default", () => {
+    // Both possible defaults are wrong. Production would let a misconfigured
+    // staging deployment process real customer builds; staging is the bug this
+    // exists to prevent. Null means "do not dispatch".
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "  ",
+      "prod",
+      "PRODUCTION",
+      "Staging",
+      "development",
+      0,
+      true,
+    ]) {
+      expect(parseBuildWorkerEnvironment(value)).toBeNull();
     }
   });
 });

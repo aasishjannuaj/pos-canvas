@@ -29,11 +29,23 @@ const wf = raw
   .filter((line) => !/^\s*#/.test(line))
   .join("\n");
 
-/** The shell body of the final step, comments stripped. */
-const script = (wf.slice(wf.indexOf("run: |")) || "")
+/**
+ * The shell body of the WORKER step, comments stripped.
+ *
+ * lastIndexOf, not indexOf: the backend preflight's own `run: |` block now
+ * comes first, and anchoring on the first one would silently point every batch
+ * assertion below at the wrong script.
+ */
+const script = (wf.slice(wf.lastIndexOf("run: |")) || "")
   .split("\n")
   .filter((line) => !/^\s*#/.test(line))
   .join("\n");
+
+/** The shell body of the preflight step. */
+const preflight = wf.slice(wf.indexOf("run: |"), wf.lastIndexOf("run: |"));
+
+/** The job header — everything before the first step. */
+const jobHeader = wf.slice(wf.indexOf("jobs:"), wf.indexOf("    steps:"));
 
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8")) as {
   scripts: Record<string, string>;
@@ -120,6 +132,120 @@ describe("Feature 17.2 — the schedule is gone", () => {
   });
 });
 
+describe("which backend a run may touch", () => {
+  it("offers an explicit environment choice on manual dispatch", () => {
+    expect(wf).toMatch(/^\s+environment:$/m);
+    expect(wf).toContain("type: choice");
+    expect(wf).toContain("- staging");
+    expect(wf).toContain("- production");
+  });
+
+  it("defaults that choice to staging, so production is always deliberate", () => {
+    const inputs = wf.slice(wf.indexOf("inputs:"), wf.indexOf("permissions:"));
+
+    expect(inputs).toContain("default: staging");
+    expect(inputs).toContain("required: true");
+  });
+
+  it("selects a GitHub Environment rather than reading repo secrets directly", () => {
+    // The Environment is what makes the staging/production split enforceable:
+    // production's deployment-branch rule confines it to main, which no
+    // expression in this file could achieve.
+    expect(jobHeader).toContain("environment: ${{");
+  });
+
+  it("resolves a manual run to whatever was chosen", () => {
+    expect(jobHeader).toContain("|| inputs.environment");
+  });
+
+  it("already decides that a scheduled run would mean production", () => {
+    // Inert until a schedule exists. Written now so that behaviour is settled
+    // in review rather than in the commit that adds the cron.
+    expect(jobHeader).toContain("github.event_name == 'schedule' && 'production'");
+  });
+
+  it("uses one secret name per variable — no staging/production ternary", () => {
+    // A `cond && secrets.STAGING_X || secrets.X` idiom falls through to the
+    // PRODUCTION value whenever the staging secret is missing or misnamed. The
+    // Environment split exists precisely so that expression is unnecessary.
+    expect(wf).not.toContain("STAGING_SUPABASE_URL");
+    expect(wf).not.toContain("STAGING_SUPABASE_SERVICE_ROLE_KEY");
+    expect(wf).not.toMatch(/secrets\.\w+\s*\|\|\s*secrets\./);
+  });
+});
+
+describe("the rollout gate is in place before there is anything to gate", () => {
+  it("gates scheduled runs on an explicit repository variable", () => {
+    expect(jobHeader).toContain(
+      "if: github.event_name != 'schedule' || vars.BUILD_WORKER_SCHEDULE_ENABLED == 'true'"
+    );
+  });
+
+  it("treats an unset variable as disabled", () => {
+    // `== 'true'` against an unset variable compares with the empty string, so
+    // absent means off. A truthiness check would have meant absent reads as on
+    // for anything non-empty.
+    expect(jobHeader).toContain("== 'true'");
+  });
+
+  it("leaves manual dispatch ungated", () => {
+    expect(jobHeader).toContain("github.event_name != 'schedule' ||");
+  });
+
+  it("gates at job level, so a disabled run would cost no runner minutes", () => {
+    const ifAt = jobHeader.indexOf("if: github.event_name");
+    const stepsAt = wf.indexOf("    steps:");
+
+    expect(ifAt).toBeGreaterThan(-1);
+    expect(ifAt).toBeLessThan(stepsAt);
+  });
+});
+
+describe("the fail-closed backend preflight", () => {
+  it("runs BEFORE anything else, including the install", () => {
+    const preflightAt = wf.indexOf("Confirm which backend this run will touch");
+    const checkoutAt = wf.indexOf("actions/checkout");
+    const workerAt = wf.lastIndexOf("npm run worker:run");
+
+    expect(preflightAt).toBeGreaterThan(-1);
+    expect(preflightAt).toBeLessThan(checkoutAt);
+    expect(preflightAt).toBeLessThan(workerAt);
+  });
+
+  it("derives the project ref from the public URL", () => {
+    expect(preflight).toContain('ref="${NEXT_PUBLIC_SUPABASE_URL#https://}"');
+    expect(preflight).toContain('ref="${ref%%.*}"');
+  });
+
+  it("compares against the expected ref and aborts on a mismatch", () => {
+    expect(preflight).toContain('if [ "${ref}" != "${EXPECTED_REF}" ]; then');
+    expect(preflight).toContain("exit 1");
+  });
+
+  it("aborts when no expectation is configured, rather than guessing", () => {
+    expect(preflight).toContain('if [ -z "${EXPECTED_REF}" ]; then');
+  });
+
+  it("takes the expected ref from repository variables, not this public file", () => {
+    expect(wf).toContain("vars.PRODUCTION_PROJECT_REF");
+    expect(wf).toContain("vars.STAGING_PROJECT_REF");
+    expect(wf).not.toContain("xhjadcffrgjpkobniiwz");
+    expect(wf).not.toContain("pkwlpstqdqscegfkjnel");
+  });
+
+  it("is never given the service-role key", () => {
+    // It only needs the URL. Not passing the key is stronger than trusting
+    // GitHub's masking to keep it out of the log.
+    const step = wf.slice(
+      wf.indexOf("Confirm which backend this run will touch"),
+      wf.indexOf("Check out the triggering ref")
+    );
+
+    expect(step).toContain("NEXT_PUBLIC_SUPABASE_URL:");
+    expect(step).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
+  });
+});
+
 describe("permissions", () => {
   it("grants read-only access to repository contents", () => {
     expect(wf).toMatch(/^permissions:\n\s+contents: read$/m);
@@ -195,7 +321,11 @@ describe("secrets handling", () => {
   it("passes exactly the two variables the worker reads, and nothing else", () => {
     // lib/supabase/adminConfig.ts reads these two. Anything more would put an
     // unnecessary credential into the environment.
-    const envBlock = wf.slice(wf.indexOf("env:"), wf.indexOf("run: |"));
+    // The WORKER step's env block: the last `env:` before the last `run: |`.
+    // The preflight added an earlier env block, and anchoring on the first one
+    // pointed this assertion at the wrong step.
+    const workerRunAt = wf.lastIndexOf("run: |");
+    const envBlock = wf.slice(wf.lastIndexOf("env:", workerRunAt), workerRunAt);
     const keys = [...envBlock.matchAll(/^\s+([A-Z_]+):/gm)].map((m) => m[1]);
     expect(keys.sort()).toEqual(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]);
   });

@@ -329,3 +329,63 @@ describe("the queued build copy no longer promises a start time", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// The dispatch names its backend, and refuses when it cannot
+// ---------------------------------------------------------------------------
+
+describe("demand dispatch states which backend it means", () => {
+  const server = read("lib/githubBuildWorker.server.ts");
+
+  it("resolves the environment and returns without dispatching when absent", () => {
+    const envAt = server.indexOf(
+      "parseBuildWorkerEnvironment(process.env[ENVIRONMENT_ENV_VAR])"
+    );
+    const fetchAt = server.indexOf("await fetch(");
+
+    expect(envAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(envAt);
+
+    const between = server.slice(envAt, fetchAt);
+
+    expect(between).toContain("if (environment === null)");
+    expect(between).toContain('return { ok: false, reason: "not_configured" };');
+  });
+
+  it("passes the resolved environment into the body", () => {
+    expect(server).toContain("buildWorkflowDispatchBody(environment)");
+  });
+
+  it("never defaults, coerces or infers the environment", () => {
+    // Comments stripped: the note above the variable EXPLAINS why NODE_ENV and
+    // the Supabase URL are unsuitable, and naming them in prose must not read
+    // as using them.
+    const executable = server
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+
+    expect(executable).not.toContain('?? "staging"');
+    expect(executable).not.toContain('?? "production"');
+    expect(executable).not.toContain("NODE_ENV");
+    expect(executable).not.toContain("VERCEL_ENV");
+    expect(executable).not.toContain("NEXT_PUBLIC_SUPABASE_URL");
+  });
+
+  it("reads a server-only variable the browser cannot set", () => {
+    expect(server).toContain(
+      'const ENVIRONMENT_ENV_VAR = "BUILD_WORKER_ENVIRONMENT"'
+    );
+    expect(server).not.toContain("NEXT_PUBLIC_BUILD_WORKER_ENVIRONMENT");
+
+    const use = server.indexOf("process.env[ENVIRONMENT_ENV_VAR]");
+
+    expect(
+      server.indexOf("export async function dispatchBuildWorkerWorkflow")
+    ).toBeLessThan(use);
+  });
+
+  it("names the variable in the log but never its value", () => {
+    expect(server).toContain("${ENVIRONMENT_ENV_VAR} is not set to");
+    expect(server).not.toContain("process.env[ENVIRONMENT_ENV_VAR]}");
+  });
+});
