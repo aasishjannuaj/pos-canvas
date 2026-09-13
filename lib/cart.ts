@@ -11,6 +11,7 @@ import type { ModifierSnapshotEntry } from "@/lib/modifiers";
 // from here directly, and lib/orders.ts/lib/orders.server.ts/
 // lib/dashboard.types.ts/lib/dashboard.server.ts no longer need to reach
 // into a "use client" component file for their own type signatures.
+import { exactLineMoney, exactOrderTotals } from "@/lib/money";
 import type { MenuItem, TaxSettings } from "@/lib/projectConfig";
 
 // Feature 18.2 — one selected modifier option, carried for DISPLAY only.
@@ -48,12 +49,26 @@ export type CartItem = {
   modifiers: CartModifierSelection[];
 };
 
+// Feature 28B — the money here is EXACT and matches what the server will
+// charge. Fixed two-decimal strings, produced by lib/money.ts against the same
+// decimal rules complete_sale* uses, so the cart, the Charge button and an
+// offline receipt all show the figure the customer is actually charged. They
+// are rendered directly: no toFixed, no parsing back into a number.
 export type CartSummary = {
   itemCount: number;
-  subtotal: number;
-  taxAmount: number;
-  tip: number;
-  total: number;
+  subtotal: string;
+  taxAmount: string;
+  /** The tip as displayed. */
+  tip: string;
+  total: string;
+  /**
+   * The normalized tip as a NUMBER, for the complete_sale* argument only.
+   *
+   * Separate from `tip` on purpose: the RPC parameter is numeric and the server
+   * re-rounds it, while `tip` is a rendered string. One field serving both is
+   * how a display value ends up being parsed back into money.
+   */
+  tipAmount: number;
 };
 
 export type PaymentMethod = "cash" | "card";
@@ -90,31 +105,36 @@ export function calculateCartSummary(
   tipAmount: number
 ): CartSummary {
   const itemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
-  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  const safeRate = Number.isFinite(tax.rate) && tax.rate > 0 ? tax.rate : 0;
+  // Feature 28B — the server's sequence, not an approximation of it: round the
+  // combined unit price to cents, multiply by the quantity, round the line,
+  // then sum the ROUNDED lines. The previous version summed `price * quantity`
+  // in floating point and applied the tax rule to that, which disagreed with
+  // the charge by a cent on roughly one subtotal in a hundred at a 5% rate.
+  const lineTotals: string[] = [];
 
-  let taxAmount = 0;
-  let totalBeforeTip = subtotal;
+  for (const item of cart) {
+    const line = exactLineMoney({ unitPrice: item.price, quantity: item.quantity });
 
-  if (tax.enabled) {
-    if (tax.pricesIncludeTax) {
-      taxAmount = subtotal - subtotal / (1 + safeRate / 100);
-      totalBeforeTip = subtotal;
-    } else {
-      taxAmount = subtotal * (safeRate / 100);
-      totalBeforeTip = subtotal + taxAmount;
+    // A line this module cannot price contributes nothing rather than a guessed
+    // figure. The sale itself is unaffected: the server prices every line from
+    // the authorized configuration and refuses the whole sale if one is bad.
+    if (line !== null) {
+      lineTotals.push(line.lineTotal);
     }
   }
 
-  const tip = Number.isFinite(tipAmount) && tipAmount > 0 ? tipAmount : 0;
+  const totals = exactOrderTotals({ lineTotals, tax, tipAmount });
 
   return {
     itemCount,
-    subtotal,
-    taxAmount,
-    tip,
-    total: totalBeforeTip + tip,
+    subtotal: totals.subtotal,
+    taxAmount: totals.taxAmount,
+    tip: totals.tipAmount,
+    total: totals.total,
+    // Re-read from the normalized string so the number sent to the server and
+    // the string shown on screen can never be two different tips.
+    tipAmount: Number(totals.tipAmount),
   };
 }
 

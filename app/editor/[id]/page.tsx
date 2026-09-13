@@ -33,7 +33,7 @@ export default async function EditorPage({
     // are all independent of the project lookup above — a failure in any of
     // them should never turn a valid project into a 404, it just means the
     // editor opens with an empty list for that section.
-    const { orders } = await getProjectOrders(project.id);
+    const { orders, receipts } = await getProjectOrders(project.id);
     const {
       transactions,
       error: inventoryTransactionsError,
@@ -56,6 +56,7 @@ export default async function EditorPage({
         initialConfig={initialConfig}
         initialProjectId={project.id}
         initialCompletedOrders={orders}
+        initialCompletedReceipts={receipts}
         initialInventoryTransactions={transactions}
         initialInventoryTransactionsError={inventoryTransactionsError}
         initialOrderTotals={orderTotals}

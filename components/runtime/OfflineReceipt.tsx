@@ -1,11 +1,11 @@
+import type { ResolvedReceiptPresentation } from "@/lib/receiptPresentation";
+import { shouldShowChargedLine } from "@/lib/receiptPresentation";
 import {
   OFFLINE_RECEIPT_BANNER,
   OFFLINE_RECEIPT_EXPLANATION_LINES,
   OFFLINE_RECEIPT_REFERENCE_LABEL,
 } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
-import { isNonZeroMoney } from "@/lib/completedSale";
-import type { ProjectConfig } from "@/lib/projectConfig";
 
 // Feature 24.5E — the receipt for a sale saved on this device.
 //
@@ -26,11 +26,16 @@ import type { ProjectConfig } from "@/lib/projectConfig";
 // THE WORDING IS THE OWNER-APPROVED COPY and is imported rather than typed
 // here, so this component cannot drift from the approved text.
 
+// Feature 28C — ONE presentation prop, resolved by the caller.
+//
+// It replaces businessProfile + receiptSettings + currencySymbol, which were
+// three independently-passed values that could disagree with each other, and
+// which every caller read from TODAY'S configuration. The resolved value also
+// carries where it came from, which is what decides whether a toggle set after
+// the sale may hide a line the Total depends on.
 type OfflineReceiptProps = {
   receipt: ProvisionalReceipt;
-  businessProfile: ProjectConfig["businessProfile"];
-  receiptSettings: ProjectConfig["receipt"];
-  currencySymbol: string;
+  presentation: ResolvedReceiptPresentation;
 };
 
 function formatReceiptDateTime(value: string): string {
@@ -46,12 +51,9 @@ function formatReceiptDateTime(value: string): string {
   });
 }
 
-export default function OfflineReceipt({
-  receipt,
-  businessProfile,
-  receiptSettings,
-  currencySymbol,
-}: OfflineReceiptProps) {
+export default function OfflineReceipt({ receipt, presentation }: OfflineReceiptProps) {
+  const { businessProfile, receipt: receiptSettings, currencySymbol } = presentation;
+
   const addressLines = [
     businessProfile.addressLine1,
     businessProfile.addressLine2,
@@ -139,7 +141,11 @@ export default function OfflineReceipt({
           </span>
         </div>
 
-        {receiptSettings.showTaxLine && isNonZeroMoney(receipt.taxAmount) && (
+        {/* Feature 28C — a charged line is never hidden by a setting made
+            after the sale. shouldShowChargedLine still honours the toggle when
+            the toggle IS the sale-time one; what it refuses is a receipt whose
+            visible lines cannot add up to the Total printed below them. */}
+        {shouldShowChargedLine({ amount: receipt.taxAmount }) && (
           <div className="flex justify-between py-0.5">
             <span>Tax</span>
             <span className="tabular-nums">
@@ -149,7 +155,7 @@ export default function OfflineReceipt({
           </div>
         )}
 
-        {receiptSettings.showTipLine && isNonZeroMoney(receipt.tipAmount) && (
+        {shouldShowChargedLine({ amount: receipt.tipAmount }) && (
           <div className="flex justify-between py-0.5">
             <span>Tip</span>
             <span className="tabular-nums">

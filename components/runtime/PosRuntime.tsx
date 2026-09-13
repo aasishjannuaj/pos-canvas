@@ -42,6 +42,7 @@ import {
 } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import PosHeader from "@/components/runtime/PosHeader";
 import ProductBrowser from "@/components/editor/pos-layouts";
@@ -277,6 +278,12 @@ export default function PosRuntime({
   // real, persisted checkout path.
   const cartSummary = calculateCartSummary(cart, config.tax, 0);
 
+  // Feature 28C — this till's pinned configuration is the one every sale it
+  // takes is priced from, so for a receipt printed here it IS the sale-time
+  // configuration. A HISTORICAL receipt is a different question and is resolved
+  // per order — see SalesHistoryDetail.
+  const livePresentation = saleTimePresentation(config);
+
   /**
    * Feature 24.5F (DEF-01) — what the cashier reads after a lost connection.
    *
@@ -511,7 +518,7 @@ export default function PosRuntime({
     const fingerprint = createSaleFingerprint({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
-      tipAmount: cartSummary.tip,
+      tipAmount: cartSummary.tipAmount,
       items: cart,
     });
 
@@ -573,7 +580,7 @@ export default function PosRuntime({
         paymentMethod: selectedPaymentMethod,
         // The same literal-0 tip the online path uses. There is still no
         // tip-entry UI, and complete_sale_v4 rejects a device tip outright.
-        tipAmount: cartSummary.tip,
+        tipAmount: cartSummary.tipAmount,
         cart,
         // Feature 24.5F (DEF-01) — ONLY when this very checkout just lost an
         // online attempt on the wire. Outside that window the offline sale is
@@ -628,7 +635,7 @@ export default function PosRuntime({
     const plan = planSaleSubmission({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
-      tipAmount: cartSummary.tip,
+      tipAmount: cartSummary.tipAmount,
       cart,
       menuItems,
       // resolveSaleRequest reuses an id whose fingerprint matches, so this is
@@ -664,7 +671,7 @@ export default function PosRuntime({
           saleRequestId: plan.request.id,
           projectId: config.project.projectId,
           paymentMethod: selectedPaymentMethod,
-          tipAmount: cartSummary.tip,
+          tipAmount: cartSummary.tipAmount,
           items: plan.items,
           fingerprint: plan.request.fingerprint,
         })
@@ -680,7 +687,7 @@ export default function PosRuntime({
     const { receipt, error, failure, rolledBack } = await submitSale({
       projectId: config.project.projectId,
       paymentMethod: selectedPaymentMethod,
-      tipAmount: cartSummary.tip,
+      tipAmount: cartSummary.tipAmount,
       // Identifiers and quantities only. buildSaleRequestItems (inside the plan)
       // strips every display name and price adjustment, so there is nowhere in
       // this payload for a client-supplied amount to sit.
@@ -709,7 +716,7 @@ export default function PosRuntime({
             saleRequestId: plan.request.id,
             projectId: config.project.projectId,
             paymentMethod: selectedPaymentMethod,
-            tipAmount: cartSummary.tip,
+            tipAmount: cartSummary.tipAmount,
             items: plan.items,
             fingerprint: plan.request.fingerprint,
           })
@@ -929,7 +936,6 @@ export default function PosRuntime({
             }
             lastOfflineReference={lastProvisionalReceipt?.offlineReference ?? null}
             onOpenReceipt={openReceipt}
-            selectedOrder={null}
             authoritativeReceipt={shownReceipt}
             provisionalReceipt={shownProvisionalReceipt}
             onCloseReceipt={closeReceipt}
@@ -943,12 +949,7 @@ export default function PosRuntime({
           nested inside it. */}
       {shownReceipt && (
         <div className="receipt-print-area">
-          <AuthoritativeReceipt
-            receipt={shownReceipt}
-            businessProfile={config.businessProfile}
-            receiptSettings={config.receipt}
-            currencySymbol={currencySymbol}
-          />
+          <AuthoritativeReceipt receipt={shownReceipt} presentation={livePresentation} />
         </div>
       )}
 
@@ -960,9 +961,7 @@ export default function PosRuntime({
         <div className="receipt-print-area">
           <OfflineReceipt
             receipt={shownProvisionalReceipt}
-            businessProfile={config.businessProfile}
-            receiptSettings={config.receipt}
-            currencySymbol={currencySymbol}
+            presentation={livePresentation}
           />
         </div>
       )}

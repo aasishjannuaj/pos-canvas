@@ -5,19 +5,34 @@
 // EVERY VALUE COMES FROM THE STORED ORDER. The item names, unit prices,
 // modifiers and totals below were written by the server at sale time and are
 // replayed unchanged. Re-pricing a past sale from today's menu would rewrite
-// what a customer paid every time the shop edits a price — so the pinned config
-// contributes only the business header and receipt settings, never a number.
+// what a customer paid every time the shop edits a price.
 //
-// ONE RECEIPT IMPLEMENTATION. The chain is
-//   history DTO -> CompletedSaleReceipt -> toCompletedOrder -> Receipt
-// exactly as the till uses at checkout, so a reprint cannot disagree with the
-// slip the customer was handed.
+// Feature 28A — ONE RECEIPT COMPONENT, and it is the one the customer's slip
+// was printed from.
+//
+// This screen used to route the canonical receipt through toCompletedOrder into
+// the Builder's number-typed Receipt, which parsed the server's fixed-decimal
+// strings back into IEEE-754 doubles, recomputed each line as price × quantity,
+// and threw away the persisted line_total entirely. The reprint and the
+// original slip were therefore two different components reading two different
+// models: they disagreed on the date format, on whether email and website
+// printed at all, and — for two lines of the same product with different
+// options — potentially on the order of the lines themselves.
+//
+// AuthoritativeReceipt renders the stored strings directly. Nothing on this
+// screen multiplies, sums, rounds or reformats a money value.
+//
+// Feature 28C — the header is the one this sale was taken under, not today's.
+// The server resolves it from the build that priced the sale (a device sale) or
+// from the order's own receipt_snapshot (an owner sale). An order older than
+// both carries neither, and falls back to the current configuration explicitly
+// — see resolveReceiptPresentation.
 
-import Receipt from "@/components/editor/Receipt";
-import { toCompletedOrder } from "@/lib/saleSubmission";
-import { toHistoryReceipt } from "@/lib/deviceOrders";
+import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { historyDisplayTime, toHistoryReceipt } from "@/lib/deviceOrders";
 import type { DeviceHistoryOrder } from "@/lib/deviceOrders";
 import { isCapacitorNativeShell, NATIVE_PRINT_UNAVAILABLE_MESSAGE } from "@/lib/nativeShell";
+import { resolveReceiptPresentation } from "@/lib/receiptPresentation";
 import { REPRINT_ACTION } from "@/lib/salesHistoryView";
 import type { GeneratedPosConfig } from "@/lib/generatedPosConfig";
 
@@ -32,7 +47,14 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
   // fact, and a module-level constant would freeze whatever the first import saw.
   const nativeShell = isCapacitorNativeShell();
 
-  const completed = toCompletedOrder(toHistoryReceipt(order));
+  const receipt = toHistoryReceipt(order);
+  const presentation = resolveReceiptPresentation({
+    stored: receipt.presentation,
+    current: config,
+  });
+  // occurredAt when the server has one, createdAt otherwise — the same instant
+  // the list row shows for this sale, and the one the customer's slip carried.
+  const saleTime = historyDisplayTime(order);
 
   function handleReprint() {
     // Belt and braces: the button is already disabled on Android, and there is
@@ -57,10 +79,10 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
         </h1>
 
         <div className="mt-6 rounded-2xl border border-neutral-200 bg-white p-4">
-          <Receipt
-            order={completed}
-            businessProfile={config.businessProfile}
-            receipt={config.receipt}
+          <AuthoritativeReceipt
+            receipt={receipt}
+            presentation={presentation}
+            saleTime={saleTime}
           />
         </div>
 
@@ -97,6 +119,10 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
           the existing @media print rules in globals.css — the same mechanism the
           checkout receipt uses.
 
+          Feature 28A — SAME COMPONENT, SAME PROPS as the copy above. Not
+          "equivalent markup": literally the same three values, so print and
+          screen cannot drift apart even in principle.
+
           Feature 25.5 — data-print-exclusive, because this screen is an overlay
           above a STILL-MOUNTED PosRuntime. If the cashier left a just-completed
           receipt open before opening history, its print area is also in the
@@ -105,10 +131,10 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
           customer never asked for. This marks the historical receipt as the only
           thing that prints while it is on screen. */}
       <div className="receipt-print-area" data-print-exclusive>
-        <Receipt
-          order={completed}
-          businessProfile={config.businessProfile}
-          receipt={config.receipt}
+        <AuthoritativeReceipt
+          receipt={receipt}
+          presentation={presentation}
+          saleTime={saleTime}
         />
       </div>
     </div>

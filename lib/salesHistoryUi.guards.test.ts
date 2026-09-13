@@ -162,24 +162,53 @@ describe("the list is honest about every state", () => {
 });
 
 describe("the receipt is the stored sale, replayed", () => {
-  it("maps through the SAME chain the till uses", () => {
+  it("renders the SAME component the customer's slip was printed from", () => {
+    // Feature 28A — this used to assert the opposite: toCompletedOrder into the
+    // Builder's number-typed Receipt. That chain parsed the server's
+    // fixed-decimal strings back into doubles and recomputed each line as
+    // price × quantity, so the reprint was a second rendering of the sale
+    // rather than the same one. AuthoritativeReceipt reads the stored strings.
     const detail = code(read(DETAIL));
 
     expect(detail).toContain("toHistoryReceipt(order)");
-    expect(detail).toContain("toCompletedOrder(");
-    expect(detail).toContain("<Receipt");
+    expect(detail).toContain("<AuthoritativeReceipt");
+    expect(detail).not.toContain("toCompletedOrder(");
+    expect(detail).not.toContain('from "@/components/editor/Receipt"');
   });
 
   it("NEVER re-prices from today's menu", () => {
     const detail = code(read(DETAIL));
 
-    // The pinned config contributes the business header and receipt settings
-    // only. Touching menuItems here would rewrite what a customer paid.
-    expect(detail).toContain("config.businessProfile");
-    expect(detail).toContain("config.receipt");
+    // Touching menuItems here would rewrite what a customer paid.
     expect(detail).not.toContain("config.menuItems");
     expect(detail).not.toContain("calculateCartSummary");
     expect(detail).not.toContain("createCartItem");
+  });
+
+  it("takes the business header from the SALE, not from today's settings", () => {
+    // Feature 28C — config is the FALLBACK, reached only when the order carries
+    // no resolved presentation of its own. Passing config.businessProfile
+    // straight into the receipt is what re-headed every historical slip every
+    // time the shop edited its address.
+    const detail = code(read(DETAIL));
+
+    expect(detail).toContain("resolveReceiptPresentation(");
+    expect(detail).toContain("stored: receipt.presentation");
+    expect(detail).toContain("current: config");
+    expect(detail).not.toContain("businessProfile={config.businessProfile}");
+    expect(detail).not.toContain("receipt={config.receipt}");
+  });
+
+  it("prints and displays from ONE resolved value, not two equivalent ones", () => {
+    // Negative control for the print/screen equality claim: two AuthoritativeReceipt
+    // elements, and both read the same three locals. A literal passed to one of
+    // them would be a second source of truth.
+    const detail = code(read(DETAIL));
+
+    expect(detail.match(/<AuthoritativeReceipt/g)).toHaveLength(2);
+    expect(detail.match(/receipt=\{receipt\}/g)).toHaveLength(2);
+    expect(detail.match(/presentation=\{presentation\}/g)).toHaveLength(2);
+    expect(detail.match(/saleTime=\{saleTime\}/g)).toHaveLength(2);
   });
 
   it("reuses the existing print CSS rather than adding any", () => {

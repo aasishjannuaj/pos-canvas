@@ -389,7 +389,7 @@ export default function EditorPropertiesPanel({
               <span className="text-neutral-600">Subtotal</span>
               <span className="font-medium text-neutral-900">
                 {currencySymbol}
-                {cartSummary.subtotal.toFixed(2)}
+                {cartSummary.subtotal}
               </span>
             </div>
 
@@ -397,7 +397,7 @@ export default function EditorPropertiesPanel({
               <span className="text-neutral-600">Tax</span>
               <span className="font-medium text-neutral-900">
                 {currencySymbol}
-                {cartSummary.taxAmount.toFixed(2)}
+                {cartSummary.taxAmount}
               </span>
             </div>
 
@@ -405,7 +405,7 @@ export default function EditorPropertiesPanel({
               <span>Total</span>
               <span>
                 {currencySymbol}
-                {cartSummary.total.toFixed(2)}
+                {cartSummary.total}
               </span>
             </div>
           </div>

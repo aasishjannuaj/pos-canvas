@@ -26,6 +26,7 @@
 // provisional receipt that looks like an identifier is an OFFLINE REFERENCE,
 // deliberately shaped so it cannot be mistaken for one.
 import { calculateCartSummary, createCartItem } from "@/lib/cart";
+import { exactLineMoney } from "@/lib/money";
 import type { CartItem, CartModifierSelection, PaymentMethod } from "@/lib/cart";
 import { buildModifierSnapshot } from "@/lib/modifiers";
 import type { ModifierGroup, ModifierSnapshotEntry } from "@/lib/modifiers";
@@ -214,11 +215,6 @@ export type ProvisionalReceiptResult =
   | { ok: true; receipt: ProvisionalReceipt }
   | { ok: false; reason: ProvisionalReceiptFailure };
 
-/** Two decimals, exactly as the SQL side produces for an authoritative receipt. */
-function money(value: number): string {
-  return (Number.isFinite(value) ? value : 0).toFixed(2);
-}
-
 /**
  * Rebuilds the display selection for one line from the AUTHORIZED groups.
  *
@@ -302,12 +298,30 @@ export function buildProvisionalReceipt(input: {
 
     cart.push(line);
 
+    // Feature 28B — the SERVER'S rounding sequence, through the one exact money
+    // module: round the combined unit price to cents, then multiply. This is a
+    // receipt that gets PRINTED and handed over before the server has priced
+    // the sale, so `price * quantity` in floating point was the one place a
+    // wrong figure reached paper.
+    const lineMoney = exactLineMoney({
+      unitPrice: line.price,
+      quantity: queued.quantity,
+    });
+
+    // Unreachable for a sale this device just took — the cart was built from
+    // this very config — and refused rather than approximated if it ever were.
+    // A receipt missing a line is worse than no receipt; a receipt carrying a
+    // made-up line is worse than both.
+    if (lineMoney === null) {
+      return { ok: false, reason: "unknown_item" };
+    }
+
     items.push({
       itemId: menuItem.id,
       itemName: menuItem.name,
-      unitPrice: money(line.price),
+      unitPrice: lineMoney.unitPrice,
       quantity: queued.quantity,
-      lineTotal: money(line.price * queued.quantity),
+      lineTotal: lineMoney.lineTotal,
       modifiers: buildModifierSnapshot(groups, queued.modifiers),
     });
   }
@@ -326,10 +340,10 @@ export function buildProvisionalReceipt(input: {
       saleRequestId: input.record.saleRequestId,
       occurredAt: input.record.occurredAt,
       paymentMethod: input.record.paymentMethod,
-      subtotal: money(summary.subtotal),
-      taxAmount: money(summary.taxAmount),
-      tipAmount: money(summary.tip),
-      total: money(summary.total),
+      subtotal: summary.subtotal,
+      taxAmount: summary.taxAmount,
+      tipAmount: summary.tip,
+      total: summary.total,
       items,
     },
   };

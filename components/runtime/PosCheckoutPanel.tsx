@@ -14,8 +14,8 @@ import {
   NATIVE_PRINT_UNAVAILABLE_MESSAGE,
   isCapacitorNativeShell,
 } from "@/lib/nativeShell";
-import Receipt from "@/components/editor/Receipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import { describeCartModifiers, getItemQuantityInCart } from "@/lib/cart";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
@@ -86,7 +86,6 @@ type PosCheckoutPanelProps = {
    */
   lastOfflineReference?: string | null;
   onOpenReceipt: (orderId: string) => void;
-  selectedOrder: CompletedOrder | null;
   // Feature 16.3 D3 — when set, the overlay renders the AUTHORITATIVE
   // server receipt instead of the preview model. EditorPreview never passes
   // it, so the Builder preview path is byte-identical to before.
@@ -134,7 +133,6 @@ export default function PosCheckoutPanel({
   lastCompletedOrderId,
   lastOfflineReference = null,
   onOpenReceipt,
-  selectedOrder,
   authoritativeReceipt = null,
   provisionalReceipt = null,
   onCloseReceipt,
@@ -155,17 +153,18 @@ export default function PosCheckoutPanel({
   // provisional sale is addressed by its durable queue record id — the only
   // stable handle it has, and deliberately not an order number.
   const shownReceiptId =
-    authoritativeReceipt?.orderId ??
-    provisionalReceipt?.queueRecordId ??
-    selectedOrder?.id ??
-    null;
-  const receiptVisible =
-    authoritativeReceipt !== null || provisionalReceipt !== null || selectedOrder !== null;
+    authoritativeReceipt?.orderId ?? provisionalReceipt?.queueRecordId ?? null;
+  const receiptVisible = authoritativeReceipt !== null || provisionalReceipt !== null;
 
   const activePrintNotice =
     printNotice !== null && printNotice.orderId === shownReceiptId
       ? printNotice.message
       : null;
+
+  // Feature 28C — the configuration in hand IS this sale's sale-time
+  // configuration: it is the one the sale is being priced from, this instant.
+  // Marked as such so its own toggles govern what the slip shows.
+  const livePresentation = saleTimePresentation({ businessProfile, receipt });
 
   function handlePrintReceipt() {
     if (shownReceiptId === null) {
@@ -298,7 +297,7 @@ export default function PosCheckoutPanel({
             <span>Subtotal</span>
             <span>
               {currencySymbol}
-              {cartSummary.subtotal.toFixed(2)}
+              {cartSummary.subtotal}
             </span>
           </div>
 
@@ -307,7 +306,7 @@ export default function PosCheckoutPanel({
               <span>Tax</span>
               <span>
                 {currencySymbol}
-                {cartSummary.taxAmount.toFixed(2)}
+                {cartSummary.taxAmount}
               </span>
             </div>
           )}
@@ -317,7 +316,7 @@ export default function PosCheckoutPanel({
               <span>Tip</span>
               <span>
                 {currencySymbol}
-                {cartSummary.tip.toFixed(2)}
+                {cartSummary.tip}
               </span>
             </div>
           )}
@@ -326,7 +325,7 @@ export default function PosCheckoutPanel({
             <span>Total</span>
             <span>
               {currencySymbol}
-              {cartSummary.total.toFixed(2)}
+              {cartSummary.total}
             </span>
           </div>
         </div>
@@ -455,7 +454,7 @@ export default function PosCheckoutPanel({
                   <span className="text-sm text-neutral-600">Order Total</span>
                   <span className="text-lg font-semibold text-neutral-900">
                     {currencySymbol}
-                    {cartSummary.total.toFixed(2)}
+                    {cartSummary.total}
                   </span>
                 </div>
 
@@ -565,28 +564,31 @@ export default function PosCheckoutPanel({
           `overflow: hidden` can clip an absolutely-positioned descendant
           even under the print stylesheet. Each host (EditorPreview,
           PosRuntime) renders its own print-only copy outside that
-          container, using the same selectedOrder/businessProfile/receipt
+          container, using the same receipt/presentation values
           it already passes in here — see app/globals.css's
           .receipt-print-area rules for why the DOM position matters. */}
       {receiptVisible && (
         <div className="absolute inset-0 z-10 flex flex-col bg-white p-4">
           <div className="flex-1 overflow-y-auto">
+            {/* Feature 28A — TWO branches, not three. The third was a
+                number-typed CompletedOrder rendered by the Builder's preview
+                Receipt, reached whenever a real sale had no authoritative
+                payload in hand. It recomputed every line as price × quantity;
+                there is no longer any path on which a real sale renders from
+                that model, and the `selectedOrder!` non-null assertion it
+                needed is gone with it. */}
             {authoritativeReceipt ? (
               <AuthoritativeReceipt
                 receipt={authoritativeReceipt}
-                businessProfile={businessProfile}
-                receiptSettings={receipt}
-                currencySymbol={currencySymbol}
-              />
-            ) : provisionalReceipt ? (
-              <OfflineReceipt
-                receipt={provisionalReceipt}
-                businessProfile={businessProfile}
-                receiptSettings={receipt}
-                currencySymbol={currencySymbol}
+                presentation={livePresentation}
               />
             ) : (
-              <Receipt order={selectedOrder!} businessProfile={businessProfile} receipt={receipt} />
+              provisionalReceipt && (
+                <OfflineReceipt
+                  receipt={provisionalReceipt}
+                  presentation={livePresentation}
+                />
+              )
             )}
           </div>
 

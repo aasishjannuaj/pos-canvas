@@ -420,10 +420,12 @@ describe("quantity, modifiers and tax add up exactly once", () => {
 
     if (!built.ok) return;
 
-    expect(built.receipt.subtotal).toBe(expected.subtotal.toFixed(2));
-    expect(built.receipt.taxAmount).toBe(expected.taxAmount.toFixed(2));
-    expect(built.receipt.total).toBe(expected.total.toFixed(2));
-    expect(built.receipt.tipAmount).toBe(expected.tip.toFixed(2));
+    // Feature 28B — calculateCartSummary now returns the exact fixed-decimal
+    // strings, so this compares them directly rather than re-formatting.
+    expect(built.receipt.subtotal).toBe(expected.subtotal);
+    expect(built.receipt.taxAmount).toBe(expected.taxAmount);
+    expect(built.receipt.total).toBe(expected.total);
+    expect(built.receipt.tipAmount).toBe(expected.tip);
   });
 
   it("does not double-count: the modifier rows are a breakdown, not addends", () => {

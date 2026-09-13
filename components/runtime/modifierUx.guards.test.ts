@@ -220,8 +220,22 @@ describe("order history uses the stored snapshot", () => {
   });
 
   it("history and a live receipt share one mapping", () => {
-    expect(server).toContain("createHistoricalCartItem(");
+    // Feature 28A — still one mapping, reached by a shorter route. The server
+    // loader used to call createHistoricalCartItem itself, which made it a
+    // SECOND caller of the shared projection; it now builds the canonical
+    // receipt and hands it to toCompletedOrder, so saleSubmission.ts is the
+    // only place a stored line becomes a display line.
+    expect(server).toContain("toCompletedOrder");
+    expect(server).not.toContain("createHistoricalCartItem(");
     expect(code(read("lib/saleSubmission.ts"))).toContain("createHistoricalCartItem(");
+  });
+
+  it("the server loader reads the STORED line total, never quantity × price", () => {
+    // Negative control for the whole of 28A: the one figure the old Builder
+    // path threw away.
+    expect(server).toContain("storedMoneyToFixedString(orderItem.line_total)");
+    expect(server).not.toMatch(/unit_price\s*\*\s*/);
+    expect(server).not.toMatch(/\*\s*orderItem\.quantity/);
   });
 
   it("treats a missing or non-array snapshot as no modifiers", () => {

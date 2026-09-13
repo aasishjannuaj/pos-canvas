@@ -54,6 +54,19 @@ export type CompletedSaleReceipt = {
   total: string;
   createdAt: string;
   items: CompletedSaleItem[];
+  // Feature 28C — the business identity and receipt settings this sale was
+  // taken under, when the server could resolve them (a device sale from its
+  // build's immutable config_snapshot, an owner sale from its own
+  // receipt_snapshot). Absent on a live checkout payload, where the caller
+  // already holds that configuration, and on any order predating both.
+  //
+  // DELIBERATELY `unknown`, and deliberately NOT validated by the guard below.
+  // Everything else here is money, where a malformed payload is refused because
+  // printing a half-understood price is worse than printing an error. This is
+  // not money: lib/receiptPresentation.ts normalizes it field by field and
+  // falls back to current configuration, because losing a whole receipt over a
+  // missing toggle would be the worse failure.
+  presentation?: unknown;
 };
 
 const MONEY_PATTERN = /^-?\d+\.\d{2}$/;

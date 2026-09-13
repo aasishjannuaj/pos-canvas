@@ -122,9 +122,14 @@ describe("the single-print-area invariant, where it still holds", () => {
   it("the editor preview still mounts at most one", () => {
     const preview = code(read(PREVIEW));
 
-    // A ternary, not two independent && blocks.
-    expect(preview).toContain("authoritativeReceipt ? (");
-    expect((preview.match(/receipt-print-area/g) ?? []).length).toBe(2);
+    // Feature 28A — this used to require a TERNARY, because there were two
+    // receipt models the preview could print and exactly one of them had to
+    // win. The number-typed fallback is gone, so there is now a single print
+    // area behind a single condition, which is a stronger form of the same
+    // invariant: one occurrence in the source, and it cannot be unconditional.
+    expect((preview.match(/receipt-print-area/g) ?? []).length).toBe(1);
+    expect(preview).toContain("{authoritativeReceipt && (");
+    expect(preview).not.toContain("<Receipt ");
   });
 
   it("no print area is rendered unconditionally", () => {

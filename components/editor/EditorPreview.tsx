@@ -15,8 +15,8 @@ import type {
 import ProductBrowser from "./pos-layouts";
 import type { PosLayout } from "@/lib/posLayout";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
-import Receipt from "./Receipt";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { saleTimePresentation } from "@/lib/receiptPresentation";
 import PosHeader from "@/components/runtime/PosHeader";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 
@@ -50,7 +50,6 @@ type EditorPreviewProps = {
   saleSaveStatus: SaleSaveStatus;
   saleSaveError: string | null;
   completedOrders: CompletedOrder[];
-  selectedReceiptId: string | null;
   // Feature 18.2 Phase 5A — set only while the receipt being opened is the sale
   // completed in this session, for which complete_sale_v3 returned an
   // authoritative payload. Older orders fall back to the number-typed
@@ -110,7 +109,6 @@ export default function EditorPreview({
   saleSaveStatus,
   saleSaveError,
   completedOrders,
-  selectedReceiptId,
   authoritativeReceipt,
   onOpenReceipt,
   onCloseReceipt,
@@ -127,8 +125,6 @@ export default function EditorPreview({
     : editModeSummary.total;
 
   const recentOrders = completedOrders.slice(0, 5);
-  const selectedOrder =
-    completedOrders.find((order) => order.id === selectedReceiptId) ?? null;
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 overflow-auto bg-neutral-100 p-10">
@@ -193,7 +189,6 @@ export default function EditorPreview({
             recentOrders={recentOrders}
             lastCompletedOrderId={lastCompletedOrderId}
             onOpenReceipt={onOpenReceipt}
-            selectedOrder={selectedOrder}
             authoritativeReceipt={authoritativeReceipt}
             onCloseReceipt={onCloseReceipt}
           />
@@ -254,26 +249,18 @@ export default function EditorPreview({
           this prints. Kept as a single instance, mounted only while a
           receipt is actually open, so at most one print area ever exists. */}
       {/* Feature 18.2 Phase 5A — the printed copy must be the same receipt the
-          overlay is showing, so it follows the same precedence PosCheckoutPanel
-          uses: the server's payload when there is one, the history model
-          otherwise. Printing a locally projected copy of a sale whose
-          authoritative figures are already in hand would be the one place a
-          rounding difference could reach paper. */}
-      {authoritativeReceipt ? (
+          overlay is showing. Feature 28A removed the second branch this used to
+          have: an older order fell through to the number-typed history model,
+          which recomputed its line totals, and that was the one place a
+          rounding difference could reach paper. Every real sale now has a
+          canonical receipt, so there is one branch and one component. */}
+      {authoritativeReceipt && (
         <div className="receipt-print-area">
           <AuthoritativeReceipt
             receipt={authoritativeReceipt}
-            businessProfile={businessProfile}
-            receiptSettings={receipt}
-            currencySymbol={currencySymbol}
+            presentation={saleTimePresentation({ businessProfile, receipt })}
           />
         </div>
-      ) : (
-        selectedOrder && (
-          <div className="receipt-print-area">
-            <Receipt order={selectedOrder} businessProfile={businessProfile} receipt={receipt} />
-          </div>
-        )
       )}
     </div>
   );

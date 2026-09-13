@@ -193,6 +193,9 @@ type EditorShellProps = {
   initialConfig?: ProjectConfig;
   initialProjectId?: string | null;
   initialCompletedOrders?: CompletedOrder[];
+  // Feature 28A — the canonical receipts for the same orders, so the receipt
+  // overlay never has to render the number-typed projection above.
+  initialCompletedReceipts?: CompletedSaleReceipt[];
   initialInventoryTransactions?: InventoryTransaction[];
   initialInventoryTransactionsError?: string | null;
   initialOrderTotals?: OrderTotal[];
@@ -210,6 +213,7 @@ export default function EditorShell({
   initialConfig,
   initialProjectId,
   initialCompletedOrders,
+  initialCompletedReceipts,
   initialInventoryTransactions,
   initialInventoryTransactionsError,
   initialOrderTotals,
@@ -311,6 +315,13 @@ export default function EditorShell({
   // ordering convention stays consistent throughout.
   const [completedOrders, setCompletedOrders] = useState<CompletedOrder[]>(
     initialCompletedOrders ?? []
+  );
+  // Feature 28A — kept alongside completedOrders, not instead of it: that array
+  // is the Builder's reporting model and every panel reads it, while this is
+  // what a RECEIPT is rendered from. Seeded from the same server load, and
+  // prepended by the same completeSale() that prepends the order.
+  const [completedReceipts, setCompletedReceipts] = useState<CompletedSaleReceipt[]>(
+    initialCompletedReceipts ?? []
   );
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
@@ -522,10 +533,15 @@ export default function EditorShell({
   // Derived rather than stored: openReceipt keeps setting selectedReceiptId
   // alone, so there is no second piece of state that could name a different
   // order than the overlay is actually showing.
+  //
+  // Feature 28A — and for an OLDER order it is now the canonical receipt loaded
+  // from the server rather than null. Falling back to null is what sent the
+  // overlay to the number-typed Receipt, which recomputed line totals; there is
+  // no longer any path on which a real sale renders from that model.
   const authoritativeReceipt =
     lastCompletedReceipt !== null && lastCompletedReceipt.orderId === selectedReceiptId
       ? lastCompletedReceipt
-      : null;
+      : completedReceipts.find((entry) => entry.orderId === selectedReceiptId) ?? null;
 
   // Feature 13.2 — the single call every persisted-data mutation makes.
   // Marks the project dirty and clears any stale error from a previous save
@@ -923,7 +939,7 @@ export default function EditorShell({
     const plan = planSaleSubmission({
       projectId,
       paymentMethod: selectedPaymentMethod,
-      tipAmount: cartSummary.tip,
+      tipAmount: cartSummary.tipAmount,
       cart,
       menuItems: projectConfig.menuItems,
       current: saleRequest,
@@ -940,7 +956,7 @@ export default function EditorShell({
     const { receipt, error } = await completeSaleOrderV3({
       projectId,
       paymentMethod: selectedPaymentMethod,
-      tipAmount: cartSummary.tip,
+      tipAmount: cartSummary.tipAmount,
       // Identifiers and quantities only — there is nowhere in this payload for
       // a client name, price, tax or total to sit.
       items: plan.items,
@@ -979,6 +995,10 @@ export default function EditorShell({
     const order: CompletedOrder = toCompletedOrder(receipt);
 
     setCompletedOrders((prev) => [order, ...prev]);
+    // Feature 28A — the canonical answer for the same sale, so reopening this
+    // receipt later in the session renders the server's strings rather than the
+    // projection above.
+    setCompletedReceipts((prev) => [receipt, ...prev]);
 
     // Feature 10.1/10.2/10.3 — so the Dashboard, Sales Report and Product
     // Performance all reflect this sale immediately, without a page reload or a
@@ -1831,7 +1851,6 @@ export default function EditorShell({
             saleSaveStatus={saleSaveStatus}
             saleSaveError={saleSaveError}
             completedOrders={completedOrders}
-            selectedReceiptId={selectedReceiptId}
             authoritativeReceipt={authoritativeReceipt}
             onOpenReceipt={openReceipt}
             onCloseReceipt={closeReceipt}
