@@ -1,4 +1,12 @@
 @import "tailwindcss";
+/* The POS Canvas website design system: palette, type scale, surfaces,
+   radii, focus treatment and the button/container patterns built from
+   them. Imported here rather than inlined so the tokens have one home and
+   this file stays what it has always been — app-wide base styles plus the
+   receipt print rules. Must come after "tailwindcss": Tailwind resolves
+   the @import itself, and the @theme block inside only generates
+   utilities once Tailwind is loaded. */
+@import "./design-system.css";
 
 :root {
   --background: #ffffff;
@@ -19,10 +27,18 @@
   }
 }
 
+/* NO font-family HERE, deliberately.
+   app/layout.tsx has loaded Geist since Feature 24.1 and the @theme block
+   above maps --font-sans to it, but this rule used to override the entire
+   document with `font-family: Arial, Helvetica, sans-serif` — so the font the
+   site declared was never the font the site rendered. With the declaration
+   gone, Tailwind's preflight rule on <html> (font-family: --theme(
+   --default-font-family, ...), which resolves through --font-sans) applies
+   Geist to every route, which is what the layout always intended. Setting it
+   here again in any form would reintroduce exactly that bug. */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
 }
 
 /* Feature 11.1 — printable receipt. Standard "print only this element"
@@ -61,6 +77,19 @@ body {
     max-width: 320px;
     margin: 0;
     padding: 12px;
+    /* Lane 3 Task 1 — PINNED, and the pin is the point.
+       Until this task the whole document inherited `Arial, Helvetica,
+       sans-serif` from body, printed receipts included. Fixing the website's
+       font (see the note on body above) would otherwise have re-set every
+       printed slip in Geist, changing glyph widths and therefore where lines
+       wrap on an 80mm roll. That is a change to what a customer is handed at
+       the counter, and it is not what this task was asked to change. The two
+       live checkout receipts (AuthoritativeReceipt, OfflineReceipt) set
+       `font-mono` themselves and are unaffected either way; this pin is what
+       keeps components/editor/Receipt.tsx — the historical reprint — printing
+       exactly as it did before. Descendants that declare their own family
+       still win, so the mono receipts are untouched. */
+    font-family: Arial, Helvetica, sans-serif;
   }
 
   /* Feature 25.5 — ONE receipt per print job, proven necessary on hardware-

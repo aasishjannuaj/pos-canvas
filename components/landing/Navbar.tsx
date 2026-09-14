@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import PosCanvasLockup from "@/components/brand/PosCanvasLockup";
 import {
   LANDING_SECTION_ANCHORS,
   getLandingPrimaryAction,
@@ -21,6 +22,36 @@ import {
 // authorization mechanism is introduced: this only decides which link to
 // render, never what the visitor may access — the proxy and RLS remain the
 // actual gates.
+//
+// Lane 3 Task 1 — PRESENTATION ONLY. The header draws itself from
+// app/design-system.css (cream ground, ink text, one teal primary action, one
+// focus ring) and shows the approved Concept D lockup instead of spelling the
+// product name out in the page font. The session read, the fallback, the two
+// action helpers and the anchors are untouched, because the defect this
+// component exists to prevent is a header that renders a destination nothing
+// can reach.
+//
+// THE RESPONSIVE BEHAVIOUR IS DELIBERATELY THE 1.2.0 BEHAVIOUR. The section
+// nav is hidden below md and shown from md up, exactly as the released header
+// did. An earlier draft of this task exposed those three destinations on
+// phones as a second row; that is a navigation UX CHANGE, it was not approved
+// as part of a design-system task, and it was withdrawn. Restyling what
+// already existed is in scope here; deciding what a phone visitor can reach
+// from the header is not. Adding a second row — or a disclosure menu — needs
+// its own approval.
+//
+// Any future mobile navigation work belongs in the gap this leaves, not in a
+// visual pass.
+
+// The in-page sections, taken from the shared anchor constants rather than
+// typed as literals, so a destination cannot drift away from the section that
+// renders it.
+const SECTION_LINKS = [
+  { label: "Templates", href: LANDING_SECTION_ANCHORS.templates },
+  { label: "Features", href: LANDING_SECTION_ANCHORS.features },
+  { label: "How It Works", href: LANDING_SECTION_ANCHORS.howItWorks },
+] as const;
+
 export default async function Navbar() {
   let isAuthenticated = false;
 
@@ -39,55 +70,32 @@ export default async function Navbar() {
   const signInAction = getLandingSignInAction();
 
   return (
-    <header className="sticky top-0 z-50 border-b border-neutral-200 bg-white/80 backdrop-blur-sm">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-        <Link
-          href="/"
-          className="text-lg font-semibold tracking-tight text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-        >
-          POS Canvas
+    <header className="sticky top-0 z-50 border-b border-hairline bg-brand-cream/85 backdrop-blur-md">
+      <div className="pc-container flex items-center justify-between gap-3 py-3 md:gap-6 md:py-4">
+        <Link href="/" className="pc-focusable inline-flex rounded-pc-sm">
+          <PosCanvasLockup size="md" priority />
         </Link>
 
-        <nav className="hidden items-center gap-8 md:flex">
-          <a
-            href={LANDING_SECTION_ANCHORS.templates}
-            className="text-sm text-neutral-600 transition-colors hover:text-neutral-900"
-          >
-            Templates
-          </a>
-
-          <a
-            href={LANDING_SECTION_ANCHORS.features}
-            className="text-sm text-neutral-600 transition-colors hover:text-neutral-900"
-          >
-            Features
-          </a>
-
-          <a
-            href={LANDING_SECTION_ANCHORS.howItWorks}
-            className="text-sm text-neutral-600 transition-colors hover:text-neutral-900"
-          >
-            How It Works
-          </a>
+        {/* md and up only — the released breakpoint, preserved. */}
+        <nav aria-label="Sections" className="hidden items-center gap-8 md:flex">
+          {SECTION_LINKS.map((link) => (
+            <a key={link.href} href={link.href} className="pc-navlink">
+              {link.label}
+            </a>
+          ))}
         </nav>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-none items-center gap-2 sm:gap-3">
           {/* Only shown when signed out: a signed-in visitor already has a
               session, so a Sign In link would be pointless (and the proxy
               would bounce them off /login back to /dashboard anyway). */}
           {!isAuthenticated && (
-            <Link
-              href={signInAction.href}
-              className="text-sm font-medium text-neutral-600 transition-colors hover:text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-            >
+            <Link href={signInAction.href} className="pc-navlink px-1 py-2 font-semibold">
               {signInAction.label}
             </Link>
           )}
 
-          <Link
-            href={primaryAction.href}
-            className="inline-flex items-center justify-center rounded-full bg-neutral-900 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-          >
+          <Link href={primaryAction.href} className="pc-button pc-button--primary">
             {primaryAction.label}
           </Link>
         </div>

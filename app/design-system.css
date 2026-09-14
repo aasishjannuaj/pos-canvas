@@ -1,0 +1,337 @@
+/* POS Canvas — the WEBSITE design system.
+   ==========================================================================
+   Lane 3 Task 1. One place for the values the public site is drawn from, so a
+   colour, a radius or a button treatment is a token here rather than a hex
+   typed into a component.
+
+   WHAT THIS IS NOT. This file styles the POS CANVAS PLATFORM — the marketing
+   site's own identity. It is not a customer's branding. A merchant's business
+   name, accent colour and logo live in ProjectConfig.branding, travel into a
+   published GeneratedPosConfig, and are rendered inside that merchant's till
+   (see lib/brand.ts for the full statement of the boundary, and
+   lib/brand.guards.test.ts for the guards that hold it). Nothing in this file
+   may be driven by project configuration, and no value here may be copied into
+   one.
+
+   THE PALETTE IS CONCEPT D, AND CONCEPT D IS TEMPORARY. assets/brand/README.md
+   records that the owner approved Concept D as the temporary production
+   identity, not as a final one. Every swatch below is transcribed from the
+   approved board — nothing is invented, recoloured or "improved". Two shades
+   are DERIVED rather than approved, and are labelled as such where they are
+   defined: they exist only because an accessible pressed state and an
+   accessible focus ring need a teal darker than the approved primary, and they
+   are the first things to revisit if the identity is replaced.
+
+   WHY TOKENS AND NOT UTILITY SOUP. Before this, Navbar and Hero each carried
+   their own literal `bg-blue-600` / `text-neutral-600` / focus-ring string, so
+   the site had no palette — it had repeated opinions. Tailwind v4 reads the
+   `@theme` block below and generates utilities from it (`bg-brand-teal`,
+   `text-ink`, `rounded-pc-lg`, `max-w-pc`), which means the token IS the
+   utility. There is no second copy of the palette in TypeScript, deliberately:
+   a second copy is a second thing to get wrong.
+
+   CONTRAST. Every text/background pairing used by the site is checked against
+   WCAG AA (4.5:1 for text, 3:1 for focus indicators). The one that constrains
+   the design is the primary teal: #0FA7A6 carries only 2.96:1 against white,
+   so white-on-teal is NOT available. Ink on teal is 6.97:1, which is why the
+   primary button is teal with ink text rather than teal with white text. */
+
+@theme {
+  /* --- Concept D, as approved (assets/brand/README.md) ------------------- */
+  --color-brand-teal: #0fa7a6; /* Primary — Vibrant Teal */
+  --color-brand-teal-bright: #2bcbc4; /* Teal 80% */
+  --color-brand-mint: #7fe6db; /* Mint 60% */
+  --color-brand-peach: #ffc7a3; /* Peach 40% */
+  --color-brand-coral: #ff7f68; /* Coral 20% */
+  --color-brand-blush: #ffe9de; /* Blush 10% */
+  --color-brand-cream: #fbf8f3; /* Board page / icon ground */
+  --color-brand-ink: #000119; /* Wordmark ink */
+
+  /* --- Derived teals. NOT on the approved board. ------------------------- */
+  /* The approved primary is too light to serve as a pressed state or as a
+     focus ring on cream. These are the same hue darkened until they clear the
+     thresholds: -pressed reaches 5.64:1 against ink (the primary button's own
+     label), -deep reaches 4.74:1 against cream, which covers both the 3:1 a
+     focus indicator needs and the 4.5:1 small teal text needs. */
+  --color-brand-teal-pressed: #0e9594;
+  --color-brand-teal-deep: #0b7c7b;
+
+  /* --- Text roles -------------------------------------------------------- */
+  --color-ink: var(--color-brand-ink); /* 17.9:1 on cream — headings, body */
+  --color-ink-muted: #575a68; /* 6.46:1 on cream — supporting copy */
+  --color-ink-subtle: #676a79; /* 5.06:1 on cream — labels, meta */
+  --color-ink-on-teal: var(--color-brand-ink); /* 6.97:1 on the primary teal */
+
+  /* --- Backgrounds and soft surfaces ------------------------------------- */
+  --color-surface: var(--color-brand-cream); /* the page itself */
+  --color-surface-raised: #ffffff; /* cards lifted off the page */
+  --color-surface-mint: #e0f4ee; /* approved mint at 22% over cream */
+  --color-surface-blush: var(--color-brand-blush);
+  --color-surface-peach: var(--color-brand-peach);
+
+  /* --- Borders ----------------------------------------------------------- */
+  --color-hairline: #e8e1d6; /* warm, so a border reads as paper not chrome */
+  --color-hairline-strong: #d6ccbd;
+  --color-hairline-teal: #b9e6e2; /* the resting edge of a secondary button */
+
+  /* --- Radii. Rounded, because the mark is. ------------------------------ */
+  --radius-pc-sm: 0.625rem;
+  --radius-pc-md: 1rem;
+  --radius-pc-lg: 1.5rem;
+  --radius-pc-xl: 2rem;
+  --radius-pc-pill: 9999px;
+
+  /* --- Shadows. Soft and low-contrast; nothing floats dramatically. ------ */
+  --shadow-pc-soft: 0 1px 2px rgb(0 1 25 / 0.04), 0 10px 24px -14px rgb(0 1 25 / 0.16);
+  --shadow-pc-lifted: 0 2px 4px rgb(0 1 25 / 0.05), 0 20px 44px -20px rgb(0 1 25 / 0.22);
+
+  /* --- Type scale. One family (Geist, loaded in app/layout.tsx); the
+         hierarchy is size, weight, colour and measure, not a second font.
+         Display and title use clamp() so the step down to a phone is part of
+         the scale rather than a pile of breakpoint overrides. --------------- */
+  --text-pc-display: clamp(2.25rem, 6.2vw, 3.75rem);
+  --text-pc-display--line-height: 1.04;
+  --text-pc-display--letter-spacing: -0.032em;
+
+  --text-pc-title: clamp(1.75rem, 3.8vw, 2.5rem);
+  --text-pc-title--line-height: 1.14;
+  --text-pc-title--letter-spacing: -0.022em;
+
+  --text-pc-lead: clamp(1.0625rem, 1rem + 0.4vw, 1.3125rem);
+  --text-pc-lead--line-height: 1.6;
+  --text-pc-lead--letter-spacing: -0.005em;
+
+  --text-pc-body: 1rem;
+  --text-pc-body--line-height: 1.65;
+
+  --text-pc-label: 0.9375rem;
+  --text-pc-label--line-height: 1.4;
+
+  --text-pc-meta: 0.8125rem;
+  --text-pc-meta--line-height: 1.45;
+
+  --text-pc-eyebrow: 0.75rem;
+  --text-pc-eyebrow--line-height: 1.2;
+  --text-pc-eyebrow--letter-spacing: 0.14em;
+
+  /* --- Containers -------------------------------------------------------- */
+  --container-pc: 72rem; /* the site's full measure */
+  --container-pc-narrow: 56rem; /* a centred hero column */
+  --container-pc-prose: 40rem; /* the widest a paragraph should get */
+}
+
+/* Rhythm and focus geometry. Plain custom properties rather than `@theme`
+   entries because these are not meant to become utilities — they are read by
+   the component classes below, and they change with the viewport, which a
+   generated utility could not do on its own. */
+:root {
+  --pc-gutter: 1.25rem;
+  --pc-section-y: 3.5rem;
+  --pc-focus-width: 2px;
+  --pc-focus-offset: 2px;
+}
+
+@media (min-width: 48rem) {
+  :root {
+    --pc-gutter: 2rem;
+    --pc-section-y: 5rem;
+  }
+}
+
+@media (min-width: 80rem) {
+  :root {
+    --pc-gutter: 2.5rem;
+    --pc-section-y: 6.5rem;
+  }
+}
+
+@layer components {
+  /* --- Layout ------------------------------------------------------------ */
+
+  .pc-container {
+    width: 100%;
+    max-width: var(--container-pc);
+    margin-inline: auto;
+    padding-inline: var(--pc-gutter);
+  }
+
+  .pc-section {
+    padding-block: var(--pc-section-y);
+  }
+
+  /* The hero carries the page's first impression and gets more air than the
+     sections under it — scaled from the same rhythm token rather than picked
+     independently, so the whole page still breathes together when the token
+     changes. */
+  .pc-section--hero {
+    padding-block: calc(var(--pc-section-y) * 1.4);
+  }
+
+  /* --- Focus -------------------------------------------------------------
+     ONE focus treatment for the whole site, and it is added, never removed.
+     `:focus-visible` leaves pointer users alone while keeping the keyboard
+     ring; the offset puts the ring on the page surface rather than on top of
+     a teal button, where a teal ring would be invisible. Every interactive
+     component class below inherits this rule, and `.pc-focusable` applies it
+     to anything else (a logo link, a wrapper) without restyling it. */
+
+  .pc-focusable:focus-visible,
+  .pc-button:focus-visible,
+  .pc-navlink:focus-visible,
+  .pc-textlink:focus-visible {
+    outline: var(--pc-focus-width) solid var(--color-brand-teal-deep);
+    outline-offset: var(--pc-focus-offset);
+  }
+
+  /* --- Buttons -----------------------------------------------------------
+     Two variants, because a call to action is either THE action or the way
+     past it. Both are pills with ink labels, so the difference a visitor sees
+     is weight of colour, not a different shape or a different typeface. */
+
+  .pc-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius-pc-pill);
+    padding: 0.5625rem 1.125rem;
+    font-size: var(--text-pc-label);
+    line-height: 1.25;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-align: center;
+    text-decoration: none;
+    white-space: nowrap;
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease,
+      box-shadow 150ms ease;
+  }
+
+  .pc-button--lg {
+    padding: 0.875rem 1.875rem;
+    font-size: 1.0625rem;
+  }
+
+  /* Teal ground, ink label: 6.97:1. Hover LIGHTENS to the approved Teal 80%
+     (10.18:1) rather than darkening, which keeps the friendly read and avoids
+     inventing a second dark shade. */
+  .pc-button--primary {
+    background-color: var(--color-brand-teal);
+    color: var(--color-ink-on-teal);
+    box-shadow: var(--shadow-pc-soft);
+  }
+
+  .pc-button--primary:hover {
+    background-color: var(--color-brand-teal-bright);
+  }
+
+  .pc-button--primary:active {
+    background-color: var(--color-brand-teal-pressed);
+    box-shadow: none;
+  }
+
+  .pc-button--secondary {
+    background-color: var(--color-surface-raised);
+    color: var(--color-ink);
+    border-color: var(--color-hairline-teal);
+  }
+
+  .pc-button--secondary:hover {
+    background-color: var(--color-surface-mint);
+    border-color: var(--color-brand-teal);
+  }
+
+  .pc-button--secondary:active {
+    background-color: #cfece4;
+  }
+
+  /* --- Links -------------------------------------------------------------- */
+
+  .pc-navlink {
+    color: var(--color-ink-muted);
+    font-size: var(--text-pc-label);
+    font-weight: 500;
+    text-decoration: none;
+    transition: color 150ms ease;
+  }
+
+  .pc-navlink:hover {
+    color: var(--color-ink);
+  }
+
+  .pc-textlink {
+    color: var(--color-brand-teal-deep);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+    transition: color 150ms ease;
+  }
+
+  .pc-textlink:hover {
+    color: var(--color-ink);
+  }
+
+  /* --- Surfaces ----------------------------------------------------------- */
+
+  .pc-card {
+    background-color: var(--color-surface-raised);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-pc-lg);
+    box-shadow: var(--shadow-pc-soft);
+  }
+
+  .pc-card--flat {
+    box-shadow: none;
+  }
+
+  /* A soft, tinted panel for secondary content — mint/blush/cream rather than
+     another white card, so the palette does the separating. */
+  .pc-panel {
+    background-color: var(--color-surface-mint);
+    border: 1px solid var(--color-hairline-teal);
+    border-radius: var(--radius-pc-lg);
+  }
+
+  /* --- Typography helpers -------------------------------------------------
+     Only the patterns that repeat. Headings and paragraphs use the `text-pc-*`
+     utilities the scale generates; these two exist because an eyebrow and a
+     chip each bundle four or five declarations that would otherwise be retyped
+     everywhere they appear. */
+
+  .pc-eyebrow {
+    display: inline-block;
+    color: var(--color-brand-teal-deep); /* 4.74:1 on cream */
+    font-size: var(--text-pc-eyebrow);
+    line-height: var(--text-pc-eyebrow--line-height);
+    letter-spacing: var(--text-pc-eyebrow--letter-spacing);
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .pc-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    background-color: var(--color-surface-raised);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-pc-pill);
+    padding: 0.3125rem 0.75rem;
+    color: var(--color-ink-muted);
+    font-size: var(--text-pc-meta);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+/* Colour transitions are the only motion this system has, and a visitor who
+   asks for less motion gets none of it. */
+@media (prefers-reduced-motion: reduce) {
+  .pc-button,
+  .pc-navlink,
+  .pc-textlink {
+    transition: none;
+  }
+}
