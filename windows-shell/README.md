@@ -315,7 +315,7 @@ catastrophic inside a customer-installable artifact.
 ### Running a build
 
 1. GitHub → **Actions** → **Windows app** → **Run workflow** → branch `main` → **Run workflow**.
-2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.1.0`**.
+2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.2.0`**.
 3. It contains two files:
    - `POS-Canvas-Windows-v1.1.0.exe`
    - `POS-Canvas-Windows-v1.1.0.exe.sha256`
