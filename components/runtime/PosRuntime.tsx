@@ -885,8 +885,13 @@ export default function PosRuntime({
           height 693 in both. */}
       <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white">
+          {/* v1.3 Lane 2 Task 2 — templateId selects a presentation variant
+              (see components/editor/pos-layouts/index.tsx). It is already on
+              the pinned GeneratedPosConfig contract, so this adds no field,
+              no fetch and no persisted state. */}
           <ProductBrowser
             layout={config.project.layout}
+            templateId={config.project.templateId}
             menuItems={menuItems}
             selectedItemId={null}
             editorMode="preview"

@@ -6,13 +6,28 @@ import type { MenuItem } from "@/lib/projectConfig";
 import type { CartModifierSelection } from "@/lib/cart";
 import { normalizeModifierGroups } from "@/lib/modifiers";
 import ModifierSelector from "@/components/runtime/ModifierSelector";
+import { LIQUOR_STORE_TEMPLATE_ID } from "./shared";
 import type { ProductBrowserProps } from "./shared";
+import LiquorStoreBrowser from "./LiquorStoreBrowser";
 import MenuGridBrowser from "./MenuGridBrowser";
 import ProductGridBrowser from "./ProductGridBrowser";
 import ServiceGridBrowser from "./ServiceGridBrowser";
 
 type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
   layout: PosLayout;
+  /**
+   * v1.3 Lane 2 Task 2 — the project's template identity, used to pick a
+   * PRESENTATION variant within a layout family.
+   *
+   * Already carried by GeneratedPosConfig.project.templateId and already a prop
+   * on EditorShell, so nothing new is fetched, stored or persisted to obtain
+   * it — and deliberately NOT a new PosLayout value, because layout is part of
+   * the generated config's canonical hash and a new one would change the hash
+   * of every existing liquor-store project for a purely visual change.
+   *
+   * Optional so an omitting caller keeps today's exact layout-only behavior.
+   */
+  templateId?: string;
   // Feature 18.2 — hosts receive the chosen selections alongside the item.
   // Omitted for a product with no modifier groups, so existing callers that
   // ignore the second argument keep working unchanged.
@@ -32,6 +47,7 @@ type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
 // same pattern React already treats as a stable update, not a remount.
 export default function ProductBrowser({
   layout,
+  templateId,
   ...props
 }: ProductBrowserSwitchProps) {
   // Feature 18.2 — the single shared interception point.
@@ -62,6 +78,14 @@ export default function ProductBrowser({
   const layoutProps = { ...props, onAddToCart: handleAddToCart };
 
   const browser = (() => {
+    // v1.3 Lane 2 Task 2 — presentation variants are chosen BEFORE the layout
+    // family, and only ever add a branch; the switch below is untouched, so
+    // retail (also product-grid) still resolves to ProductGridBrowser and an
+    // unknown or legacy templateId simply falls through to today's behavior.
+    if (templateId === LIQUOR_STORE_TEMPLATE_ID) {
+      return <LiquorStoreBrowser {...layoutProps} />;
+    }
+
     switch (layout) {
       case "product-grid":
         return <ProductGridBrowser {...layoutProps} />;

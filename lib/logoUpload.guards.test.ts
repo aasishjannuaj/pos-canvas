@@ -392,7 +392,12 @@ describe("scope stays where it was locked", () => {
   });
 
   it("no per-template logo code exists", () => {
-    for (const layout of ["MenuGridBrowser", "ProductGridBrowser", "ServiceGridBrowser"]) {
+    for (const layout of [
+      "MenuGridBrowser",
+      "ProductGridBrowser",
+      "ServiceGridBrowser",
+      "LiquorStoreBrowser",
+    ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("logo");
     }
@@ -604,7 +609,12 @@ describe("the enlargement is global, not per template", () => {
   it("no POS layout grew a header of its own", () => {
     // Unchanged Feature 19 invariant, restated here because this task is the
     // first time the header's appearance has been touched since.
-    for (const layout of ["MenuGridBrowser", "ProductGridBrowser", "ServiceGridBrowser"]) {
+    for (const layout of [
+      "MenuGridBrowser",
+      "ProductGridBrowser",
+      "ServiceGridBrowser",
+      "LiquorStoreBrowser",
+    ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("<header");
       expect(source).not.toContain("PosHeader");

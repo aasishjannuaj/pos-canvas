@@ -1856,6 +1856,7 @@ export default function EditorShell({
             onCloseReceipt={closeReceipt}
             lastCompletedOrderId={lastCompletedOrderId}
             layout={layout}
+            templateId={templateId}
           />
         )}
         <EditorPropertiesPanel
