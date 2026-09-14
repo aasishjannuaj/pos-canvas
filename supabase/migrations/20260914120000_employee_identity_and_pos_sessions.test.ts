@@ -531,6 +531,48 @@ describe("login failures are generic", () => {
     );
   });
 
+  it("resolves the device BEFORE judging the PIN, so the attempt has somewhere to land", () => {
+    // Ordering is the whole mechanism. If the shape check ran before the device
+    // was resolved there would be no row to increment and the ladder would
+    // never advance — which is precisely the weakness
+    // device_pairing_tokens.attempt_count documents about itself.
+    const loginBlock = executable.slice(
+      executable.indexOf("create or replace function public.employee_login(p_pin text)"),
+      executable.indexOf("revoke all on function public.employee_login(text) from public;")
+    );
+
+    const deviceResolved = loginBlock.indexOf("for update;");
+    const attemptsRowEnsured = loginBlock.indexOf("insert into public.employee_login_attempts");
+    const lockChecked = loginBlock.indexOf("'error', 'locked_out'");
+    const pinShapeJudged = loginBlock.indexOf("p_pin !~ '^[0-9]{4,6}$'");
+
+    for (const position of [deviceResolved, attemptsRowEnsured, lockChecked, pinShapeJudged]) {
+      expect(position).toBeGreaterThan(-1);
+    }
+
+    expect(deviceResolved).toBeLessThan(attemptsRowEnsured);
+    expect(attemptsRowEnsured).toBeLessThan(lockChecked);
+    expect(lockChecked).toBeLessThan(pinShapeJudged);
+  });
+
+  it("a malformed PIN reaches the same counter as a wrong one", () => {
+    // All three failure exits call the one helper that increments and may lock.
+    const loginBlock = executable.slice(
+      executable.indexOf("create or replace function public.employee_login(p_pin text)"),
+      executable.indexOf("revoke all on function public.employee_login(text) from public;")
+    );
+
+    const malformedExit = loginBlock.indexOf("p_pin !~ '^[0-9]{4,6}$'");
+    const noteAfterMalformed = loginBlock.indexOf(
+      "public.employee_login_note_failure(v_device.id, v_now)",
+      malformedExit
+    );
+
+    expect(noteAfterMalformed).toBeGreaterThan(malformedExit);
+    // Nothing returns invalid_credentials directly, bypassing the counter.
+    expect(loginBlock).not.toContain("'error', 'invalid_credentials'");
+  });
+
   it("never trims or coerces a PIN into validity", () => {
     expect(executable).not.toContain("btrim(p_pin");
     expect(executable).not.toContain("trim(p_pin");

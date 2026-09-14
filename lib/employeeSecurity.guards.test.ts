@@ -232,6 +232,75 @@ describe("the device RPC surface is exactly three calls", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The client decides nothing about an authentication attempt
+// ---------------------------------------------------------------------------
+
+describe("a submitted login attempt is never refused locally", () => {
+  // lib/employee.rpc.test.ts proves this behaviourally. These are the
+  // structural half: they fail on the SHAPE of a short-circuit even if someone
+  // writes one that the behavioural tests' input list happens not to cover.
+  const body = code(read(RPC_FILE)).slice(
+    code(read(RPC_FILE)).indexOf("export async function employeeLogin"),
+    code(read(RPC_FILE)).indexOf("export async function fetchCurrentEmployeeSession")
+  );
+
+  it("employeeLogin goes straight to the RPC with no guard clause in front", () => {
+    const opening = body.slice(0, body.indexOf(".rpc("));
+
+    // Between the signature and the call there is a `try {` and nothing else.
+    // Any `if (...) return` before the RPC is a local verdict on an attempt the
+    // server must both answer and COUNT: employee_login resolves the active
+    // device first, so a malformed PIN advances the lockout ladder, and a
+    // client that filtered those out would restore unlimited free probing.
+    expect(opening).not.toMatch(/\breturn\b/);
+    expect(opening.replace(/\s/g, "")).toContain("{try{");
+  });
+
+  it("employeeLogin does not consult the shape helper at all", () => {
+    // The helper stays exported for keypad affordance. It must not gate a
+    // submitted attempt, so this module no longer imports it.
+    expect(code(read(RPC_FILE))).not.toContain("isValidEmployeePinShape");
+  });
+
+  it("nothing repairs the value before transmission", () => {
+    for (const mutation of [
+      "pin.trim()",
+      "pin.padStart",
+      "pin.padEnd",
+      "pin.replace",
+      "pin.slice",
+      "pin.normalize",
+      "String(pin).trim",
+    ]) {
+      expect(body).not.toContain(mutation);
+    }
+
+    expect(body).toContain("p_pin: pin,");
+  });
+
+  it("NEGATIVE CONTROL: the guard-clause ban detects a reinstated short-circuit", () => {
+    const mutated = body.replace(
+      "  try {",
+      "  if (!isValidEmployeePinShape(pin)) {\n    return fail();\n  }\n\n  try {"
+    );
+    const opening = mutated.slice(0, mutated.indexOf(".rpc("));
+
+    expect(opening).toMatch(/\breturn\b/);
+  });
+
+  it("NEGATIVE CONTROL: the repair ban detects a trim", () => {
+    const mutated = body.replace("p_pin: pin,", "p_pin: pin.trim(),");
+
+    expect(mutated).toContain("pin.trim()");
+  });
+
+  it("the pure helper survives for presentation use", () => {
+    // Requirement: it may remain, but no guard may require a short-circuit.
+    expect(code(read(PURE_FILE))).toContain("export function isValidEmployeePinShape");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Error discipline
 // ---------------------------------------------------------------------------
 

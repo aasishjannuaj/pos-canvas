@@ -34,7 +34,6 @@ import { classifyDeviceFailure } from "@/lib/deviceConnectivity";
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import {
   getEmployeeLoginErrorMessage,
-  isValidEmployeePinShape,
   parseCurrentEmployeeSessionResult,
   parseEmployeeLoginResult,
   parseEmployeeLogoutResult,
@@ -114,20 +113,30 @@ function failure(code: "offline" | "unavailable"): UnreachedFailure {
  * there is no separate switch call to make and no window in which the till has
  * two operators.
  *
- * THE SHAPE CHECK IS NOT AUTHORIZATION. A locally malformed PIN is refused here
- * to save a round trip, with the SAME message the server would have returned —
- * but the server counts a malformed PIN as a failed attempt, and short-circuit
- * or not, nothing about who may sign in is decided on this side of the wire.
+ * EVERY SUBMITTED ATTEMPT REACHES THE SERVER, MALFORMED OR NOT, AND THAT IS THE
+ * WHOLE POINT OF THIS FUNCTION'S SHAPE.
+ *
+ * An earlier version short-circuited on isValidEmployeePinShape and returned
+ * `invalid_credentials` without calling the RPC. It looked like a free round
+ * trip saved. It was actually the client deciding the outcome of an
+ * authentication attempt, and it silently disabled the one defence that makes a
+ * 4-6 digit PIN survivable: employee_login resolves the active device FIRST,
+ * then counts a malformed PIN as a failed attempt through
+ * employee_login_note_failure, which is what drives the lockout ladder. A till
+ * that filtered those attempts out locally would let an attacker probe
+ * indefinitely at zero cost to their failure counter — and would report
+ * "not recognised" for a submission the server never saw and never recorded.
+ *
+ * So: NO TRIMMING, NO PADDING, NO NORMALIZATION, NO LOCAL REFUSAL. "123",
+ * "1234567", "12a4", " 1234" and "1234 " are all transmitted exactly as the
+ * operator submitted them. The server returns the same generic
+ * `invalid_credentials` and records the attempt.
+ *
+ * isValidEmployeePinShape remains available for the keypad to grey out a Submit
+ * button or colour a field. That is presentation. Once an attempt is SUBMITTED,
+ * it belongs to the server.
  */
 export async function employeeLogin(pin: string): Promise<EmployeeLoginResult> {
-  if (!isValidEmployeePinShape(pin)) {
-    return {
-      ok: false,
-      error: "invalid_credentials",
-      message: getEmployeeLoginErrorMessage("invalid_credentials"),
-    };
-  }
-
   try {
     const { data, error, status } = await getDeviceSupabaseClient().rpc("employee_login", {
       p_pin: pin,
