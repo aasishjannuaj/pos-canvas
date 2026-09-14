@@ -400,6 +400,171 @@ describe("function privileges", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// service_role EXECUTE must be revoked EXPLICITLY, not assumed away
+//
+// WHY THIS BLOCK EXISTS. The first staging apply aborted on this migration's own
+// A7 assertion: `revoke all on function ... from public` removes the IMPLICIT
+// grant every function gets, but Supabase's ALTER DEFAULT PRIVILEGES on this
+// schema also gives each new function an EXPLICIT service_role ACL entry
+// ({postgres=X/postgres,anon=X/...,authenticated=X/...,service_role=X/...}),
+// which survives that revoke. The assertion was correct; the revokes were
+// incomplete. These tests make the omission impossible to reintroduce.
+// ---------------------------------------------------------------------------
+
+describe("every public RPC explicitly revokes service_role EXECUTE", () => {
+  /** Exact identity signatures, as the revoke statements must spell them. */
+  const PUBLIC_SIGNATURES = [
+    "public.employee_login(text)",
+    "public.get_current_employee_session()",
+    "public.employee_logout()",
+    "public.create_employee(uuid, text, text, text)",
+    "public.list_employees(uuid)",
+    "public.set_employee_active(uuid, boolean)",
+    "public.set_employee_pin(uuid, text)",
+  ] as const;
+
+  it("covers all seven public RPCs and nothing is missing from the list", () => {
+    expect(PUBLIC_SIGNATURES.length).toBe(PUBLIC_FUNCTIONS.length);
+
+    for (const fn of PUBLIC_FUNCTIONS) {
+      expect(PUBLIC_SIGNATURES.some((sig) => sig.startsWith(`public.${fn}(`))).toBe(true);
+    }
+  });
+
+  for (const sig of PUBLIC_SIGNATURES) {
+    it(`${sig} revokes from service_role`, () => {
+      expect(executable).toContain(`revoke all on function ${sig} from service_role;`);
+    });
+
+    it(`${sig} revokes public and anon, and still grants authenticated`, () => {
+      expect(executable).toContain(`revoke all on function ${sig} from public;`);
+      expect(executable).toContain(`revoke all on function ${sig} from anon;`);
+      expect(executable).toContain(`grant execute on function ${sig} to authenticated;`);
+      expect(executable).not.toContain(`grant execute on function ${sig} to anon;`);
+      expect(executable).not.toContain(`grant execute on function ${sig} to service_role;`);
+    });
+
+    it(`${sig} revokes in the house order, before the grant`, () => {
+      // public -> anon -> service_role -> grant, matching complete_sale_v4 and
+      // unpair_own_device. A revoke placed AFTER the grant would undo it.
+      const iPublic = executable.indexOf(`revoke all on function ${sig} from public;`);
+      const iAnon = executable.indexOf(`revoke all on function ${sig} from anon;`);
+      const iService = executable.indexOf(`revoke all on function ${sig} from service_role;`);
+      const iGrant = executable.indexOf(`grant execute on function ${sig} to authenticated;`);
+
+      expect(iPublic).toBeLessThan(iAnon);
+      expect(iAnon).toBeLessThan(iService);
+      expect(iService).toBeLessThan(iGrant);
+    });
+  }
+
+  it("exactly seven public-RPC service_role revokes exist — no more, no fewer", () => {
+    const all = executable.match(/revoke all on function public\.\w+\([^)]*\) from service_role;/g) ?? [];
+
+    // Seven public RPCs plus the five private helpers, which already had theirs.
+    expect(all.length).toBe(12);
+
+    const publicOnes = all.filter((line) =>
+      PUBLIC_SIGNATURES.some((sig) => line.includes(sig))
+    );
+
+    expect(publicOnes.length).toBe(7);
+  });
+
+  it("the five private helpers stay executable by nobody", () => {
+    for (const fn of PRIVATE_FUNCTIONS) {
+      for (const role of ["public", "anon", "authenticated", "service_role"]) {
+        expect(executable).toMatch(
+          new RegExp(`revoke all on function public\\.${fn}\\([^)]*\\) from ${role};`)
+        );
+      }
+
+      expect(executable).not.toMatch(new RegExp(`grant execute on function public\\.${fn}\\(`));
+    }
+  });
+
+  it("the A7 apply-time assertion is still present and unweakened", () => {
+    // The check that caught this must survive the fix verbatim. If a future
+    // edit ever "fixes" a failure by deleting the assertion instead of the
+    // cause, this fails.
+    expect(executable).toContain(
+      "if has_function_privilege('service_role', v_oid, 'EXECUTE') then"
+    );
+    expect(executable).toContain(
+      "raise exception 'F1A: service_role receives no speculative privilege on %', v_fn;"
+    );
+    expect(executable).toContain("if has_function_privilege('anon', v_oid, 'EXECUTE') then");
+    expect(executable).toContain(
+      "if not has_function_privilege('authenticated', v_oid, 'EXECUTE') then"
+    );
+  });
+
+  it("NEGATIVE CONTROL: dropping any ONE of the seven revokes is detected", () => {
+    // The real regression, applied one signature at a time. Each mutation must
+    // break the per-signature guard AND the count guard.
+    for (const sig of PUBLIC_SIGNATURES) {
+      const line = `revoke all on function ${sig} from service_role;\n`;
+      const mutated = executable.replace(line, "");
+
+      expect(mutated).not.toContain(`revoke all on function ${sig} from service_role;`);
+
+      const remaining =
+        mutated.match(/revoke all on function public\.\w+\([^)]*\) from service_role;/g) ?? [];
+
+      expect(remaining.length).toBe(11);
+    }
+  });
+
+  it("NEGATIVE CONTROL: a revoke moved after the grant is detected", () => {
+    const sig = "public.employee_login(text)";
+    const revoke = `revoke all on function ${sig} from service_role;\n`;
+    const grant = `grant execute on function ${sig} to authenticated;`;
+
+    const mutated = executable.replace(revoke, "").replace(grant, `${grant}\n${revoke.trim()}`);
+
+    expect(mutated.indexOf(`revoke all on function ${sig} from service_role;`)).toBeGreaterThan(
+      mutated.indexOf(grant)
+    );
+  });
+
+  it("records why the explicit revoke is required, so it is not pruned as noise", () => {
+    expect(sql).toContain("THE SAME HAZARD APPLIES TO FUNCTIONS");
+    expect(sql).toContain("ALTER DEFAULT PRIVILEGES");
+    expect(sql).toContain("service_role=X/postgres");
+  });
+
+  it("no legacy function's ACL is touched by this migration", () => {
+    // The 18 pre-existing public functions that grant service_role EXECUTE on
+    // staging are a separate, deliberately out-of-scope backlog item.
+    const legacy = [
+      "resolve_sale_owner",
+      "get_device_config",
+      "get_device_pairing_state",
+      "redeem_device_pairing_token",
+      "revoke_paired_device",
+      "create_device_pairing_token",
+      "cancel_device_pairing_token",
+      "restock_inventory",
+      "adjust_inventory",
+      "claim_next_build_job",
+      "complete_build_job",
+      "fail_build_job",
+      "heartbeat_build_job",
+      "finalize_build_job_with_artifact",
+      "build_jobs_guard_immutable_columns",
+      "build_artifacts_guard_immutable_updates",
+      "paired_devices_guard_immutable_columns",
+      "set_build_jobs_updated_at",
+    ];
+
+    for (const fn of legacy) {
+      expect(executable).not.toContain(`revoke all on function public.${fn}(`);
+      expect(executable).not.toContain(`grant execute on function public.${fn}(`);
+    }
+  });
+});
+
 describe("every new function is SECURITY DEFINER with a locked search_path", () => {
   for (const fn of [...PUBLIC_FUNCTIONS, ...PRIVATE_FUNCTIONS]) {
     it(fn, () => {

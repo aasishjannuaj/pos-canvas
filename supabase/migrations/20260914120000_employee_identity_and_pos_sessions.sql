@@ -456,6 +456,24 @@ comment on table public.employee_login_attempts is
 -- own authenticated session, and including service_role, which receives nothing
 -- speculative. RLS is enabled anyway as defence in depth, with zero policies,
 -- so even a future accidental grant still yields zero rows.
+--
+-- THE SAME HAZARD APPLIES TO FUNCTIONS, and it is easy to miss because it looks
+-- like the ordinary PUBLIC-EXECUTE default and is not.
+--
+-- Supabase's ALTER DEFAULT PRIVILEGES on this schema reads
+--   {postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}
+-- for functions, so a new function is BORN with an EXPLICIT service_role ACL
+-- entry -- not merely the implicit grant to PUBLIC that every function gets.
+-- `revoke all ... from public` removes the implicit one and leaves the explicit
+-- one standing, so a function revoked only from public and anon still answers
+-- true to has_function_privilege('service_role', ..., 'EXECUTE').
+--
+-- This was not theoretical: the first staging apply of this migration aborted on
+-- its own A7 assertion for exactly this reason, having asserted a posture it had
+-- not established. Every function below therefore revokes from service_role
+-- explicitly, matching complete_sale_v4, unpair_own_device and the rest of the
+-- house pattern. The assertion was right and is unchanged; the revokes were
+-- incomplete.
 -- ----------------------------------------------------------------------------
 alter table public.employees enable row level security;
 alter table public.employee_pos_sessions enable row level security;
@@ -709,6 +727,7 @@ $function$;
 
 revoke all on function public.employee_login(text) from public;
 revoke all on function public.employee_login(text) from anon;
+revoke all on function public.employee_login(text) from service_role;
 grant execute on function public.employee_login(text) to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -787,6 +806,7 @@ $function$;
 
 revoke all on function public.get_current_employee_session() from public;
 revoke all on function public.get_current_employee_session() from anon;
+revoke all on function public.get_current_employee_session() from service_role;
 grant execute on function public.get_current_employee_session() to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -844,6 +864,7 @@ $function$;
 
 revoke all on function public.employee_logout() from public;
 revoke all on function public.employee_logout() from anon;
+revoke all on function public.employee_logout() from service_role;
 grant execute on function public.employee_logout() to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -1026,6 +1047,7 @@ $function$;
 
 revoke all on function public.create_employee(uuid, text, text, text) from public;
 revoke all on function public.create_employee(uuid, text, text, text) from anon;
+revoke all on function public.create_employee(uuid, text, text, text) from service_role;
 grant execute on function public.create_employee(uuid, text, text, text) to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -1093,6 +1115,7 @@ $function$;
 
 revoke all on function public.list_employees(uuid) from public;
 revoke all on function public.list_employees(uuid) from anon;
+revoke all on function public.list_employees(uuid) from service_role;
 grant execute on function public.list_employees(uuid) to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -1182,6 +1205,7 @@ $function$;
 
 revoke all on function public.set_employee_active(uuid, boolean) from public;
 revoke all on function public.set_employee_active(uuid, boolean) from anon;
+revoke all on function public.set_employee_active(uuid, boolean) from service_role;
 grant execute on function public.set_employee_active(uuid, boolean) to authenticated;
 
 -- ----------------------------------------------------------------------------
@@ -1248,6 +1272,7 @@ $function$;
 
 revoke all on function public.set_employee_pin(uuid, text) from public;
 revoke all on function public.set_employee_pin(uuid, text) from anon;
+revoke all on function public.set_employee_pin(uuid, text) from service_role;
 grant execute on function public.set_employee_pin(uuid, text) to authenticated;
 
 -- ----------------------------------------------------------------------------
