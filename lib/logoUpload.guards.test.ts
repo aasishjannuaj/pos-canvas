@@ -448,3 +448,166 @@ describe("a failed upload cannot disturb the existing logo", () => {
     expect(shell).toContain("Save this project before uploading a logo.");
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.3 Lane 2 Task 1 — the enlarged shared header
+// ---------------------------------------------------------------------------
+//
+// This repository has no DOM environment or React Testing Library (verified:
+// no testing-library dependency; vitest.config.ts runs environment: "node"),
+// so header geometry is asserted at the source level exactly as
+// components/runtime/PosRuntime.layout.test.ts does for the Android layout
+// fix. These guards cannot prove the header LOOKS right — that was verified by
+// hand on each surface — but they do prove the specific regressions that would
+// silently undo it: a crop mode, a stretch, a dropped breakpoint, or the
+// per-template branch this change exists to avoid.
+describe("the shared POS header renders a contained, undistorted logo", () => {
+  const header = code(read(HEADER));
+
+  // The <img ... /> element, isolated so an assertion about the logo cannot
+  // accidentally pass or fail on markup belonging to the business name.
+  const logoImg = header.slice(header.indexOf("<img"), header.indexOf("/>", header.indexOf("<img")));
+
+  it("contains the logo with object-contain", () => {
+    expect(logoImg).toContain("object-contain");
+  });
+
+  for (const banned of ["object-cover", "w-full", "h-full", "object-fill", "aspect-"]) {
+    it(`never crops or stretches the logo with ${banned}`, () => {
+      // Each of these reintroduces a crop or a distortion: object-cover and
+      // object-fill directly, w-full/h-full by overriding the max-only sizing,
+      // aspect-* by forcing a box the source does not fit.
+      expect(logoImg).not.toContain(banned);
+    });
+  }
+
+  it("takes its sizing from the shared geometry table, not from ad-hoc classes", () => {
+    // The caps have to differ by viewport, so they live in SIZES rather than
+    // inline here. This is the join between the two.
+    expect(logoImg).toContain("${sizing.logo}");
+    expect(logoImg).toContain("w-auto");
+  });
+
+  it("sizes the logo with max-only constraints, so a tiny mark is never upscaled", () => {
+    // max-* can only ever shrink. A 48x16 logo therefore renders at 48x16
+    // rather than being blown up to the cap and going soft. A width/height
+    // FLOOR anywhere in these strings would break exactly that.
+    const table = header.slice(header.indexOf("const SIZES"), header.indexOf("} as const;"));
+    const logoRules = [...table.matchAll(/logo:\s*"([^"]*)"/g)].map((match) => match[1]);
+
+    expect(logoRules.length).toBe(2); // full and compact
+
+    for (const rule of logoRules) {
+      expect(rule).toMatch(/\bmax-h-\[/);
+      expect(rule).toMatch(/\bmax-w-\[/);
+
+      for (const token of rule.split(/\s+/)) {
+        // Strip any responsive prefix before judging the utility itself.
+        const utility = token.slice(token.lastIndexOf(":") + 1);
+        expect(utility.startsWith("max-h-") || utility.startsWith("max-w-")).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the intrinsic width/height attributes that reserve the box", () => {
+    // Without these the business name jumps sideways when the bytes arrive.
+    expect(logoImg).toContain("width={branding.logo.width}");
+    expect(logoImg).toContain("height={branding.logo.height}");
+  });
+
+  it("still hides a broken image and keeps the business name", () => {
+    // The no-logo and failed-logo presentations must remain the same one.
+    expect(logoImg).toContain("onError={() => setLogoFailed(true)}");
+    expect(header).toContain(
+      "showLogo = branding.logo !== undefined && logoUrl !== null && !logoFailed"
+    );
+    expect(header).toContain("{businessName}");
+  });
+});
+
+describe("the approved header geometry survives", () => {
+  const header = code(read(HEADER));
+
+  it("uses a min-height, never a fixed height that could clip a tall logo", () => {
+    expect(header).toContain("min-h-[68px]");
+    expect(header).toContain("md:min-h-20");
+    expect(header).toContain("min-h-[60px]");
+    // `h-16` was the fixed bar this replaced; a bare h-* on the header is the
+    // exact regression that would start cropping.
+    expect(header).not.toMatch(/"[^"]*\bh-16\b/);
+  });
+
+  it("caps the logo smaller below md than at md and above", () => {
+    // The 411px Android till cannot afford the register's 224px logo box: it
+    // would leave the business name under ~90px. Dropping either breakpoint
+    // half is a real regression on a real device, not a style preference.
+    expect(header).toContain("max-h-[44px]");
+    expect(header).toContain("max-w-[132px]");
+    expect(header).toContain("md:max-h-[56px]");
+    expect(header).toContain("md:max-w-[224px]");
+  });
+
+  it("keeps the Builder's compact header on its own smaller caps", () => {
+    expect(header).toContain("max-h-[40px]");
+    expect(header).toContain("max-w-[120px]");
+  });
+
+  it("scales the business name with the bar and keeps it truncating", () => {
+    expect(header).toContain("text-base md:text-xl");
+    expect(header).toContain("text-[15px]");
+    // truncate + min-w-0 on the parent is what stops a long name pushing the
+    // trailing control (Back to Dashboard / OperatorMenu) off-screen.
+    expect(header).toContain("truncate");
+    expect(header).toContain("min-w-0");
+  });
+
+  it("separates the brand block from the trailing control", () => {
+    expect(header).toContain("justify-between");
+    expect(header).toMatch(/\bgap-3\b/);
+    expect(header).toContain("md:gap-4");
+  });
+
+  it("keeps the bar unshrinkable inside the runtime's flex column", () => {
+    expect(header).toContain("flex-none");
+  });
+
+  it("builds every class as a complete literal Tailwind can scan", () => {
+    // A class assembled by concatenation (e.g. `max-h-[${n}px]`) is not
+    // emitted by Tailwind's scanner and silently renders unstyled.
+    expect(header).not.toMatch(/["`][^"`]*(?:max-h|max-w|min-h|text)-\[\$\{/);
+  });
+});
+
+describe("the enlargement is global, not per template", () => {
+  const header = code(read(HEADER));
+
+  it("the shared header branches on no template identity whatsoever", () => {
+    // The whole point of doing this in PosHeader: all six templates and every
+    // future one get the same logo treatment. A branch here would be the
+    // beginning of exactly the per-template drift Feature 19 removed.
+    for (const forbidden of [
+      "templateId",
+      "template_id",
+      "layout",
+      "liquor",
+      "restaurant",
+      "cafe",
+      "retail",
+      "salon",
+      "foodTruck",
+      "food-truck",
+    ]) {
+      expect(header.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it("no POS layout grew a header of its own", () => {
+    // Unchanged Feature 19 invariant, restated here because this task is the
+    // first time the header's appearance has been touched since.
+    for (const layout of ["MenuGridBrowser", "ProductGridBrowser", "ServiceGridBrowser"]) {
+      const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
+      expect(source).not.toContain("<header");
+      expect(source).not.toContain("PosHeader");
+    }
+  });
+});
