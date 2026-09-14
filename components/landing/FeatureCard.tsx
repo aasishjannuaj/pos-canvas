@@ -4,20 +4,28 @@ type FeatureCardProps = {
   description: string;
 };
 
+// Lane 3 Task 2 — the same card, drawn from the design system. The icon sits
+// on a mint tile rather than a grey one, the surface and radius come from
+// `.pc-card`, and the type comes from the scale. The icon is decorative: it
+// repeats the title and nothing more, so it is hidden from assistive
+// technology rather than announced as an emoji name.
 export default function FeatureCard({
   icon,
   title,
   description,
 }: FeatureCardProps) {
   return (
-    <div className="flex flex-col items-start gap-4 rounded-2xl border border-neutral-200 bg-white p-8">
-      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-neutral-100 text-2xl">
+    <div className="pc-card flex flex-col items-start gap-4 p-6">
+      <span
+        aria-hidden="true"
+        className="flex h-12 w-12 flex-none items-center justify-center rounded-pc-md bg-surface-mint text-2xl"
+      >
         {icon}
-      </div>
+      </span>
 
-      <h3 className="text-lg font-semibold text-neutral-900">{title}</h3>
+      <h3 className="text-lg font-semibold tracking-tight text-ink">{title}</h3>
 
-      <p className="text-sm leading-relaxed text-neutral-600">
+      <p className="text-pc-meta leading-relaxed text-ink-muted">
         {description}
       </p>
     </div>

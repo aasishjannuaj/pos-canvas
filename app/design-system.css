@@ -56,6 +56,14 @@
   --color-brand-teal-pressed: #0e9594;
   --color-brand-teal-deep: #0b7c7b;
 
+  /* Lane 3 Task 2 — the same treatment for coral, and for the same reason.
+     The approved coral is a FILL colour: #FF7F68 carries only 2.47:1 against
+     white, so the moment it was used for the Windows installer's "unsigned"
+     qualifier it became a warning nobody could read. Same hue (9°), darkened
+     to 6.28:1 on white. Approved coral stays the accent; this is the one that
+     may carry words. */
+  --color-brand-coral-deep: #a83c28;
+
   /* --- Text roles -------------------------------------------------------- */
   --color-ink: var(--color-brand-ink); /* 17.9:1 on cream — headings, body */
   --color-ink-muted: #575a68; /* 6.46:1 on cream — supporting copy */
@@ -129,6 +137,12 @@
   --pc-section-y: 3.5rem;
   --pc-focus-width: 2px;
   --pc-focus-offset: 2px;
+  /* Indirect on purpose. The default ring clears 4.74:1 on cream and white,
+     which covers every surface the site had in Task 1. It does NOT clear 3:1
+     against the primary teal (1.37:1), so a section that paints itself teal
+     must override this rather than inherit an invisible ring. One property,
+     overridden by context, beats a second focus rule that can drift. */
+  --pc-focus-color: var(--color-brand-teal-deep);
 }
 
 @media (min-width: 48rem) {
@@ -179,7 +193,7 @@
   .pc-button:focus-visible,
   .pc-navlink:focus-visible,
   .pc-textlink:focus-visible {
-    outline: var(--pc-focus-width) solid var(--color-brand-teal-deep);
+    outline: var(--pc-focus-width) solid var(--pc-focus-color);
     outline-offset: var(--pc-focus-offset);
   }
 
@@ -248,6 +262,25 @@
     background-color: #cfece4;
   }
 
+  /* For a call to action sitting ON a brand-coloured band, where neither of the
+     two above works: primary would be teal-on-teal, and secondary's teal
+     hairline disappears. White ground, ink label — 17.9:1 — so the band stays
+     the loud element and the button stays the readable one. */
+  .pc-button--inverse {
+    background-color: var(--color-surface-raised);
+    color: var(--color-ink);
+    box-shadow: var(--shadow-pc-lifted);
+  }
+
+  .pc-button--inverse:hover {
+    background-color: var(--color-surface-mint);
+  }
+
+  .pc-button--inverse:active {
+    background-color: #cfece4;
+    box-shadow: none;
+  }
+
   /* --- Links -------------------------------------------------------------- */
 
   .pc-navlink {
@@ -295,6 +328,29 @@
     border-radius: var(--radius-pc-lg);
   }
 
+  /* The one full-bleed brand-coloured band on the site. Ink on teal is 6.97:1,
+     and the focus override above is what keeps a keyboard ring visible here. */
+  .pc-surface-teal {
+    background-color: var(--color-brand-teal);
+    color: var(--color-ink);
+    --pc-focus-color: var(--color-brand-ink);
+  }
+
+  /* A card the whole of which is a link. The lift is 2px and colour-only
+     otherwise; `prefers-reduced-motion` drops it with everything else. */
+  .pc-card--interactive {
+    transition:
+      border-color 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms ease;
+  }
+
+  .pc-card--interactive:hover {
+    border-color: var(--color-hairline-teal);
+    box-shadow: var(--shadow-pc-lifted);
+    transform: translateY(-2px);
+  }
+
   /* --- Typography helpers -------------------------------------------------
      Only the patterns that repeat. Headings and paragraphs use the `text-pc-*`
      utilities the scale generates; these two exist because an eyebrow and a
@@ -331,7 +387,12 @@
 @media (prefers-reduced-motion: reduce) {
   .pc-button,
   .pc-navlink,
-  .pc-textlink {
+  .pc-textlink,
+  .pc-card--interactive {
     transition: none;
+  }
+
+  .pc-card--interactive:hover {
+    transform: none;
   }
 }

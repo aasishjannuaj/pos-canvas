@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { BRAND_TAGLINE } from "@/lib/brand";
+import { LANDING_JOURNEY_SHORT } from "@/lib/landingJourney";
 import { LANDING_ROUTES, LANDING_SECTION_ANCHORS } from "@/lib/landingNav";
 
 // Navigation fix — "Start Building" was a <button type="button"> with no
@@ -22,10 +23,18 @@ import { LANDING_ROUTES, LANDING_SECTION_ANCHORS } from "@/lib/landingNav";
 // and "See Templates" is still the in-page LANDING_SECTION_ANCHORS.templates,
 // which is what lib/landingNav.test.ts asserts.
 
-// The shape of the product, in the order an owner meets it. Deliberately not
-// numbered: components/landing/HowItWorks.tsx owns the numbered walkthrough,
-// and two competing step counts on one page would be worse than one.
-const FLOW = ["Choose a template", "Customize", "Publish", "Install & pair"];
+// Lane 3 Task 2 — the strip is now the SAME journey HowItWorks renders, read
+// from lib/landingJourney.ts.
+//
+// It used to be four labels typed here while the section below was headed
+// "in three steps" and listed three, so the page told a visitor two different
+// stories about the same product. Neither list could notice the other. One
+// module now owns the steps; this renders their short labels and the section
+// renders the full ones, and a step added in one place appears in both.
+//
+// Still unnumbered here: the numerals belong to the walkthrough, and repeating
+// them in the hero would make the strip look like a competing list rather than
+// a preview of the same one.
 
 export default function Hero() {
   return (
@@ -63,13 +72,13 @@ export default function Hero() {
 
           {/* A list, not a decorated sentence: a screen reader gets four items
               in order, and the chevrons between them are presentational only —
-              which is also why they are dropped below md, where the row wraps
+              which is also why they are dropped below lg, where six chips wrap
               and a chevron would end up opening a line. */}
           <ol className="mt-6 flex flex-wrap items-center justify-center gap-x-2 gap-y-2">
-            {FLOW.map((step, index) => (
+            {LANDING_JOURNEY_SHORT.map((step, index) => (
               <li key={step} className="flex items-center gap-2">
                 {index > 0 && (
-                  <span aria-hidden="true" className="hidden text-brand-teal-deep md:inline">
+                  <span aria-hidden="true" className="hidden text-brand-teal-deep lg:inline">
                     &rarr;
                   </span>
                 )}
