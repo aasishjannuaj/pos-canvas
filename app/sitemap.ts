@@ -1,5 +1,7 @@
 import type { MetadataRoute } from "next";
 import { templates } from "@/data/templates";
+import { learnArticles } from "@/data/learn";
+import { publishedArticles } from "@/lib/learn";
 import { absoluteUrl } from "@/lib/seo";
 
 // Lane 3 Task 3 — the sitemap, which is a claim about what is worth indexing.
@@ -42,6 +44,18 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: absoluteUrl("/templates") },
     ...templates.map((template) => ({
       url: absoluteUrl(`/templates/${template.id}`),
+    })),
+    // Lane 3 Task 3B — Learn.
+    //
+    // The hub, plus one entry per PUBLISHED article. publishedArticles() is the
+    // same filter the routes use, so a draft cannot reach the sitemap by a
+    // different path than it reaches the page: it is excluded by the rule, not
+    // by a second list somebody has to remember to update. An article whose
+    // productTruthBasis includes unreleased work is dropped by that same
+    // filter even if its status says published.
+    { url: absoluteUrl("/learn") },
+    ...publishedArticles(learnArticles).map((article) => ({
+      url: absoluteUrl(`/learn/${article.slug}`),
     })),
   ];
 }

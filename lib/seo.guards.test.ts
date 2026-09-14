@@ -27,6 +27,8 @@ import {
 } from "@/lib/seo";
 import { PRODUCTION_SITE_ORIGIN } from "@/lib/siteOrigin";
 import { templates } from "@/data/templates";
+import { learnArticles } from "@/data/learn";
+import { publishedArticles } from "@/lib/learn";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -105,7 +107,26 @@ describe("the sitemap advertises only real, public, indexable pages", () => {
       expect(urls).toContain(absoluteUrl(`/templates/${template.id}`));
     }
 
-    expect(urls).toHaveLength(2 + templates.length);
+    // Composed from the parts rather than a literal, so adding a template or
+    // publishing an article updates it, while an UNEXPECTED url — a draft, a
+    // category placeholder, a private route — still fails. Lane 3 Task 3B
+    // added the Learn hub and its published articles; the count is exact, not
+    // loosened to a minimum.
+    expect(urls).toHaveLength(
+      2 + templates.length + 1 + publishedArticles(learnArticles).length
+    );
+  });
+
+  it("the Learn hub is listed and drafts are not", () => {
+    expect(urls).toContain(absoluteUrl("/learn"));
+
+    for (const article of learnArticles) {
+      const listed = urls.includes(absoluteUrl(`/learn/${article.slug}`));
+      expect(`sitemap/${article.slug}`).toBe(`sitemap/${article.slug}`);
+      expect(listed).toBe(
+        publishedArticles(learnArticles).some((a) => a.slug === article.slug)
+      );
+    }
   });
 
   it("excludes every application and private surface", () => {

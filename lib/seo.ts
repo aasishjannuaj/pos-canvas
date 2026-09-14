@@ -62,7 +62,7 @@ export function absoluteUrl(path: string): string {
  * six real pages with a name, a description, a starter catalogue and a preview,
  * not an open-ended dynamic space.
  */
-export const INDEXABLE_PATHS = ["/", "/templates"] as const;
+export const INDEXABLE_PATHS = ["/", "/templates", "/learn"] as const;
 
 /**
  * Publicly reachable pages that should NOT compete in search.
@@ -217,6 +217,74 @@ export function buildSoftwareApplicationJsonLd(): Record<string, unknown> {
       "device to turn it into your till.",
   };
 }
+
+/**
+ * Article — for one real, published Learn article.
+ *
+ * DELIBERATELY ABSENT:
+ *
+ *   author      There is no approved author identity for POS Canvas content.
+ *               An invented person, or an "author" pointing at a company with
+ *               no legal entity (lib/brand.ts holds null for legalCompanyName),
+ *               is the most common fabrication on a content site. Omitted
+ *               rather than guessed.
+ *   publisher   Same reason: publisher wants an Organization, and there is no
+ *               truthful Organization to give it.
+ *   image       No approved editorial artwork exists. A diagram drawn in the
+ *               page is not a social card.
+ *
+ * What remains — headline, description, the two dates and the canonical URL —
+ * is all verifiable from the article itself.
+ */
+export function buildArticleJsonLd(input: {
+  title: string;
+  description: string;
+  path: string;
+  publishedAt: string;
+  updatedAt?: string;
+}): Record<string, unknown> {
+  return {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    headline: input.title,
+    description: input.description,
+    datePublished: input.publishedAt,
+    ...(input.updatedAt ? { dateModified: input.updatedAt } : {}),
+    mainEntityOfPage: absoluteUrl(input.path),
+    url: absoluteUrl(input.path),
+  };
+}
+
+/**
+ * BreadcrumbList — Home > Learn > Article.
+ *
+ * Included because it is TRUE of the navigation a reader actually has: the
+ * article links back to /learn, and /learn links back to /. A breadcrumb trail
+ * that does not exist on the page is the version worth refusing.
+ */
+export function buildBreadcrumbJsonLd(
+  trail: readonly { name: string; path: string }[]
+): Record<string, unknown> {
+  return {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: trail.map((step, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: step.name,
+      item: absoluteUrl(step.path),
+    })),
+  };
+}
+
+// NO VideoObject HELPER EXISTS YET, AND THAT IS THE DECISION.
+//
+// VideoObject requires name, description, thumbnailUrl and uploadDate to be
+// truthful, and there is no real video in the library. A builder that emitted
+// the type from an empty or placeholder configuration would be a schema claim
+// about a video that does not exist. LearnArticle.video is typed so that a real
+// video carries all four fields; the helper gets written when the first one is
+// published, not before.
 
 // NO Organization SCHEMA, AND THIS IS THE DECISION RATHER THAN AN OMISSION.
 //

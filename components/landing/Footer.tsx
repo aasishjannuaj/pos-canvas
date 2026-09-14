@@ -62,6 +62,19 @@ export default function Footer() {
               <a href={LANDING_SECTION_ANCHORS.howItWorks} className="pc-navlink py-1">
                 How It Works
               </a>
+
+              {/* Lane 3 Task 3B — Learn lives HERE and nowhere else.
+                  The header's section nav is three in-page anchors and its
+                  responsive behaviour is the released 1.2.0 behaviour that
+                  Task 1 was corrected to preserve; adding a fourth item — a
+                  real route, among anchors — would reopen exactly that. The
+                  footer is where a reader looks for the rest of a site, it
+                  costs no space above the fold, and it needs no navigation
+                  decision to be revisited. A homepage surface can be added
+                  later if the library grows enough to earn one. */}
+              <Link href="/learn" className="pc-navlink py-1">
+                Learn
+              </Link>
             </nav>
 
             <nav aria-label="Get started" className="flex flex-col gap-2">
