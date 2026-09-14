@@ -365,7 +365,7 @@ describe("24.5C changed nothing it was not meant to", () => {
     expect(exists("windows-shell/build/icon.ico")).toBe(true);
     expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: false");
     expect(read("lib/androidRelease.ts")).toContain(
-      "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1"
+      "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b"
     );
   });
 });

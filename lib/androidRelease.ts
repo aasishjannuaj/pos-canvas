@@ -45,8 +45,8 @@ export type AndroidRelease = PlatformRelease & {
  * The current published release, or null when none exists yet.
  *
  * Feature 21 — populated with the first real signed release. Feature 25.7 —
- * moved to 1.1.0. Every value below was VERIFIED against the published artifact
- * rather than transcribed:
+ * moved to 1.1.0. Feature 28 release — moved to 1.2.0. Every value below was
+ * VERIFIED against the published artifact rather than transcribed:
  *
  *   - the GitHub Releases API was queried for the actual tag and asset;
  *   - the APK was downloaded FROM ITS PUBLIC URL — the bytes GitHub serves, not
@@ -55,11 +55,11 @@ export type AndroidRelease = PlatformRelease & {
  *     size the API reports for the asset;
  *   - releasedAt is the release's published_at from the API;
  *   - aapt2 confirmed, on the SERVED file, package com.poscanvas.app,
- *     versionCode 2, versionName 1.1.0;
+ *     versionCode 3, versionName 1.2.0;
  *   - apksigner confirmed the signer certificate sha-256
  *     7e32ec72c659dfacdab880d7fbe68991cf6104d11434f15d0c516bb9c6525b1b —
- *     unchanged since 1.0.0, which is what lets 1.1.0 install as an in-place
- *     upgrade over it.
+ *     unchanged since 1.0.0, which is what lets 1.2.0 install as an in-place
+ *     upgrade over 1.1.0 without any till losing its pairing.
  *
  * TAG HISTORY, recorded because it cost a round of verification. The release was
  * first published as `v.1.0.0` — with a stray dot — and has since been re-tagged
@@ -74,13 +74,13 @@ export type AndroidRelease = PlatformRelease & {
  * as such. Every consumer must handle null.
  */
 export const CURRENT_ANDROID_RELEASE: AndroidRelease | null = {
-  versionName: "1.1.0",
-  versionCode: 2,
+  versionName: "1.2.0",
+  versionCode: 3,
   downloadUrl:
-    "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.1.0/POS-Canvas-v1.1.0.apk",
-  checksum: "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1",
-  fileSizeBytes: 4121584,
-  releasedAt: "2026-08-31T18:03:31Z",
+    "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.2.0/POS-Canvas-v1.2.0.apk",
+  checksum: "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b",
+  fileSizeBytes: 4124156,
+  releasedAt: "2026-09-14T04:16:46Z",
 };
 
 /**

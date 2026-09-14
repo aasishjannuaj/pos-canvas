@@ -30,9 +30,9 @@ const VALID: AndroidRelease = {
 // ---------------------------------------------------------------------------
 
 const PUBLISHED_CHECKSUM =
-  "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1";
+  "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b";
 
-describe("CURRENT_ANDROID_RELEASE — the published v1.1.0 release", () => {
+describe("CURRENT_ANDROID_RELEASE — the published v1.2.0 release", () => {
   it("is no longer null", () => {
     expect(CURRENT_ANDROID_RELEASE).not.toBeNull();
   });
@@ -41,10 +41,10 @@ describe("CURRENT_ANDROID_RELEASE — the published v1.1.0 release", () => {
     expect(isAndroidRelease(CURRENT_ANDROID_RELEASE)).toBe(true);
   });
 
-  it("is version 1.1.0 / code 2", () => {
-    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe("1.1.0");
+  it("is version 1.2.0 / code 3", () => {
+    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe("1.2.0");
     expect(CURRENT_ANDROID_RELEASE?.versionName).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(2);
+    expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(3);
   });
 
   it("downloads over https from GitHub Releases", () => {
@@ -54,10 +54,11 @@ describe("CURRENT_ANDROID_RELEASE — the published v1.1.0 release", () => {
     expect(url.pathname).toContain("/aasishjannuaj/pos-canvas/releases/download/");
   });
 
-  it("targets the VERIFIED tag v1.1.0", () => {
-    // Confirmed against the GitHub API after the release was re-tagged: this
-    // URL serves the APK, and the earlier `v.1.0.0` form now returns 404.
-    expect(CURRENT_ANDROID_RELEASE!.downloadUrl).toContain("/download/v1.1.0/");
+  it("targets the VERIFIED tag v1.2.0", () => {
+    // Confirmed against the GitHub API: this URL was read from the release's
+    // own browser_download_url and then downloaded unauthenticated, and the
+    // served bytes hash to PUBLISHED_CHECKSUM.
+    expect(CURRENT_ANDROID_RELEASE!.downloadUrl).toContain("/download/v1.2.0/");
   });
 
   it("carries no trace of the retired v.1.0.0 tag", () => {
@@ -69,7 +70,7 @@ describe("CURRENT_ANDROID_RELEASE — the published v1.1.0 release", () => {
   });
 
   it("names the published asset exactly", () => {
-    expect(CURRENT_ANDROID_RELEASE!.downloadUrl.endsWith("/POS-Canvas-v1.1.0.apk")).toBe(
+    expect(CURRENT_ANDROID_RELEASE!.downloadUrl.endsWith("/POS-Canvas-v1.2.0.apk")).toBe(
       true
     );
   });
@@ -81,12 +82,12 @@ describe("CURRENT_ANDROID_RELEASE — the published v1.1.0 release", () => {
   });
 
   it("records the real published file size", () => {
-    expect(CURRENT_ANDROID_RELEASE?.fileSizeBytes).toBe(4121584);
+    expect(CURRENT_ANDROID_RELEASE?.fileSizeBytes).toBe(4124156);
     expect(CURRENT_ANDROID_RELEASE!.fileSizeBytes).toBeGreaterThan(0);
   });
 
   it("records the real GitHub publish timestamp", () => {
-    expect(CURRENT_ANDROID_RELEASE?.releasedAt).toBe("2026-08-31T18:03:31Z");
+    expect(CURRENT_ANDROID_RELEASE?.releasedAt).toBe("2026-09-14T04:16:46Z");
     expect(Number.isNaN(new Date(CURRENT_ANDROID_RELEASE!.releasedAt).getTime())).toBe(
       false
     );

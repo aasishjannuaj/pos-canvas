@@ -30,31 +30,6 @@ const WORKFLOW = ".github/workflows/windows-app.yml";
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
 /**
- * TEMPORARY — RELEASE CUT 1.2.0. Restore strict equality in the pointer commit.
- *
- * WHY THE POINTERS ARE ALLOWED TO LAG RIGHT NOW. lib/androidRelease.ts and
- * lib/windowsRelease.ts are what the download page actually serves, so they must
- * keep describing the 1.1.0 bytes that are downloadable TODAY until the 1.2.0
- * artifacts are built, published and checksum-verified. The tree is therefore
- * ahead of the pointers on purpose, which is exactly the state §10 step 8 of
- * docs/RELEASE_CHECKLIST.md requires — and which the equality form of these
- * guards, tightened after 1.1.0 shipped, made impossible to reach.
- *
- * WHAT IS NOT RELAXED, because a lagging pointer and a leading pointer are
- * opposite failures. Lagging means "the page advertises the older release that
- * is genuinely downloadable"; leading means "the page advertises a version
- * nobody ever built", which is a 404 in front of a customer. Only the first is
- * permitted below. Every other guard in this file is untouched: the four
- * in-tree versions stay in lockstep, versionCode still only moves forward, the
- * installer filename still derives from the package version, and the download
- * URL/filename contracts are unchanged.
- *
- * The restoration is not optional — it is step 7 of the release plan, in the
- * same commit that moves CURRENT_ANDROID_RELEASE and CURRENT_WINDOWS_RELEASE.
- */
-const RELEASE_CUT_POINTERS_MAY_LAG = true;
-
-/**
  * Numeric ordering for the plain `x.y.z` versions this file deals with.
  *
  * Deliberately not a general semver implementation: SEMVER above already
@@ -144,19 +119,11 @@ describe("versionCode only ever moves forward", () => {
   });
 
   it("the published versionCode matches the tree once shipped", () => {
-    // TEMPORARY — RELEASE CUT 1.2.0. "Once shipped" is now a CONDITION rather
-    // than an assumption. While a release is being cut the tree is ahead and
-    // the two codes are SUPPOSED to differ; equality is required only once the
-    // pointer has caught up to the version in the tree. Guard 3 above still
-    // forbids the tree from falling behind the pointer, so the code can never
-    // lead. Restored to unconditional equality in the pointer commit.
-    if (
-      RELEASE_CUT_POINTERS_MAY_LAG &&
-      CURRENT_ANDROID_RELEASE?.versionName !== androidVersionName()
-    ) {
-      return;
-    }
-
+    // STRICT AGAIN. 1.2.0 / code 3 is published and verified from the served
+    // APK, so the pointer has caught up and the lag allowance the cut needed
+    // is gone. A tree ahead of the pointer now fails here, which is correct
+    // everywhere except mid-cut — and mid-cut is a deliberate, temporary edit
+    // to this file, not a state it should tolerate by default.
     expect(CURRENT_ANDROID_RELEASE?.versionCode).toBe(androidVersionCode());
   });
 
@@ -206,35 +173,21 @@ describe("the web version is independent of the native release", () => {
 });
 
 describe("the public download pointers describe what is actually published", () => {
-  it("4. they never LEAD the version in the tree", () => {
-    // TEMPORARY — RELEASE CUT 1.2.0, and equality returns in the pointer commit.
-    //
-    // These deliberately LAG while 1.2.0 is being cut, exactly as they did for
-    // 1.1.0: lib/*Release.ts is what the download page serves, so moving it
-    // before the artifact exists advertises a 404. What remains asserted is the
-    // direction — a pointer at or behind the tree is a release in progress, a
-    // pointer ahead of it is a download nobody can fetch.
-    //
-    // `null` is skipped rather than failed: it is the documented safe state
-    // (the card renders "not available yet"), and forbidding it here would add
-    // a restriction this cut never intended.
-    if (CURRENT_ANDROID_RELEASE !== null) {
-      expect(
-        compareSemver(CURRENT_ANDROID_RELEASE.versionName, androidVersionName())
-      ).toBeLessThanOrEqual(0);
-    }
-
-    if (CURRENT_WINDOWS_RELEASE !== null) {
-      expect(
-        compareSemver(CURRENT_WINDOWS_RELEASE.versionName, windowsVersion())
-      ).toBeLessThanOrEqual(0);
-    }
+  it("4. they now match the version in the tree, because it shipped", () => {
+    // These deliberately LAGGED while 1.2.0 was being cut: lib/*Release.ts is
+    // what the download page serves, so moving it before the artifact exists
+    // advertises a 404. Both 1.2.0 artifacts are now published and their SERVED
+    // bytes verified, so the pointers match again.
+    expect(CURRENT_ANDROID_RELEASE?.versionName).toBe(androidVersionName());
+    expect(CURRENT_WINDOWS_RELEASE?.versionName).toBe(windowsVersion());
   });
 
   it("a pointer never advertises a version that was never built", () => {
     // The failure this catches: a pointer ahead of the tree is a 404 on the
-    // download page. Equal is correct after publication, BEHIND is correct
-    // mid-cut, and ahead is never correct.
+    // download page. Kept as an ORDERING check rather than folded into guard 4
+    // above, because it is the half that must survive the next release cut —
+    // when guard 4 is temporarily relaxed, this is what still forbids a pointer
+    // from advertising a version nobody ever built.
     const building = windowsVersion();
 
     for (const published of [

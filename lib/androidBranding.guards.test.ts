@@ -97,13 +97,13 @@ describe("Android identity still matches the shared brand", () => {
 
   it("the published release metadata is unchanged", () => {
     expect(CURRENT_ANDROID_RELEASE).toEqual({
-      versionName: "1.1.0",
-      versionCode: 2,
+      versionName: "1.2.0",
+      versionCode: 3,
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.1.0/POS-Canvas-v1.1.0.apk",
-      checksum: "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1",
-      fileSizeBytes: 4121584,
-      releasedAt: "2026-08-31T18:03:31Z",
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.2.0/POS-Canvas-v1.2.0.apk",
+      checksum: "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b",
+      fileSizeBytes: 4124156,
+      releasedAt: "2026-09-14T04:16:46Z",
     });
   });
 });
@@ -490,7 +490,7 @@ describe("Feature 24.2 stops at Android", () => {
     const windows = read("lib/windowsRelease.ts");
 
     expect(windows).toContain(
-      "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe"
+      "e0e7fd3725c2ea0a2278c3992f9d520b6e319e181ca3439d138f48bda111fa6f"
     );
     expect(windows).toContain("isPrerelease: false");
   });

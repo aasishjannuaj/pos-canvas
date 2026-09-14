@@ -33,11 +33,12 @@ export type WindowsRelease = PlatformRelease;
  * The current published release, or null when none exists yet.
  *
  * Feature 23.6 — populated with the first real Windows release. Feature 25.7 —
- * moved to 1.1.0. Every value below was VERIFIED against the published artifact
- * rather than transcribed, exactly as Feature 21 did for Android:
+ * moved to 1.1.0. Feature 28 release — moved to 1.2.0. Every value below was
+ * VERIFIED against the published artifact rather than transcribed, exactly as
+ * Feature 21 did for Android:
  *
- *   - the GitHub Releases API was queried for the tag `windows-v1.1.0`; it
- *     reports prerelease=false, draft=false, published_at 2026-08-31T18:12:54Z,
+ *   - the GitHub Releases API was queried for the tag `windows-v1.2.0`; it
+ *     reports prerelease=false, draft=false, published_at 2026-09-14T04:17:19Z,
  *     and both assets;
  *   - the installer was downloaded FROM ITS PUBLIC URL — the served bytes, not
  *     a local copy — and its sha-256 computed locally;
@@ -45,12 +46,17 @@ export type WindowsRelease = PlatformRelease;
  *     also names the correct asset;
  *   - fileSizeBytes is the byte count of the downloaded file and matches the
  *     size the API reports;
- *   - the packaged runtime bundle inside app.asar is byte-identical to a local
- *     build of the same commit — which is how "did CI build this?" stays
- *     checkable;
+ *   - the packaged runtime bundle inside app.asar hashes to
+ *     b6c1ad37eb16760b827e711c3f9ae198f0b17791a4334cc2402ba437c86db787, which
+ *     is byte-identical to a local build of the same commit AND to the bundle
+ *     inside the 1.2.0 APK — which is how "did CI build this?" stays checkable.
+ *     Only the CSS differs between CI and a local build, in the last digits of
+ *     Tailwind's lab() colour values: floating-point rounding that differs
+ *     between the windows-x64 runner and macOS arm64, carrying no logic and no
+ *     configuration;
  *   - the build carries no signing configuration, confirming it is UNSIGNED.
  *
- * 1.1.0 IS A FULL RELEASE, NOT A PRE-RELEASE. `isPrerelease` is false, matching
+ * 1.2.0 IS A FULL RELEASE, NOT A PRE-RELEASE. `isPrerelease` is false, matching
  * the GitHub release, so no surface renders the "Pre-release" chip any more.
  * 1.0.0 was marked pre-release while the product was pre-launch; that stage is
  * over.
@@ -58,8 +64,9 @@ export type WindowsRelease = PlatformRelease;
  * IT IS STILL UNSIGNED, and `isUnsigned: true` says so on its own flag. Windows
  * will show a SmartScreen "Unknown publisher" warning, and enterprise policy or
  * Smart App Control may block it outright. That is a separate axis from
- * pre-release: 1.0.0 was both, 1.1.0 is only the second, and one badge carrying
- * both facts is how the warning briefly disappeared during this release.
+ * pre-release: 1.0.0 was both, 1.1.0 and 1.2.0 are only the second, and one
+ * badge carrying both facts is how the warning briefly disappeared during the
+ * 1.1.0 release.
  *
  * CODE SIGNING REMAINS REQUIRED BEFORE THE TRUE PUBLIC LAUNCH. It is deferred,
  * not cancelled. When it lands, the signed artifact replaces this one and every
@@ -74,12 +81,12 @@ export type WindowsRelease = PlatformRelease;
  * then renders as "Coming soon" rather than as a broken link.
  */
 export const CURRENT_WINDOWS_RELEASE: WindowsRelease | null = {
-  versionName: "1.1.0",
+  versionName: "1.2.0",
   downloadUrl:
-    "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe",
-  checksum: "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe",
-  fileSizeBytes: 100260898,
-  releasedAt: "2026-08-31T18:12:54Z",
+    "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.2.0/POS-Canvas-Windows-v1.2.0.exe",
+  checksum: "e0e7fd3725c2ea0a2278c3992f9d520b6e319e181ca3439d138f48bda111fa6f",
+  fileSizeBytes: 100263030,
+  releasedAt: "2026-09-14T04:17:19Z",
   isPrerelease: false,
   // Feature 25.7 — stated explicitly, because it is no longer implied by
   // isPrerelease. windows-shell carries no signing configuration and the

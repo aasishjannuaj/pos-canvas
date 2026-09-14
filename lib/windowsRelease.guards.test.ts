@@ -65,17 +65,18 @@ const HYPOTHETICAL: unknown = {
 
 describe("Windows is published as an unsigned full release", () => {
   it("CURRENT_WINDOWS_RELEASE holds the verified published values", () => {
-    // Feature 25.7 — moved to 1.1.0. Every field was verified against the bytes
+    // Feature 25.7 — moved to 1.1.0; the Feature 28 release moved it to 1.2.0.
+    // Every field was verified against the bytes
     // GitHub actually SERVES, not a local copy: downloaded from the public URL,
     // sha-256 computed locally, checked against the published .sha256 file, and
     // the size cross-checked with what the Releases API reports.
     expect(CURRENT_WINDOWS_RELEASE).toEqual({
-      versionName: "1.1.0",
+      versionName: "1.2.0",
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe",
-      checksum: "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe",
-      fileSizeBytes: 100260898,
-      releasedAt: "2026-08-31T18:12:54Z",
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/windows-v1.2.0/POS-Canvas-Windows-v1.2.0.exe",
+      checksum: "e0e7fd3725c2ea0a2278c3992f9d520b6e319e181ca3439d138f48bda111fa6f",
+      fileSizeBytes: 100263030,
+      releasedAt: "2026-09-14T04:17:19Z",
       isPrerelease: false,
       isUnsigned: true,
     });
@@ -88,13 +89,13 @@ describe("Windows is published as an unsigned full release", () => {
   it("is published under the windows-v tag, never Android's", () => {
     const url = CURRENT_WINDOWS_RELEASE?.downloadUrl ?? "";
 
-    expect(url).toContain("/releases/download/windows-v1.1.0/");
+    expect(url).toContain("/releases/download/windows-v1.2.0/");
     expect(url).not.toMatch(/\/releases\/download\/v1\.1\.0\//);
   });
 
   it("points at the exact installer filename", () => {
     expect(CURRENT_WINDOWS_RELEASE?.downloadUrl.endsWith(
-      "/POS-Canvas-Windows-v1.1.0.exe"
+      "/POS-Canvas-Windows-v1.2.0.exe"
     )).toBe(true);
   });
 
@@ -107,14 +108,14 @@ describe("Windows is published as an unsigned full release", () => {
     // public URL, which also matches what the Releases API reports for the
     // asset. A local cross-build of the same commit differs in size, which is
     // how "was this really the CI artifact?" stays checkable.
-    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(100260898);
+    expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).toBe(100263030);
     expect(CURRENT_WINDOWS_RELEASE?.fileSizeBytes).not.toBe(99637338);
   });
 
   it("records a valid release timestamp", () => {
     const at = CURRENT_WINDOWS_RELEASE?.releasedAt ?? "";
 
-    expect(at).toBe("2026-08-31T18:12:54Z");
+    expect(at).toBe("2026-09-14T04:17:19Z");
     expect(Number.isNaN(new Date(at).getTime())).toBe(false);
   });
 
@@ -156,7 +157,7 @@ describe("Windows is published as an unsigned full release", () => {
       "lib/androidRelease.ts",
     ].filter((f) =>
       read(f).includes(
-        "releases/download/windows-v1.1.0/POS-Canvas-Windows-v1.1.0.exe"
+        "releases/download/windows-v1.2.0/POS-Canvas-Windows-v1.2.0.exe"
       )
     );
 
@@ -486,13 +487,13 @@ describe("the shared platform release type", () => {
 describe("the Android release is unchanged", () => {
   it("still points at the same verified artifact", () => {
     expect(CURRENT_ANDROID_RELEASE).toEqual({
-      versionName: "1.1.0",
-      versionCode: 2,
+      versionName: "1.2.0",
+      versionCode: 3,
       downloadUrl:
-        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.1.0/POS-Canvas-v1.1.0.apk",
-      checksum: "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1",
-      fileSizeBytes: 4121584,
-      releasedAt: "2026-08-31T18:03:31Z",
+        "https://github.com/aasishjannuaj/pos-canvas/releases/download/v1.2.0/POS-Canvas-v1.2.0.apk",
+      checksum: "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b",
+      fileSizeBytes: 4124156,
+      releasedAt: "2026-09-14T04:16:46Z",
     });
   });
 
@@ -507,7 +508,7 @@ describe("the Android release is unchanged", () => {
     // Independent cadence: a Windows release must never force an Android bump.
     const url = CURRENT_ANDROID_RELEASE?.downloadUrl ?? "";
 
-    expect(url).toContain("/releases/download/v1.1.0/");
+    expect(url).toContain("/releases/download/v1.2.0/");
     expect(url).not.toContain("windows-v");
   });
 });

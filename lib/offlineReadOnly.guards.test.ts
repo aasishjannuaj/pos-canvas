@@ -427,11 +427,11 @@ describe("Feature 24.5A changed nothing it was not meant to", () => {
 
   it("release metadata is untouched", () => {
     expect(read("lib/windowsRelease.ts")).toContain(
-      "c8f1fa82c2e95bdaa06adc3360275c58b57dd8737b2a98f287990f0193b827fe"
+      "e0e7fd3725c2ea0a2278c3992f9d520b6e319e181ca3439d138f48bda111fa6f"
     );
     expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: false");
     expect(read("lib/androidRelease.ts")).toContain(
-      "00763a36d8ddcba676ec0f0afec477a2784579c0d9968b28eaaea91510af1df1"
+      "f166297639bfbd02a0782bc41d958cc6263ce3d132826935de19763c5054bd3b"
     );
   });
 
