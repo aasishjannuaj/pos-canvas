@@ -1,4 +1,12 @@
 import { notFound } from "next/navigation";
+import type { Metadata } from "next";
+import { NOINDEX_ROBOTS } from "@/lib/seo";
+
+// Lane 3 Task 3 — a live till, behind proxy.ts. Never a search result.
+export const metadata: Metadata = {
+  robots: NOINDEX_ROBOTS,
+};
+
 import { getProjectById } from "@/lib/projects.server";
 import { isProjectConfig } from "@/lib/projectConfig";
 import {

@@ -52,6 +52,33 @@ const WORDMARK_CLASS: Record<PosCanvasLockupSize, string> = {
   lg: "h-[1.25rem] w-auto sm:h-[1.5rem]",
 };
 
+/**
+ * Lane 3 Task 3 — `sizes` on the MARK ONLY, and the asymmetry is the finding.
+ *
+ * MEASURED, NOT ASSUMED, AND THE OBVIOUS VERSION OF THIS WAS WRONG. Without
+ * `sizes`, next/image builds its candidate list from the INTRINSIC width, so a
+ * browser at 2x DPR fetched the 376px mark into a 36px slot: 7,580 bytes of
+ * image for something drawn at 36 CSS px. Declaring the real slot width lets it
+ * pick the 96w candidate instead — 3,118 bytes, a 59% saving on every page
+ * view.
+ *
+ * The same change applied to the WORDMARK made things WORSE, which is only
+ * visible if you measure both. That master is 424x63; with no `sizes` the
+ * browser asks for a width Next cannot upscale to and gets the original back at
+ * 4,200 bytes. With `sizes`, it picks the 256w candidate, and downscaling fine
+ * letterforms produces high-frequency detail that re-encodes to 6,906 bytes —
+ * 64% BIGGER for a smaller image. So the wordmark deliberately has no `sizes`:
+ * the default behaviour is already the best available candidate for artwork
+ * this small.
+ *
+ * Together: 11,780 -> 7,318 bytes, with no regression on either image.
+ */
+const MARK_SIZES: Record<PosCanvasLockupSize, string> = {
+  sm: "28px",
+  md: "36px",
+  lg: "48px",
+};
+
 const GAP_CLASS: Record<PosCanvasLockupSize, string> = {
   sm: "gap-2",
   md: "gap-2.5",
@@ -82,6 +109,7 @@ export default function PosCanvasLockup({
       <Image
         src={markMaster}
         alt={showWordmark ? "" : BRAND.productName}
+        sizes={MARK_SIZES[size]}
         className={MARK_CLASS[size]}
         priority={priority}
       />

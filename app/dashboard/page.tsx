@@ -1,4 +1,19 @@
 import PageContainer from "@/components/common/PageContainer";
+import type { Metadata } from "next";
+import { NOINDEX_ROBOTS } from "@/lib/seo";
+
+// Lane 3 Task 3 — an owner's project list is not a search result.
+//
+// proxy.ts already redirects an unauthenticated request here to /login, so a
+// crawler never sees content, and robots.txt disallows the prefix to save the
+// crawl. This directive is the third layer and the one that survives a change
+// to the proxy's matcher: if this route ever became reachable, it still must
+// not be indexed. None of the three is what keeps the DATA private — that is
+// row-level security on every read.
+export const metadata: Metadata = {
+  robots: NOINDEX_ROBOTS,
+};
+
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import RecentProjects from "@/components/dashboard/RecentProjects";
 import TrendingTemplates from "@/components/dashboard/TrendingTemplates";

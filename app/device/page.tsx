@@ -17,9 +17,21 @@
 // Works identically in a normal browser and in the Capacitor WebView: there is
 // no native dependency and no server round-trip for device state.
 import DeviceApp from "@/components/device/DeviceApp";
+import { NOINDEX_ROBOTS } from "@/lib/seo";
 
+// Lane 3 Task 3 — publicly reachable, deliberately not indexable.
+//
+// This route is the paired-device shell. It is not proxy-protected (a till is
+// not an owner session), so a crawler CAN fetch it — which is exactly why the
+// directive has to be here rather than in robots.txt. robots.txt deliberately
+// does not disallow it: a crawler must be able to read the page to see the
+// `noindex`, and a blocked URL can still be indexed from an inbound link.
 export const metadata = {
-  title: "POS Canvas — Device",
+  // `absolute`, because the root layout appends " · POS Canvas" to every plain
+  // title — so this tab read "POS Canvas — Device · POS Canvas". Pre-existing,
+  // caught by reading the rendered HTML rather than the source.
+  title: { absolute: "POS Canvas — Device" },
+  robots: NOINDEX_ROBOTS,
 };
 
 export default function DevicePage() {

@@ -1,4 +1,13 @@
 import { notFound, redirect } from "next/navigation";
+import type { Metadata } from "next";
+import { NOINDEX_ROBOTS } from "@/lib/seo";
+
+// Lane 3 Task 3 — the builder is an application surface, behind proxy.ts.
+// A project's editing URL has no public meaning and must never be indexed.
+export const metadata: Metadata = {
+  robots: NOINDEX_ROBOTS,
+};
+
 import EditorShell from "@/components/editor/EditorShell";
 import { getProjectById } from "@/lib/projects.server";
 import { getProjectOrders } from "@/lib/orders.server";

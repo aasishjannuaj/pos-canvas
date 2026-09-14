@@ -12,9 +12,18 @@ export default function TemplateGalleryHeader() {
       <h1 className="text-4xl font-semibold tracking-tight text-neutral-900">
         Template Gallery
       </h1>
+      {/* Lane 3 Task 3A — two unsupported claims removed from one sentence.
+          "for every kind of business" was a breadth-of-support claim (there
+          are six templates, not one per trade) and the metadata on this route
+          carried the same wording; both were corrected together, because
+          fixing only the metadata would have corrected the half nobody reads
+          and left the half they do. "start building in seconds" was a
+          setup-duration claim, and no setup-time guarantee has been
+          established. "available today" is the honest bound on the first and
+          does not go stale when a seventh template is added. */}
       <p className="mx-auto max-w-xl text-base text-neutral-600 md:text-lg">
-        Browse ready-made POS templates for every kind of business, and
-        start building in seconds.
+        Browse the ready-made POS templates available today, and choose a
+        starting point for your POS.
       </p>
 
       {/* Feature 22 Phase 4 — the one thing a first-time owner does not know:

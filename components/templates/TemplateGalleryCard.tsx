@@ -36,7 +36,13 @@ export default function TemplateGalleryCard({
       </div>
 
       <div className="flex flex-col gap-1">
-        <h3 className="text-lg font-semibold text-neutral-900">{name}</h3>
+        {/* Lane 3 Task 3 — h2, not h3. The gallery page's outline is a single
+            h1 ("Template Gallery") and then these cards; an h3 skipped a level,
+            which is a real defect in the document outline a screen reader
+            navigates by. Nothing about the card's appearance changes — the size
+            is set by the class, not the tag, which is exactly the trap this
+            fixes. */}
+        <h2 className="text-lg font-semibold text-neutral-900">{name}</h2>
         <p className="text-sm leading-relaxed text-neutral-600">
           {description}
         </p>

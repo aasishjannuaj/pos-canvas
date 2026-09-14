@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { BRAND, BRAND_TAGLINE } from "@/lib/brand";
+import { SITE_URL } from "@/lib/seo";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,13 +24,59 @@ const geistMono = Geist_Mono({
 // `title.template` gives every route a consistent suffix while letting a route
 // name itself — /device already sets "POS Canvas — Device", and that keeps
 // working because `default` only applies where a page sets nothing.
+// Lane 3 Task 3 — the SEO defaults every route inherits.
+//
+// WHAT IS SET HERE AND WHAT IS DELIBERATELY NOT.
+//
+// metadataBase is here because it is genuinely global: it is what lets every
+// route write a RELATIVE canonical and Open Graph URL and have Next resolve it
+// against the one approved origin. Without it, Next warns on every build and
+// emits relative og:url values that crawlers cannot use.
+//
+// There is NO `alternates.canonical` here, and that absence is the point.
+// Metadata inherits down the tree, so a canonical on the root layout would give
+// every page in the application the homepage's canonical — /templates, every
+// template detail page, the lot — which is the single most damaging thing a
+// site can do to itself in search. Each indexable route declares its own.
+//
+// openGraph carries only the fields that are true for every page (siteName,
+// type, locale). Per-page title, description and url are set per page — and
+// because Next REPLACES the whole openGraph object rather than merging it, a
+// page that sets any of them must re-declare these too. lib/seo.ts's
+// buildOpenGraph() exists so no page has to remember that.
+//
+// twitter uses "summary" rather than "summary_large_image" because there is no
+// approved 1200x630 asset to put in a large card — see the note on images
+// below. No site or creator handle is declared: POS Canvas has no social
+// account, and inventing one would point at somebody else's profile.
 export const metadata: Metadata = {
+  metadataBase: SITE_URL,
   title: {
     default: BRAND.productName,
     template: `%s · ${BRAND.productName}`,
   },
   description: BRAND_TAGLINE,
   applicationName: BRAND.productName,
+  openGraph: {
+    siteName: BRAND.websiteName,
+    type: "website",
+    locale: "en_US",
+  },
+  twitter: {
+    card: "summary",
+  },
+  // NO openGraph.images / twitter.images ANYWHERE, deliberately.
+  //
+  // assets/brand/ holds the approved Concept D masters: a 376x372 mark, a
+  // 424x63 wordmark strip and the 1448x1086 reference board. None of them is a
+  // social card, and none is close to the 1200x630 shape every platform crops
+  // to. Compositing a new card would be improvised brand artwork, which
+  // assets/brand/README.md reserves as an owner decision ("No improvised
+  // artwork"), and a screenshot of the product would have to be fabricated
+  // because no current one is committed.
+  //
+  // A link preview with a correct title and description and no image is
+  // honest. One with a stretched logo or an invented screenshot is not.
 };
 
 export default function RootLayout({

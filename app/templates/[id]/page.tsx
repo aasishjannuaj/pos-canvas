@@ -5,6 +5,53 @@ import TemplatePreview from "@/components/template-detail/TemplatePreview";
 import TemplateFeatures from "@/components/template-detail/TemplateFeatures";
 import TemplateActionPanel from "@/components/template-detail/TemplateActionPanel";
 import { getTemplateById } from "@/data/templates";
+import type { Metadata } from "next";
+import { NOINDEX_ROBOTS, absoluteUrl, buildOpenGraph } from "@/lib/seo";
+
+// Lane 3 Task 3 — six real pages, and a soft 404 that must not become a
+// seventh.
+//
+// THE SOFT-404 PROBLEM THIS SOLVES. An unknown id renders the "Template
+// Unavailable" state below with HTTP 200 — deliberately, since Feature 12.1
+// chose a clear way back over a bare 404. That is good product behaviour and
+// bad search behaviour: /templates/anything returns a successful page, so a
+// crawler that finds one stray link can index an unlimited number of
+// near-identical dead pages. Marking the unknown branch `noindex` keeps the UX
+// exactly as it is and stops the page competing. The sitemap lists only the six
+// real ids, so nothing points at this branch in the first place.
+//
+// The description is the registry's own — the same sentence the page renders.
+// A separate marketing description here would be a second source of truth about
+// what a template is, and the first one to drift.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const template = getTemplateById(id);
+
+  if (!template) {
+    return {
+      title: "Template unavailable",
+      robots: NOINDEX_ROBOTS,
+    };
+  }
+
+  const title = `${template.name} POS template`;
+  const canonical = absoluteUrl(`/templates/${template.id}`);
+
+  return {
+    title,
+    description: template.description,
+    alternates: { canonical },
+    openGraph: buildOpenGraph({
+      title,
+      description: template.description,
+      path: `/templates/${template.id}`,
+    }),
+  };
+}
 
 export default async function TemplateDetailPage({
   params,
