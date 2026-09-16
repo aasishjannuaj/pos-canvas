@@ -12,7 +12,7 @@
 // SEVERAL TESTS HERE ARE NEGATIVE CONTROLS. They introduce the exact defect a
 // guard is meant to catch into a copy of the source and assert the guard then
 // fails. A guard nobody has ever seen fail is a guard nobody knows works.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -175,13 +175,18 @@ describe("a PIN is never persisted, logged or returned", () => {
 // The RPC surface a device may touch
 // ---------------------------------------------------------------------------
 
-describe("the device RPC surface is exactly three calls", () => {
+describe("the device RPC surface is exactly four calls", () => {
   const source = code(read(RPC_FILE));
   const called = [...source.matchAll(/\.rpc\(\s*"([^"]+)"/g)].map((m) => m[1]);
 
-  it("calls only the three employee session RPCs", () => {
+  it("calls only the four employee session RPCs", () => {
     expect(new Set(called)).toEqual(
-      new Set(["employee_login", "get_current_employee_session", "employee_logout"])
+      new Set([
+        "list_login_employees",
+        "employee_login",
+        "get_current_employee_session",
+        "employee_logout",
+      ])
     );
   });
 
@@ -214,14 +219,25 @@ describe("the device RPC surface is exactly three calls", () => {
     }
   });
 
-  it("sends the PIN and nothing else — no project id, no device id", () => {
+  it("login sends the selected employee and the PIN, and nothing else", () => {
     const args = [...source.matchAll(/\.rpc\([^)]*\)/gs)].join("\n");
 
+    expect(args).toContain("p_employee_id: employeeId");
     expect(args).toContain("p_pin: pin");
 
-    for (const claimed of ["p_project_id", "p_device_id", "p_paired_device_id", "p_employee_id"]) {
+    for (const claimed of [
+      "p_project_id",
+      "p_device_id",
+      "p_paired_device_id",
+      "p_role",
+      "p_owner_id",
+    ]) {
       expect(args).not.toContain(claimed);
     }
+  });
+
+  it("the selector is requested with no arguments", () => {
+    expect(source).toMatch(/\.rpc\(\s*"list_login_employees"\s*\)/);
   });
 
   it("NEGATIVE CONTROL: the identity ban detects a device-supplied project id", () => {
@@ -349,5 +365,130 @@ describe("the backend's collapsed failures are not reopened", () => {
     ]) {
       expect(table.toLowerCase()).not.toContain(leak);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 1A.1 — the PIN-only login contract is retired everywhere
+// ---------------------------------------------------------------------------
+
+describe("nothing calls the retired employee_login(text)", () => {
+  /** Every non-test TypeScript source file under the given directories. */
+  function sources(dirs: string[]): string[] {
+    const out: string[] = [];
+
+    const walk = (relative: string) => {
+      const absolute = join(repoRoot, relative);
+
+      for (const entry of readdirSync(absolute)) {
+        const child = join(relative, entry);
+        const stats = statSync(join(repoRoot, child));
+
+        if (stats.isDirectory()) {
+          if (entry !== "node_modules" && !entry.startsWith(".")) {
+            walk(child);
+          }
+        } else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
+          out.push(child);
+        }
+      }
+    };
+
+    for (const dir of dirs) {
+      walk(dir);
+    }
+
+    return out;
+  }
+
+  const files = sources(["lib", "app", "components"]);
+
+  /** The argument object of every employee_login call in a source string. */
+  function loginCalls(source: string): string[] {
+    return [...source.matchAll(/\.rpc\(\s*"employee_login"\s*,\s*\{([^}]*)\}/g)].map((m) => m[1]);
+  }
+
+  it("finds the source files it is guarding", () => {
+    expect(files).toContain(RPC_FILE);
+  });
+
+  it("every employee_login call in the codebase names the selected employee", () => {
+    const offenders: string[] = [];
+
+    for (const file of files) {
+      for (const argsText of loginCalls(code(read(file)))) {
+        if (!argsText.includes("p_employee_id")) {
+          offenders.push(file);
+        }
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("employee_login is called from exactly one place", () => {
+    const callers = files.filter((file) => loginCalls(code(read(file))).length > 0);
+
+    expect(callers).toEqual([RPC_FILE]);
+  });
+
+  it("employeeLogin requires the employee id before the PIN", () => {
+    expect(code(read(RPC_FILE))).toMatch(
+      /export async function employeeLogin\(\s*employeeId: string,\s*pin: string\s*\)/
+    );
+  });
+
+  it("NEGATIVE CONTROL: a PIN-only call is detected", () => {
+    const mutated = code(read(RPC_FILE)).replace(
+      "p_employee_id: employeeId,\n      p_pin: pin,",
+      "p_pin: pin,"
+    );
+
+    expect(mutated).not.toBe(code(read(RPC_FILE)));
+    expect(loginCalls(mutated).some((argsText) => !argsText.includes("p_employee_id"))).toBe(true);
+  });
+
+  it("NEGATIVE CONTROL: a single-argument employeeLogin is detected", () => {
+    const mutated = code(read(RPC_FILE)).replace(
+      /export async function employeeLogin\(\s*employeeId: string,\s*pin: string\s*\)/,
+      "export async function employeeLogin(pin: string)"
+    );
+
+    expect(mutated).not.toMatch(
+      /export async function employeeLogin\(\s*employeeId: string,\s*pin: string\s*\)/
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 1A.1 — the selector model never widens
+// ---------------------------------------------------------------------------
+
+describe("the selector model carries an id and a name, nothing else", () => {
+  const source = code(read(PURE_FILE));
+  const typeBody = source.slice(
+    source.indexOf("export type LoginEmployee = {"),
+    source.indexOf("};", source.indexOf("export type LoginEmployee = {"))
+  );
+
+  it("LoginEmployee has exactly employeeId and displayName", () => {
+    const fields = [...typeBody.matchAll(/^\s*(\w+)\??:/gm)].map((m) => m[1]);
+
+    expect(fields.sort()).toEqual(["displayName", "employeeId"]);
+  });
+
+  it("the parser copies only those two fields", () => {
+    const parser = source.slice(source.indexOf("export function parseLoginEmployeesResult"));
+
+    expect(parser).toContain("employees.push({ employeeId, displayName });");
+    expect(parser).not.toMatch(/\.\.\.\s*item/);
+    expect(parser).not.toContain("role");
+  });
+
+  it("NEGATIVE CONTROL: an added role field is detected", () => {
+    const mutated = typeBody.replace("displayName: string;", "displayName: string;\n  role: string;");
+    const fields = [...mutated.matchAll(/^\s*(\w+)\??:/gm)].map((m) => m[1]);
+
+    expect(fields.sort()).not.toEqual(["displayName", "employeeId"]);
   });
 });

@@ -13,6 +13,7 @@ import {
   parseCurrentEmployeeSessionResult,
   parseEmployeeLoginResult,
   parseEmployeeLogoutResult,
+  parseLoginEmployeesResult,
 } from "@/lib/employeeSession";
 import type { EmployeeLoginErrorCode } from "@/lib/employeeSession";
 
@@ -418,6 +419,111 @@ describe("parseEmployeeLogoutResult", () => {
     for (const payload of [null, undefined, 0, "done", []]) {
       expect(() => parseEmployeeLogoutResult(payload)).not.toThrow();
       expect(parseEmployeeLogoutResult(payload).ok).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature 1A.1 — selector payloads
+// ---------------------------------------------------------------------------
+
+describe("parseLoginEmployeesResult", () => {
+  const A = { employeeId: "11111111-1111-4111-8111-111111111111", displayName: "Ada" };
+  const S1 = { employeeId: "22222222-2222-4222-8222-222222222222", displayName: "Sam" };
+  const S2 = { employeeId: "33333333-3333-4333-8333-333333333333", displayName: "Sam" };
+
+  it("reads a roster and preserves server order exactly", () => {
+    // Deliberately not alphabetical: the parser must not re-sort.
+    const result = parseLoginEmployeesResult({ ok: true, employees: [S2, A, S1] });
+
+    expect(result).toEqual({ ok: true, employees: [S2, A, S1] });
+  });
+
+  it("keeps two people who share a display name as two entries", () => {
+    const result = parseLoginEmployeesResult({ ok: true, employees: [S1, S2] });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.employees).toHaveLength(2);
+      expect(result.employees.map((e) => e.employeeId)).toEqual([S1.employeeId, S2.employeeId]);
+    }
+  });
+
+  it("accepts an empty roster as a successful answer", () => {
+    expect(parseLoginEmployeesResult({ ok: true, employees: [] })).toEqual({
+      ok: true,
+      employees: [],
+    });
+  });
+
+  it("copies only employeeId and displayName, whatever else arrives", () => {
+    const result = parseLoginEmployeesResult({
+      ok: true,
+      employees: [
+        {
+          ...A,
+          role: "owner",
+          pin_hash: "$2a$10$leak",
+          pin: "1234",
+          active: true,
+          deactivatedAt: null,
+          projectId: "44444444-4444-4444-8444-444444444444",
+          failedCount: 3,
+        },
+      ],
+    });
+
+    expect(result).toEqual({ ok: true, employees: [A] });
+  });
+
+  it("fails the whole list if any entry is unreadable, rather than hiding someone", () => {
+    for (const bad of [
+      null,
+      "Ada",
+      {},
+      { employeeId: A.employeeId },
+      { displayName: "Ada" },
+      { employeeId: "", displayName: "Ada" },
+      { employeeId: A.employeeId, displayName: "   " },
+      { employeeId: 7, displayName: "Ada" },
+    ]) {
+      expect(parseLoginEmployeesResult({ ok: true, employees: [A, bad] })).toEqual({
+        ok: false,
+        error: "unavailable",
+        message: getEmployeeLoginErrorMessage("unavailable"),
+      });
+    }
+  });
+
+  it("does not trim or rewrite a display name", () => {
+    const padded = { employeeId: A.employeeId, displayName: " Ada " };
+
+    expect(parseLoginEmployeesResult({ ok: true, employees: [padded] })).toEqual({
+      ok: true,
+      employees: [padded],
+    });
+  });
+
+  it("maps not_authenticated and not_paired through", () => {
+    for (const code of ["not_authenticated", "not_paired"] as const) {
+      expect(parseLoginEmployeesResult({ ok: false, error: code })).toEqual({
+        ok: false,
+        error: code,
+        message: getEmployeeLoginErrorMessage(code),
+      });
+    }
+  });
+
+  it("treats a missing or non-array roster as unavailable", () => {
+    for (const payload of [{ ok: true }, { ok: true, employees: null }, { ok: true, employees: {} }]) {
+      expect(parseLoginEmployeesResult(payload)).toMatchObject({ ok: false, error: "unavailable" });
+    }
+  });
+
+  it("never throws", () => {
+    for (const payload of [null, undefined, 0, "ok", [], [A], true]) {
+      expect(() => parseLoginEmployeesResult(payload)).not.toThrow();
+      expect(parseLoginEmployeesResult(payload).ok).toBe(false);
     }
   });
 });

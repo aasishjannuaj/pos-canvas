@@ -1,25 +1,20 @@
-// v1.3 Feature 1A — behavioural tests for the employee RPC boundary.
+// v1.3 Feature 1A / 1A.1 — behavioural tests for the employee RPC boundary.
 //
-// WHY THIS FILE EXISTS, AND WHY IT MOCKS.
+// WHY THIS FILE MOCKS. lib/employeeSecurity.guards.test.ts proves structure by
+// reading source, and lib/employeeSession.test.ts proves the pure model.
+// Neither can prove what this file exists for: that a SUBMITTED login attempt
+// actually reaches public.employee_login carrying the selected employee id and
+// the exact string the operator typed, and that the selector is asked for with
+// no arguments. Those are claims about calls being made, so the calls must be
+// observable. Only lib/supabase/deviceClient is replaced.
 //
-// lib/employeeSecurity.guards.test.ts proves structural properties by reading
-// source text, and lib/employeeSession.test.ts proves the pure model. Neither
-// can prove the property this file exists for: that a SUBMITTED login attempt
-// actually reaches public.employee_login carrying the exact string the operator
-// typed. That is a claim about a call being made, so it needs the call to be
-// observable.
-//
-// This is the first vi.mock in this repository. It is deliberately narrow: only
-// lib/supabase/deviceClient is replaced, the module under test is the real one,
-// and nothing here touches a network, a database or a browser.
-//
-// THE RULE BEING PROTECTED. employee_login resolves the active paired device
-// FIRST and only then inspects the PIN, so a malformed PIN is a recorded failed
-// attempt that advances the lockout ladder. A client that refused malformed
-// input locally would delete that record, hand an attacker unlimited free
-// probes against the device-scoped counter, and report "not recognised" for a
-// submission the server never saw. A previous revision of employeeLogin did
-// exactly that; these tests are why it cannot come back.
+// THE RULES BEING PROTECTED.
+//   * Every submitted attempt reaches the server, malformed or not: the server
+//     records a malformed PIN as a counted device failure, and a client that
+//     refused it locally would hand out free probes.
+//   * Login sends exactly { p_employee_id, p_pin } — never a project or device.
+//   * Feature 1A.1 retired the PIN-only employee_login(text). Nothing may call
+//     employee_login with a PIN alone again.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const rpc = vi.fn();
@@ -30,21 +25,23 @@ vi.mock("@/lib/supabase/deviceClient", () => ({
   resetDeviceSupabaseClientCache: () => {},
 }));
 
-const { employeeLogin, employeeLogout, fetchCurrentEmployeeSession } = await import(
-  "@/lib/employee.rpc"
-);
+const { employeeLogin, employeeLogout, fetchCurrentEmployeeSession, fetchLoginEmployees } =
+  await import("@/lib/employee.rpc");
 
-/** What supabase-js hands back from a successful `.rpc()`. */
 function replies(data: unknown) {
   rpc.mockResolvedValue({ data, error: null, status: 200, statusText: "OK" });
 }
 
+const ADA = "11111111-1111-4111-8111-111111111111";
+const SAM_ONE = "22222222-2222-4222-8222-222222222222";
+const SAM_TWO = "33333333-3333-4333-8333-333333333333";
+
 const SESSION = {
-  employeeSessionId: "11111111-1111-1111-1111-111111111111",
-  employeeId: "22222222-2222-2222-2222-222222222222",
-  displayName: "Sam",
-  role: "cashier",
-  startedAt: "2026-09-14T10:00:00.000Z",
+  employeeSessionId: "44444444-4444-4444-8444-444444444444",
+  employeeId: ADA,
+  displayName: "Ada",
+  role: "manager",
+  startedAt: "2026-09-16T10:00:00.000Z",
 };
 
 beforeEach(() => {
@@ -52,59 +49,118 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// The correction: every submitted attempt reaches the server
+// The selector
+// ---------------------------------------------------------------------------
+
+describe("fetchLoginEmployees", () => {
+  it("asks list_login_employees with no arguments at all", async () => {
+    replies({ ok: true, employees: [] });
+
+    await fetchLoginEmployees();
+
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("list_login_employees");
+    expect(rpc.mock.calls[0].length).toBe(1);
+  });
+
+  it("returns the roster in server order, two fields each", async () => {
+    replies({
+      ok: true,
+      employees: [
+        { employeeId: ADA, displayName: "Ada" },
+        { employeeId: SAM_ONE, displayName: "Sam" },
+        { employeeId: SAM_TWO, displayName: "Sam" },
+      ],
+    });
+
+    expect(await fetchLoginEmployees()).toEqual({
+      ok: true,
+      employees: [
+        { employeeId: ADA, displayName: "Ada" },
+        { employeeId: SAM_ONE, displayName: "Sam" },
+        { employeeId: SAM_TWO, displayName: "Sam" },
+      ],
+    });
+  });
+
+  it("drops anything the server over-shares", async () => {
+    replies({
+      ok: true,
+      employees: [
+        {
+          employeeId: ADA,
+          displayName: "Ada",
+          role: "owner",
+          pin_hash: "$2a$10$leaked",
+          active: true,
+          deactivatedAt: null,
+        },
+      ],
+    });
+
+    const result = await fetchLoginEmployees();
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(Object.keys(result.employees[0]).sort()).toEqual(["displayName", "employeeId"]);
+    }
+  });
+
+  it("passes not_paired through, so a revoked till can act on it", async () => {
+    replies({ ok: false, error: "not_paired" });
+
+    const result = await fetchLoginEmployees();
+
+    expect(result).toMatchObject({ ok: false, error: "not_paired" });
+  });
+
+  it("reports an unreachable server as offline or unavailable", async () => {
+    rpc.mockRejectedValue(new Error("boom"));
+
+    const result = await fetchLoginEmployees();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(["offline", "unavailable"]).toContain(result.error);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every submitted attempt reaches the server
 // ---------------------------------------------------------------------------
 
 describe("a submitted login attempt always reaches employee_login", () => {
-  // The exact values the manager's ruling enumerates, plus the empty string and
-  // a Unicode-digit PIN, which are the other two ways a keypad can produce
-  // something the server's `^[0-9]{4,6}$` will reject.
   const MALFORMED = ["123", "1234567", "12a4", " 1234", "1234 ", "", "١٢٣٤", "12 4", "1234\n"];
 
   for (const pin of MALFORMED) {
-    it(`sends ${JSON.stringify(pin)} to the RPC instead of refusing it locally`, async () => {
+    it(`sends ${JSON.stringify(pin)} with the selected employee instead of refusing it`, async () => {
       replies({ ok: false, error: "invalid_credentials" });
 
-      await employeeLogin(pin);
+      await employeeLogin(ADA, pin);
 
       expect(rpc).toHaveBeenCalledTimes(1);
-      expect(rpc).toHaveBeenCalledWith("employee_login", { p_pin: pin });
+      expect(rpc).toHaveBeenCalledWith("employee_login", { p_employee_id: ADA, p_pin: pin });
     });
 
-    it(`transmits ${JSON.stringify(pin)} byte-for-byte — no trim, pad or repair`, async () => {
+    it(`transmits ${JSON.stringify(pin)} byte-for-byte`, async () => {
       replies({ ok: false, error: "invalid_credentials" });
 
-      await employeeLogin(pin);
+      await employeeLogin(ADA, pin);
 
       const sent = (rpc.mock.calls[0][1] as { p_pin: string }).p_pin;
 
-      // Identity, not equivalence: a trimmed or normalized value would differ.
       expect(sent).toBe(pin);
       expect(sent.length).toBe(pin.length);
     });
   }
 
-  it("still reports the server's generic answer for a malformed attempt", async () => {
-    replies({ ok: false, error: "invalid_credentials" });
-
-    const result = await employeeLogin("12a4");
-
-    expect(result).toEqual({
-      ok: false,
-      error: "invalid_credentials",
-      message: "That PIN was not recognised.",
-    });
-  });
-
   it("never answers invalid_credentials without having called the server", async () => {
-    // The regression in one assertion: if any input short-circuits, the RPC
-    // call count for that input is zero while the result claims a credential
-    // verdict the server never gave.
     for (const pin of [...MALFORMED, "1234", "123456"]) {
       rpc.mockReset();
       replies({ ok: false, error: "invalid_credentials" });
 
-      const result = await employeeLogin(pin);
+      const result = await employeeLogin(ADA, pin);
 
       if (!result.ok && result.error === "invalid_credentials") {
         expect(rpc).toHaveBeenCalledTimes(1);
@@ -112,26 +168,51 @@ describe("a submitted login attempt always reaches employee_login", () => {
     }
   });
 
-  it("sends a well-formed PIN unchanged too", async () => {
-    replies({ ok: true, ...SESSION });
+  it("sends the employee id unmodified — it is the server's to judge", async () => {
+    replies({ ok: false, error: "invalid_credentials" });
 
-    for (const pin of ["0000", "1234", "12345", "123456"]) {
+    for (const id of [ADA, "not-a-uuid", "", ` ${ADA} `]) {
       rpc.mockReset();
-      replies({ ok: true, ...SESSION });
+      replies({ ok: false, error: "invalid_credentials" });
 
-      await employeeLogin(pin);
+      await employeeLogin(id, "1234");
 
-      expect(rpc).toHaveBeenCalledWith("employee_login", { p_pin: pin });
+      expect((rpc.mock.calls[0][1] as { p_employee_id: string }).p_employee_id).toBe(id);
     }
   });
 
-  it("sends the PIN and nothing else — no project id, no device id", async () => {
+  it("sends exactly two arguments — no project id, no device id, no role", async () => {
     replies({ ok: true, ...SESSION });
 
-    await employeeLogin("1234");
+    await employeeLogin(ADA, "1234");
 
     expect(rpc.mock.calls[0][0]).toBe("employee_login");
-    expect(Object.keys(rpc.mock.calls[0][1] as object)).toEqual(["p_pin"]);
+    expect(Object.keys(rpc.mock.calls[0][1] as object).sort()).toEqual(["p_employee_id", "p_pin"]);
+  });
+
+  it("never calls the retired PIN-only signature", async () => {
+    replies({ ok: true, ...SESSION });
+
+    await employeeLogin(ADA, "1234");
+
+    for (const call of rpc.mock.calls) {
+      if (call[0] === "employee_login") {
+        expect(call[1]).toHaveProperty("p_employee_id");
+      }
+    }
+  });
+
+  it("lets two employees who share a PIN each be selected independently", async () => {
+    replies({ ok: true, ...SESSION, employeeId: SAM_ONE, displayName: "Sam" });
+    await employeeLogin(SAM_ONE, "4242");
+
+    replies({ ok: true, ...SESSION, employeeId: SAM_TWO, displayName: "Sam" });
+    await employeeLogin(SAM_TWO, "4242");
+
+    expect(rpc.mock.calls.map((c) => (c[1] as { p_employee_id: string }).p_employee_id)).toEqual([
+      SAM_ONE,
+      SAM_TWO,
+    ]);
   });
 });
 
@@ -140,20 +221,20 @@ describe("a submitted login attempt always reaches employee_login", () => {
 // ---------------------------------------------------------------------------
 
 describe("employeeLogin result mapping", () => {
-  it("returns the session on success", async () => {
+  it("returns the server-derived session on success, role included", async () => {
     replies({ ok: true, ...SESSION });
 
-    expect(await employeeLogin("1234")).toEqual({ ok: true, session: SESSION });
+    expect(await employeeLogin(ADA, "1234")).toEqual({ ok: true, session: SESSION });
   });
 
   it("carries a lockout wait through", async () => {
-    replies({ ok: false, error: "locked_out", retryAfterSeconds: 30 });
+    replies({ ok: false, error: "locked_out", retryAfterSeconds: 15 });
 
-    expect(await employeeLogin("1234")).toEqual({
+    expect(await employeeLogin(ADA, "1234")).toEqual({
       ok: false,
       error: "locked_out",
-      retryAfterSeconds: 30,
-      message: "Too many incorrect PINs. Try again in 30 seconds.",
+      retryAfterSeconds: 15,
+      message: "Too many incorrect PINs. Try again in 15 seconds.",
     });
   });
 
@@ -165,19 +246,18 @@ describe("employeeLogin result mapping", () => {
       statusText: "",
     });
 
-    const result = await employeeLogin("1234");
+    const result = await employeeLogin(ADA, "1234");
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe("offline");
-      expect(result.error).not.toBe("invalid_credentials");
     }
   });
 
   it("reports a thrown error as offline or unavailable, never as a bad PIN", async () => {
     rpc.mockRejectedValue(new Error("boom"));
 
-    const result = await employeeLogin("1234");
+    const result = await employeeLogin(ADA, "1234");
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -185,12 +265,13 @@ describe("employeeLogin result mapping", () => {
     }
   });
 
-  it("does not put the PIN in the failure it returns", async () => {
+  it("does not put the PIN or the employee id in the failure it returns", async () => {
     rpc.mockRejectedValue(new Error("boom"));
 
-    const result = await employeeLogin("987654");
+    const result = await employeeLogin(ADA, "987654");
 
     expect(JSON.stringify(result)).not.toContain("987654");
+    expect(JSON.stringify(result)).not.toContain(ADA);
   });
 });
 

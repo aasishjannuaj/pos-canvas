@@ -1,4 +1,4 @@
-// v1.3 Feature 1A — the employee identity and till session PURE model.
+// v1.3 Feature 1A / 1A.1 — the employee identity and till session PURE model.
 //
 // Dependency-free: no React, no Supabase, no browser API, no timers. Every
 // decision the runtime will later make about who is signed in at a till lives
@@ -16,7 +16,15 @@
 //
 // WHY THIS MODEL IS DELIBERATELY SMALL. Feature 1A ships the identity and
 // session foundation, not the till UI. There is no screen state machine here
-// because there is no screen yet: Lane 3 builds that on top of these types.
+// because there is no screen yet: Lane 2 builds that on top of these types.
+//
+// FEATURE 1A.1 — SELECT, THEN PROVE. The till first lists who may sign in
+// (parseLoginEmployeesResult), the operator picks themselves, and only then is a
+// PIN sent — with the chosen employeeId — so the server verifies ONE hash
+// instead of scanning the roster. The selector carries an id and a name and
+// nothing else: no role, no PIN material, no account state. The id identifies;
+// it never authorizes. Everything about whether that person may sign in is
+// decided by the server after the PIN is checked.
 
 // ---------------------------------------------------------------------------
 // Roles — a closed set, by design
@@ -84,8 +92,8 @@ export type EmployeeSession = {
  * Why a login or a session read could not proceed.
  *
  * `invalid_credentials` is ONE code covering every credential-shaped failure —
- * wrong PIN, no such PIN, an inactive employee, another project's employee, and
- * a malformed PIN. The server collapses them deliberately, and this module must
+ * wrong PIN, an employee id that does not exist, an inactive employee, another
+ * project's employee, and a malformed PIN. The server collapses them deliberately, and this module must
  * never reintroduce the distinction the backend removed.
  *
  * `locked_out` is separate and is not a credential answer: it reports this
@@ -327,4 +335,78 @@ export function parseEmployeeLogoutResult(payload: unknown): EmployeeLogoutResul
   // Logging out when nobody was signed in succeeds and reports null. The RPC is
   // idempotent precisely so a client that never saw the reply can retry.
   return { ok: true, endedSessionId: asNonEmptyString(record.endedSessionId) };
+}
+
+// ---------------------------------------------------------------------------
+// Feature 1A.1 — the login selector
+// ---------------------------------------------------------------------------
+
+/**
+ * One person the till may offer for sign-in.
+ *
+ * EXACTLY TWO FIELDS, AND THAT IS A SECURITY PROPERTY, NOT AN OMISSION. The
+ * selector is shown before anyone has authenticated, on a screen a customer can
+ * see. Role would publish who the managers are; anything account-shaped would
+ * publish more. Role arrives only in EmployeeSession, after the PIN is checked.
+ *
+ * Two people may share a displayName. They are different employees and are
+ * told apart by employeeId alone; nothing here merges, dedupes or renames them.
+ */
+export type LoginEmployee = {
+  employeeId: string;
+  displayName: string;
+};
+
+export type LoginEmployeesResult =
+  | { ok: true; employees: LoginEmployee[] }
+  | { ok: false; error: EmployeeLoginErrorCode; message: string };
+
+function loginEmployeesFailure(code: EmployeeLoginErrorCode): LoginEmployeesResult {
+  return { ok: false, error: code, message: getEmployeeLoginErrorMessage(code) };
+}
+
+/**
+ * Reads the selector payload.
+ *
+ * ORDER IS PRESERVED EXACTLY. The server sorts by display name then id; this
+ * does not re-sort, filter or dedupe, so every caller renders the same order.
+ *
+ * ONLY THE TWO FIELDS ARE COPIED. Anything else the payload carries is dropped
+ * on the floor rather than passed through, so a server that ever over-shared
+ * could not widen what the UI receives.
+ *
+ * ONE BAD ENTRY FAILS THE WHOLE LIST. Silently skipping an unreadable entry
+ * would hide a real employee from the till with no explanation; `unavailable`
+ * is the honest answer.
+ */
+export function parseLoginEmployeesResult(payload: unknown): LoginEmployeesResult {
+  const record = asRecord(payload);
+
+  if (!record) {
+    return loginEmployeesFailure("unavailable");
+  }
+
+  if (record.ok !== true) {
+    return loginEmployeesFailure(toLoginErrorCode(record.error));
+  }
+
+  if (!Array.isArray(record.employees)) {
+    return loginEmployeesFailure("unavailable");
+  }
+
+  const employees: LoginEmployee[] = [];
+
+  for (const entry of record.employees) {
+    const item = asRecord(entry);
+    const employeeId = item ? asNonEmptyString(item.employeeId) : null;
+    const displayName = item ? asNonEmptyString(item.displayName) : null;
+
+    if (!employeeId || !displayName) {
+      return loginEmployeesFailure("unavailable");
+    }
+
+    employees.push({ employeeId, displayName });
+  }
+
+  return { ok: true, employees };
 }

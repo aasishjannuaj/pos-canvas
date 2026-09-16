@@ -1,4 +1,4 @@
-// v1.3 Feature 1A — the employee session RPC boundary.
+// v1.3 Feature 1A / 1A.1 — the employee session RPC boundary.
 //
 // The ONLY module that pairs a Supabase client with the pure decisions in
 // lib/employeeSession.ts. Every call goes through the dedicated device client
@@ -18,8 +18,8 @@
 // does not hand it back. Note in particular that no catch block here
 // stringifies the arguments it was called with.
 //
-// ERROR DISCIPLINE: the database collapses wrong PIN, unknown PIN, inactive
-// employee, another project's employee and malformed PIN into a single
+// ERROR DISCIPLINE: the database collapses wrong PIN, unknown employee id,
+// inactive employee, another project's employee and malformed PIN into a single
 // `invalid_credentials`, exactly as pairing collapses five outcomes into
 // `invalid_code`. This module maps through lib/employeeSession.ts's message
 // table and never surfaces a raw Postgres message, so the UI cannot
@@ -37,11 +37,13 @@ import {
   parseCurrentEmployeeSessionResult,
   parseEmployeeLoginResult,
   parseEmployeeLogoutResult,
+  parseLoginEmployeesResult,
 } from "@/lib/employeeSession";
 import type {
   CurrentEmployeeSessionResult,
   EmployeeLoginResult,
   EmployeeLogoutResult,
+  LoginEmployeesResult,
 } from "@/lib/employeeSession";
 
 /**
@@ -98,15 +100,53 @@ function failure(code: "offline" | "unavailable"): UnreachedFailure {
 }
 
 // ---------------------------------------------------------------------------
+// list_login_employees — Feature 1A.1
+// ---------------------------------------------------------------------------
+
+/**
+ * Who this till may offer for sign-in, as the SERVER sees it right now.
+ *
+ * Takes no arguments: the server reads the project off this device's own
+ * pairing row, so a till cannot ask for another shop's staff.
+ *
+ * NOT CACHED, NOT PERSISTED. The list changes when an owner deactivates
+ * someone, and employee authentication is online-authoritative. A caller may
+ * hold the result in memory for the life of one selector screen; it must not
+ * be written to storage or treated as permission — login re-checks everything.
+ */
+export async function fetchLoginEmployees(): Promise<LoginEmployeesResult> {
+  try {
+    const { data, error, status } = await getDeviceSupabaseClient().rpc("list_login_employees");
+
+    if (error) {
+      return failure(unreachedFailure(withStatus(error, status)));
+    }
+
+    return parseLoginEmployeesResult(data);
+  } catch (thrown) {
+    return failure(unreachedFailure(thrown));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // employee_login
 // ---------------------------------------------------------------------------
 
 /**
- * Signs an employee in at THIS till, or switches the till to them.
+ * Signs the SELECTED employee in at THIS till, or switches the till to them.
  *
- * SENDS THE PIN AND NOTHING ELSE. There is no project id and no device id to
- * pass: the server derives both from the caller's own pairing row. A device
- * that could name its own tenant would be a device that could choose one.
+ * SENDS THE SELECTED EMPLOYEE ID AND THE PIN, AND NOTHING ELSE. There is no
+ * project id and no device id to pass: the server derives both from the
+ * caller's own pairing row. A device that could name its own tenant would be a
+ * device that could choose one.
+ *
+ * THE EMPLOYEE ID IS AN IDENTIFIER, NOT AUTHORIZATION. The server re-reads the
+ * employee's project, active flag and hash for itself; an id from another shop
+ * fails exactly like a wrong PIN. It is also what lets the server verify ONE
+ * hash instead of scanning the roster (Feature 1A.1). A value that is not a
+ * uuid at all is rejected by the database before the function body runs, so it
+ * reaches no PIN check and reports `unavailable`; ids only ever come from
+ * fetchLoginEmployees.
  *
  * A SUCCESSFUL LOGIN WHILE SOMEONE ELSE IS SIGNED IN IS THE SWITCH. The server
  * closes the incumbent session and opens the new one in one transaction, so
@@ -121,10 +161,9 @@ function failure(code: "offline" | "unavailable"): UnreachedFailure {
  * trip saved. It was actually the client deciding the outcome of an
  * authentication attempt, and it silently disabled the one defence that makes a
  * 4-6 digit PIN survivable: employee_login resolves the active device FIRST,
- * then counts a malformed PIN as a failed attempt through
- * employee_login_note_failure, which is what drives the lockout ladder. A till
- * that filtered those attempts out locally would let an attacker probe
- * indefinitely at zero cost to their failure counter — and would report
+ * then records a malformed PIN as a counted device failure, which is what drives
+ * the till's throttle. A till that filtered those attempts out locally would let
+ * an attacker probe indefinitely at zero cost to that counter — and would report
  * "not recognised" for a submission the server never saw and never recorded.
  *
  * So: NO TRIMMING, NO PADDING, NO NORMALIZATION, NO LOCAL REFUSAL. "123",
@@ -136,9 +175,13 @@ function failure(code: "offline" | "unavailable"): UnreachedFailure {
  * button or colour a field. That is presentation. Once an attempt is SUBMITTED,
  * it belongs to the server.
  */
-export async function employeeLogin(pin: string): Promise<EmployeeLoginResult> {
+export async function employeeLogin(
+  employeeId: string,
+  pin: string
+): Promise<EmployeeLoginResult> {
   try {
     const { data, error, status } = await getDeviceSupabaseClient().rpc("employee_login", {
+      p_employee_id: employeeId,
       p_pin: pin,
     });
 
