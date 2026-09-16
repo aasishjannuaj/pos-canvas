@@ -17,10 +17,14 @@ export default function ArticleMeta({ article }: { article: LearnArticle }) {
       </span>
       <span aria-hidden="true">·</span>
       <span>{CONTENT_TYPE_LABELS[article.contentType]}</span>
-      <span aria-hidden="true">·</span>
-      <time dateTime={article.publishedAt}>
-        {formatArticleDate(article.publishedAt)}
-      </time>
+      {article.publishedAt ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <time dateTime={article.publishedAt}>
+            {formatArticleDate(article.publishedAt)}
+          </time>
+        </>
+      ) : null}
       {article.updatedAt ? (
         <>
           <span aria-hidden="true">·</span>

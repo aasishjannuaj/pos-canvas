@@ -435,6 +435,13 @@
     border-color: var(--color-brand-peach);
   }
 
+  /* Motion with a still fallback, chosen by CSS rather than by JavaScript.
+     Both elements are rendered; this decides which one is visible, so the
+     article page stays a Server Component. */
+  .pc-animation__still {
+    display: none;
+  }
+
   .pc-chip {
     display: inline-flex;
     align-items: center;
@@ -458,6 +465,17 @@
   .pc-textlink,
   .pc-card--interactive {
     transition: none;
+  }
+
+  /* A reader who asked for less motion gets the still image, not a paused
+     video. The motion element is removed from layout entirely, which also
+     stops browsers decoding it. */
+  .pc-animation__motion {
+    display: none;
+  }
+
+  .pc-animation__still {
+    display: block;
   }
 
   .pc-card--interactive:hover {

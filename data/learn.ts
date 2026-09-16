@@ -29,8 +29,10 @@ const ONE_APP: LearnArticle = {
   status: "published",
   publishedAt: "2026-09-14",
 
-  // Every claim rests on functionality released in v1.2.0.
-  productTruthBasis: ["shipped"],
+  // Every claim rests on functionality released in v1.2.0, so this is
+  // shipped-product rather than general-education: the article IS about POS
+  // Canvas, and its POS Canvas claims are all released behaviour.
+  productTruth: "shipped-product",
   releaseTruthNotes:
     "Checked against v1.2.0: universal Android and Windows applications (lib/platformDownloads.ts, lib/androidRelease.ts, lib/windowsRelease.ts), configuration freezing (lib/generatedPosConfig.ts), device pairing (lib/devicePairing.ts) and offline selling (lib/offlineCheckout.ts, lib/saleQueue.ts). No employee, barcode, register or cash-movement capability is described, because none is released.",
 
@@ -123,6 +125,9 @@ const ONE_APP: LearnArticle = {
     label: "Browse the templates",
     href: "/templates",
   },
+
+  // Declared so the validator can check them. Local paths only.
+  internalLinks: ["/templates"],
 };
 
 /**

@@ -13,7 +13,9 @@ import sitemap from "@/app/sitemap";
 import { learnArticles } from "@/data/learn";
 import {
   TOPICS,
-  canPublish,
+  findFalseCapabilityClaims,
+  isPubliclyVisible,
+  isTruthEligible,
   featuredArticle,
   findPublishedArticle,
   publishedArticles,
@@ -49,7 +51,7 @@ function article(overrides: Partial<LearnArticle> = {}): LearnArticle {
     status: "published",
     publishedAt: "2026-01-01",
     body: [{ kind: "paragraph", text: "Body." }],
-    productTruthBasis: ["shipped"],
+    productTruth: "shipped-product",
     ...overrides,
   };
 }
@@ -58,37 +60,63 @@ function article(overrides: Partial<LearnArticle> = {}): LearnArticle {
 // Product truth — the rule this whole model exists for
 // ---------------------------------------------------------------------------
 
-describe("unreleased product functionality cannot be published", () => {
-  it("an article resting only on shipped work may publish", () => {
-    expect(canPublish(article({ productTruthBasis: ["shipped"] }))).toBe(true);
+describe("product truth decides what may be public, and status does not", () => {
+  it("shipped-product may be public", () => {
+    expect(isTruthEligible(article({ productTruth: "shipped-product" }))).toBe(true);
   });
 
-  it("an article resting on unreleased work may NOT publish", () => {
+  it("general-education may be public even where POS Canvas does not implement it", () => {
+    // THE TASK 3C CORRECTION. Task 3B allowed only "shipped", which made Learn
+    // incapable of publishing the general small-business education it exists
+    // for: an article about counting stock is not a claim that POS Canvas
+    // counts stock.
+    expect(isTruthEligible(article({ productTruth: "general-education" }))).toBe(true);
+  });
+
+  it("implemented-not-released may NOT be public", () => {
     // v1.3 is building employee, barcode and register features right now. This
     // is the case the field exists for.
     expect(
-      canPublish(article({ productTruthBasis: ["implemented-not-released"] }))
-    ).toBe(false);
-    expect(canPublish(article({ productTruthBasis: ["planned"] }))).toBe(false);
-    expect(
-      canPublish(article({ productTruthBasis: ["shipped", "planned"] }))
+      isTruthEligible(article({ productTruth: "implemented-not-released" }))
     ).toBe(false);
   });
 
-  it("an article that declares no basis may NOT publish", () => {
-    // Silence is not a claim of safety.
-    expect(canPublish(article({ productTruthBasis: [] }))).toBe(false);
+  it("planned may NOT be public", () => {
+    expect(isTruthEligible(article({ productTruth: "planned" }))).toBe(false);
   });
 
-  it("the public library drops an unreleased article even if marked published", () => {
-    // BELT AND BRACES. `status` is the editor's intent; canPublish is the rule.
-    // A mistake in the first is corrected by the second rather than shipped.
+  it("status and truth are independent, in both directions", () => {
+    // A draft about unreleased work is legitimate and stays private.
+    const draftAboutUnreleased = article({
+      status: "draft",
+      productTruth: "implemented-not-released",
+    });
+    expect(isTruthEligible(draftAboutUnreleased)).toBe(false);
+    expect(isPubliclyVisible(draftAboutUnreleased)).toBe(false);
+
+    // An eligible subject still is not public until an editor says so.
+    const eligibleDraft = article({ status: "draft", productTruth: "general-education" });
+    expect(isTruthEligible(eligibleDraft)).toBe(true);
+    expect(isPubliclyVisible(eligibleDraft)).toBe(false);
+
+    // And an editor saying so is not enough on its own.
+    const publishedIneligible = article({
+      status: "published",
+      productTruth: "planned",
+    });
+    expect(publishedIneligible.status).toBe("published");
+    expect(isPubliclyVisible(publishedIneligible)).toBe(false);
+  });
+
+  it("the public library drops an ineligible article even if marked published", () => {
+    // BELT AND BRACES: `status` is the editor's intent, truth is the rule about
+    // the world. A mistake in the first is corrected by the second.
     const library = [
       article({ slug: "ok" }),
       article({
         slug: "leaky",
         status: "published",
-        productTruthBasis: ["implemented-not-released"],
+        productTruth: "implemented-not-released",
       }),
     ];
 
@@ -99,34 +127,21 @@ describe("unreleased product functionality cannot be published", () => {
   it("every article actually in the library obeys its own declaration", () => {
     for (const a of learnArticles) {
       expect(`${a.slug} status/basis`).toBe(`${a.slug} status/basis`);
-      if (a.status === "published") expect(canPublish(a)).toBe(true);
+      if (a.status === "published") expect(isTruthEligible(a)).toBe(true);
     }
   });
 
-  it("no published article names an unreleased capability", () => {
-    // The vocabulary check, independent of the declared basis: prose can drift
-    // even when the metadata field is right.
-    const UNRELEASED = [
-      "barcode",
-      "scanner",
-      "scanning",
-      "employee",
-      "time clock",
-      "clock-in",
-      "clock in",
-      "register session",
-      "cash drawer",
-      "cash movement",
-      "age verification",
-    ];
-
+  it("no published article claims POS Canvas provides an unreleased capability", () => {
+    // CORRECTED. This used to ban a VOCABULARY — no published article could
+    // contain "barcode" or "employee" at all — which made the general-education
+    // class unpublishable: an article explaining how barcode scanning works in
+    // a shop is exactly what Learn is for. What is forbidden is attributing the
+    // capability to POS Canvas, not discussing it. See
+    // findFalseCapabilityClaims in lib/learn.ts, and the fixtures in
+    // lib/learnPackage.guards.test.ts.
     for (const a of publishedArticles(learnArticles)) {
-      const prose = JSON.stringify([a.title, a.deck, a.body]).toLowerCase();
-
-      for (const claim of UNRELEASED) {
-        expect(`${a.slug}: ${claim}`).toBe(`${a.slug}: ${claim}`);
-        expect(prose).not.toContain(claim);
-      }
+      expect(`${a.slug} claims`).toBe(`${a.slug} claims`);
+      expect(findFalseCapabilityClaims(a)).toEqual([]);
     }
   });
 
@@ -168,7 +183,7 @@ describe("a draft has no public surface at all", () => {
     const urls = sitemap().map((entry) => entry.url);
 
     for (const a of learnArticles) {
-      if (a.status === "published" && canPublish(a)) continue;
+      if (a.status === "published" && isTruthEligible(a)) continue;
       expect(`sitemap leaks ${a.slug}`).toBe(`sitemap leaks ${a.slug}`);
       expect(urls.some((url) => url.endsWith(`/learn/${a.slug}`))).toBe(false);
     }
@@ -396,12 +411,23 @@ describe("the library is internally consistent", () => {
   it("every date is a real ISO date, and updates are not before publication", () => {
     for (const a of learnArticles) {
       expect(`${a.slug} publishedAt`).toBe(`${a.slug} publishedAt`);
-      expect(a.publishedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      expect(Number.isNaN(Date.parse(a.publishedAt))).toBe(false);
+
+      // A DRAFT MAY HAVE NO PUBLICATION DATE — it has not been published, and
+      // the only dates available to invent from (when the workflow ran, when
+      // the file was created) are not publication events.
+      if (a.status === "published") {
+        expect(a.publishedAt).toBeDefined();
+      }
+
+      if (a.publishedAt) {
+        expect(a.publishedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(Number.isNaN(Date.parse(a.publishedAt))).toBe(false);
+      }
 
       if (a.updatedAt) {
         expect(a.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-        expect(a.updatedAt >= a.publishedAt).toBe(true);
+        expect(a.publishedAt).toBeDefined();
+        expect(a.updatedAt >= a.publishedAt!).toBe(true);
       }
     }
   });
@@ -532,7 +558,7 @@ describe("the library is internally consistent", () => {
     const published = publishedArticles(many);
 
     expect(published).toHaveLength(8);
-    expect(published.every((a) => canPublish(a))).toBe(true);
+    expect(published.every((a) => isTruthEligible(a))).toBe(true);
     // Newest first, and the featured slot is simply the newest.
     expect(published[0].slug).toBe("fixture-7");
     expect(featuredArticle(many)?.slug).toBe("fixture-7");
@@ -574,7 +600,7 @@ describe("the library is internally consistent", () => {
       article({
         slug: "unreleased",
         status: "published",
-        productTruthBasis: ["implemented-not-released"],
+        productTruth: "implemented-not-released",
       }),
     ];
 

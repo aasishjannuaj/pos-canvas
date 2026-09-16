@@ -6,6 +6,7 @@ import Features from "@/components/landing/Features";
 import HowItWorks from "@/components/landing/HowItWorks";
 import PlatformAvailability from "@/components/landing/PlatformAvailability";
 import CTASection from "@/components/landing/CTASection";
+import LearnDiscovery from "@/components/landing/LearnDiscovery";
 import Footer from "@/components/landing/Footer";
 import type { Metadata } from "next";
 import {
@@ -84,6 +85,12 @@ export default function Home() {
       <Features />
       <HowItWorks />
       <PlatformAvailability />
+      {/* Lane 3 Task 3C — Learn discovery, between the platform answer and the
+          call to action. A reader who has just learned what they would install
+          is the one most likely to want to read further before committing, and
+          it keeps lib/platformDiscoverability.guards.test.ts's ordering intact:
+          PlatformAvailability still sits between HowItWorks and CTASection. */}
+      <LearnDiscovery />
       <CTASection />
       <Footer />
     </main>

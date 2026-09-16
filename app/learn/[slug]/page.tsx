@@ -9,6 +9,11 @@ import RelatedArticles from "@/components/learn/RelatedArticles";
 import SourceList from "@/components/learn/SourceList";
 import { learnArticles } from "@/data/learn";
 import {
+  articleOgDescription,
+  articleOgTitle,
+  articlePath,
+  articleSeoDescription,
+  articleSeoTitle,
   findPublishedArticle,
   publishedArticles,
   relatedArticles,
@@ -59,15 +64,18 @@ export async function generateMetadata({
   // not-found response carries.
   if (!article) return { title: "Not found" };
 
-  const path = `/learn/${article.slug}`;
+  // Every value DERIVED from the article unless the package overrode it, so an
+  // editor never retypes the same sentence into four fields. The canonical is
+  // not overridable at all: it comes from the slug and the one approved origin.
+  const path = articlePath(article);
 
   return {
-    title: article.title,
-    description: article.deck,
+    title: articleSeoTitle(article),
+    description: articleSeoDescription(article),
     alternates: { canonical: absoluteUrl(path) },
     openGraph: buildOpenGraph({
-      title: article.title,
-      description: article.deck,
+      title: articleOgTitle(article),
+      description: articleOgDescription(article),
       path,
     }),
   };
@@ -83,7 +91,7 @@ export default async function LearnArticlePage({
 
   if (!article) notFound();
 
-  const path = `/learn/${article.slug}`;
+  const path = articlePath(article);
   const related = relatedArticles(learnArticles, article);
 
   return (
@@ -97,8 +105,11 @@ export default async function LearnArticlePage({
         dangerouslySetInnerHTML={{
           __html: JSON.stringify([
             buildArticleJsonLd({
-              title: article.title,
-              description: article.deck,
+              // The same derived values the page renders and the metadata
+              // declares — schema that disagrees with the visible page is the
+              // thing structured-data penalties exist for.
+              title: articleSeoTitle(article),
+              description: articleSeoDescription(article),
               path,
               publishedAt: article.publishedAt,
               updatedAt: article.updatedAt,
@@ -143,6 +154,16 @@ export default async function LearnArticlePage({
           <div className="mt-12">
             <ArticleBody blocks={article.body} />
           </div>
+
+          {article.editorialNote ? (
+            /* AI-transparency disclosure, rendered only when the package
+               carries one. Google's guidance is that AI should not get an
+               author byline, while an automation disclosure is useful where a
+               reader might ask "how was this made?". No invented person. */
+            <p className="mt-12 max-w-pc-prose text-pc-meta text-ink-subtle">
+              {article.editorialNote}
+            </p>
+          ) : null}
 
           <SourceList sources={article.sources} />
 

@@ -52,12 +52,17 @@ export default function ArticleCard({
         {article.deck}
       </p>
 
-      <time
-        dateTime={article.publishedAt}
-        className="mt-auto pt-2 text-pc-meta text-ink-subtle"
-      >
-        {formatArticleDate(article.publishedAt)}
-      </time>
+      {/* Only publicly visible articles reach a card, and those always carry a
+          publication date — but the type no longer guarantees it, and rendering
+          "Invalid Date" would be worse than rendering nothing. */}
+      {article.publishedAt ? (
+        <time
+          dateTime={article.publishedAt}
+          className="mt-auto pt-2 text-pc-meta text-ink-subtle"
+        >
+          {formatArticleDate(article.publishedAt)}
+        </time>
+      ) : null}
     </Link>
   );
 }

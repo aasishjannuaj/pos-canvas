@@ -240,7 +240,8 @@ export function buildArticleJsonLd(input: {
   title: string;
   description: string;
   path: string;
-  publishedAt: string;
+  /** Absent only for content that is not published, which never reaches schema. */
+  publishedAt?: string;
   updatedAt?: string;
 }): Record<string, unknown> {
   return {
@@ -248,7 +249,9 @@ export function buildArticleJsonLd(input: {
     "@type": "Article",
     headline: input.title,
     description: input.description,
-    datePublished: input.publishedAt,
+    // Omitted rather than invented when absent. An article without a real
+    // publication date does not get a made-up one in its structured data.
+    ...(input.publishedAt ? { datePublished: input.publishedAt } : {}),
     ...(input.updatedAt ? { dateModified: input.updatedAt } : {}),
     mainEntityOfPage: absoluteUrl(input.path),
     url: absoluteUrl(input.path),

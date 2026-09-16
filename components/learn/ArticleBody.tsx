@@ -1,5 +1,11 @@
 import PublishAndPairDiagram from "./diagrams/PublishAndPairDiagram";
-import type { ArticleBlock, DiagramName } from "@/lib/learn";
+import type {
+  AnimationName,
+  ArticleAnimation,
+  ArticleBlock,
+  ArticleImage,
+  DiagramName,
+} from "@/lib/learn";
 import Image from "next/image";
 
 // The block renderer.
@@ -16,6 +22,109 @@ import Image from "next/image";
 const DIAGRAMS: Record<DiagramName, () => React.JSX.Element> = {
   "publish-and-pair": PublishAndPairDiagram,
 };
+
+/**
+ * Reviewed animation components, by name — the same rule as diagrams.
+ *
+ * Empty, because `AnimationName` is `never`: no article needs a component
+ * animation, and adding one to populate the registry would be decoration. A
+ * real one is added here and to the type in the same change.
+ */
+const ANIMATIONS: Record<AnimationName, () => React.JSX.Element> = {};
+
+/** A caption a screen reader associates with its figure, or nothing at all. */
+function Caption({ text }: { text?: string }) {
+  if (!text) return null;
+  return (
+    <figcaption className="mt-4 text-pc-meta text-ink-subtle">{text}</figcaption>
+  );
+}
+
+/**
+ * One image, sized and labelled from its own record.
+ *
+ * A real product screenshot is framed and captioned as one, so a reader can
+ * tell evidence from illustration without taking anyone's word for it.
+ */
+function ArticleFigureImage({ image }: { image: ArticleImage }) {
+  const isScreenshot = image.provenance === "real-product-screenshot";
+
+  return (
+    <Image
+      src={image.src}
+      alt={image.decorative ? "" : image.alt}
+      width={image.width}
+      height={image.height}
+      className={`h-auto w-full ${isScreenshot ? "rounded-pc-sm border border-hairline" : ""}`}
+      sizes="(min-width: 768px) 68ch, 100vw"
+      // Article media sits below the fold by definition — the title and deck
+      // are above it — so nothing here competes with the page's own paint.
+      loading="lazy"
+    />
+  );
+}
+
+/**
+ * Motion, with the static fallback doing real work.
+ *
+ * BOTH ARE IN THE DOM AND CSS CHOOSES. `.pc-animation` shows the moving asset
+ * and hides the poster; under `prefers-reduced-motion: reduce` it swaps them.
+ * That keeps the whole thing a Server Component — no client JavaScript decides
+ * whether a reader sees motion — and a reader who asked for less gets the
+ * still image rather than a paused video.
+ *
+ * `<video>` rather than an <img> for animated WebP: it takes a poster
+ * attribute, it can be muted and looped without controls, and it never carries
+ * audio. Nothing here autoplays sound.
+ */
+function ArticleAnimationFigure({ animation }: { animation: ArticleAnimation }) {
+  if (animation.kind === "component") {
+    // `AnimationName` is `never` today, so no article can construct this
+    // variant and the branch is provably unreachable. It is written out rather
+    // than thrown away so that adding a reviewed component animation is one
+    // change — a name on the type and an entry in ANIMATIONS — instead of a
+    // new code path invented under time pressure.
+    const Animation = ANIMATIONS[animation.name] as
+      | (() => React.JSX.Element)
+      | undefined;
+    return Animation ? <Animation /> : null;
+  }
+
+  return (
+    <div className="pc-animation" style={{ aspectRatio: `${animation.width} / ${animation.height}` }}>
+      <video
+        className="pc-animation__motion h-auto w-full"
+        width={animation.width}
+        height={animation.height}
+        poster={animation.poster.src}
+        aria-label={animation.description}
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload={animation.loading === "eager" ? "auto" : "none"}
+      >
+        <source
+          src={animation.src}
+          type={animation.kind === "animated-webp" ? "image/webp" : "video/mp4"}
+        />
+      </video>
+
+      {/* What a reduced-motion reader sees, and the fallback if the asset
+          fails. It carries the accessible description, so the meaning does not
+          depend on the motion playing. */}
+      <Image
+        className="pc-animation__still h-auto w-full"
+        src={animation.poster.src}
+        alt={animation.description}
+        width={animation.poster.width}
+        height={animation.poster.height}
+        sizes="(min-width: 768px) 68ch, 100vw"
+        loading="lazy"
+      />
+    </div>
+  );
+}
 
 export default function ArticleBody({ blocks }: { blocks: ArticleBlock[] }) {
   return (
@@ -89,22 +198,29 @@ export default function ArticleBody({ blocks }: { blocks: ArticleBlock[] }) {
             );
           }
 
-          case "figure":
+          case "figure": {
+            // The caption may live on the block or on the image record; the
+            // block wins, because it is the more specific placement.
+            const caption = block.caption ?? block.image.caption;
+
             return (
-              <figure key={key} className="pc-card overflow-hidden p-0">
-                <Image
-                  src={block.image.src}
-                  alt={block.image.decorative ? "" : block.image.alt}
-                  width={block.image.width}
-                  height={block.image.height}
-                  className="h-auto w-full"
-                  sizes="(min-width: 768px) 68ch, 100vw"
-                />
-                {block.caption ? (
-                  <figcaption className="border-t border-hairline px-5 py-3 text-pc-meta text-ink-subtle">
-                    {block.caption}
-                  </figcaption>
+              <figure key={key} className="pc-card p-5">
+                <ArticleFigureImage image={block.image} />
+                {block.image.provenance === "real-product-screenshot" ? (
+                  <p className="mt-3 text-pc-meta font-semibold uppercase tracking-wider text-brand-teal-deep">
+                    POS Canvas screenshot
+                  </p>
                 ) : null}
+                <Caption text={caption} />
+              </figure>
+            );
+          }
+
+          case "animation":
+            return (
+              <figure key={key} className="pc-card p-5">
+                <ArticleAnimationFigure animation={block.animation} />
+                <Caption text={block.animation.caption} />
               </figure>
             );
         }
