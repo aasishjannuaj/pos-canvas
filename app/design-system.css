@@ -435,6 +435,39 @@
     border-color: var(--color-brand-peach);
   }
 
+  /* A real product screenshot that may be wider than its column.
+     Lane 3 Task 3D. A Builder capture scaled to fit a phone renders ~324px
+     wide and its interface text becomes unreadable — the image is present
+     but nothing in it can be inspected. Below the desktop breakpoint the
+     SAME image keeps a minimum width equal to the scale that is legible on
+     desktop, and this viewport scrolls horizontally instead of the page.
+     Nothing is cropped away and no pixel changes; the reader moves across
+     the real screenshot rather than being shown a smaller one. */
+  .pc-screenshot-viewport {
+    display: block;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-pc-sm);
+  }
+
+  .pc-screenshot-viewport__image {
+    display: block;
+    min-width: 62rem;
+  }
+
+  /* From the desktop breakpoint the column is wide enough to read the
+     screenshot as-is, so it fits the column and nothing scrolls. */
+  @media (min-width: 64rem) {
+    .pc-screenshot-viewport {
+      overflow-x: visible;
+    }
+
+    .pc-screenshot-viewport__image {
+      min-width: 0;
+    }
+  }
+
   /* Motion with a still fallback, chosen by CSS rather than by JavaScript.
      Both elements are rendered; this decides which one is visible, so the
      article page stays a Server Component. */

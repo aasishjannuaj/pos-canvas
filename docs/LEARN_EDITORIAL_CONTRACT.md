@@ -255,13 +255,33 @@ means *captured from the running POS Canvas product*. A mockup, a recreated
 interface, a generated image or a redrawn "clean" version is an `illustration` —
 never a screenshot, under any pressure.
 
-A `real-product-screenshot` additionally requires `capture`:
+A `real-product-screenshot` additionally requires `capture` — **internal**
+provenance that is never rendered:
 
 ```ts
-capture: { surface: string; capturedAt: string /* ISO */; appVersion?: string }
+capture: {
+  surface: string;                                  // product surface and state
+  platform: "web-builder" | "web-device" | "android" | "windows";
+  capturedAt: string;                               // ISO date
+  shippedBasis: { version: string; commit: string }; // e.g. "1.2.0" + full 40-char SHA
+  context: string;                                  // how it was captured and processed
+  demonstrates: string;                             // what it shows a reader
+  reviews: {
+    unreleasedFeatures: "passed";
+    sensitiveInformation: "passed";
+  };
+}
 ```
 
-so the claim carries its own evidence, and:
+**Strengthened in Task 3D, when the first real asset arrived.** The earlier shape
+(surface, date, optional version) could not defend the claim "this is the shipped
+product": it did not record which **platform** the pixels came from, which
+**release** they represent, or that anyone had **checked** them. The two reviews
+are literal `"passed"` types, so a record cannot be written without attesting to
+them. A Builder capture must never be framed as the till, and a till captured in
+a browser at `/device` is not the Android app.
+
+The claim therefore carries its own evidence, and:
 
 - may **not** be `decorative` — evidence is not decoration
 - must have non-empty alt text
@@ -274,6 +294,20 @@ would make a mockup look like evidence.
 **Never visible in a screenshot:** credentials, tokens, API keys, real customer
 names or contact details, real order data, or anything that exists only in
 staging.
+
+**Allowed processing:** crop, resize, lossless or reasonable compression, format
+conversion, and a decorative frame whose contents stay truthful. **Never:**
+retouching, erasing controls, regenerating or reconstructing pixels,
+compositing states, or AI image editing. If something that is not the product
+appears in a capture — browser chrome, a development-tools badge — it is removed
+by **cropping**, never by painting over it.
+
+**Where they live.** Real screenshots are served from `public/screenshots/`,
+each described by exactly one reviewed record in `data/productMedia.ts` — the
+same `ArticleImage` contract an article figure uses, so homepage media and Learn
+media obey one set of rules. A file in that directory without a record fails the
+build. Raw captures, which carry browser chrome and personal browsing context,
+stay outside the repository.
 
 ### Animation
 
@@ -340,15 +374,32 @@ documentation treats `legalName` as **optional**. Naming POS Canvas as the
 accountable editorial author is therefore **an owner policy decision, not a
 technical blocker**.
 
-It is still not being done now. The open options:
+### The v1.3 policy: OPTION A — decided
 
-| | |
-|---|---|
-| **A** | No author or byline yet; use a truthful creation/process disclosure where one is appropriate. *(current behaviour)* |
-| **B** | A named human author/editor, once a real person accepts responsibility and the owner approves the public identity. |
-| **C** | POS Canvas as an `Organization` author — only if the owner explicitly decides POS Canvas itself is the accountable editorial author. |
+The Control Room has **decided Option A for v1.3**:
 
-None of the three is implemented. The decision is the owner's and remains open.
+> No named author or byline. No invented author, editor, credentials, biography
+> or publisher identity. No "POS Canvas Editorial Team". A **truthful process or
+> AI-assistance disclosure** may be used where appropriate — that is what
+> `editorialNote` is for.
+
+Recorded in code as `LEARN_AUTHORSHIP_POLICY` in `lib/learn.ts`, and asserted by
+the guard suite, so the repository states the decision rather than merely
+happening to behave that way.
+
+The options that were considered:
+
+| | | |
+|---|---|---|
+| **A** | No author/byline; truthful process disclosure where appropriate | **DECIDED for v1.3** |
+| **B** | A named human author/editor, once a real person accepts responsibility and the owner approves the public identity | available later |
+| **C** | POS Canvas as an `Organization` author, if the owner decides POS Canvas itself is the accountable editorial author | available later |
+
+**This is a v1.3 editorial policy, not a permanent prohibition.** Named
+authorship stays architecturally possible; what has not been decided is who is
+publicly accountable for this content, not whether the schema could express it.
+Changing the policy means changing the constant, its guard and this document
+together, in one reviewed change.
 
 `editorialNote` is the disclosure channel: a factual sentence about how an
 article came to exist, rendered verbatim when present. It follows Google's

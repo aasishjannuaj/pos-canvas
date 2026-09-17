@@ -1,5 +1,7 @@
+import Image from "next/image";
 import SectionHeading from "./SectionHeading";
 import { templates } from "@/data/templates";
+import { BUILDER_CAFE_PRODUCTS } from "@/data/productMedia";
 
 // Lane 3 Task 2 — this section used to be a bare list of eight industry names
 // under the heading "Built for every kind of business". It asserted breadth
@@ -47,6 +49,62 @@ export default function BusinessTypes() {
           Selling something that is not on this list? Start from the closest
           template and change it until it fits.
         </p>
+
+        {/* Lane 3 Task 3D — the one place a real product screenshot earns its
+            space on the homepage. This section says "everything after that is
+            yours to change" in prose; the capture shows it: the actual Builder,
+            a template's catalogue and prices, and the point of sale beside
+            them. It supports the explanation rather than replacing it, which
+            is why it sits under the copy and not above it.
+
+            Rendered from the provenance record in data/productMedia.ts, so the
+            dimensions, alt text and caption are the reviewed ones. The internal
+            capture metadata is never rendered. Lazy by default: this section is
+            well below the fold. */}
+        <figure className="pc-card mx-auto mt-12 max-w-5xl p-3 sm:p-4">
+          {/* Narrow screens only. The screenshot keeps a readable width there
+              and scrolls inside its own viewport; this line says so, because
+              an image running off the edge otherwise just looks cropped.
+              Visual guidance only — a screen reader gets the alt text. */}
+          <p
+            aria-hidden="true"
+            className="mb-2 px-1 text-pc-meta text-ink-subtle lg:hidden"
+          >
+            Scroll sideways to see the whole screenshot &rarr;
+          </p>
+
+          {/* The scroll viewport. Focusable and named, so a keyboard user can
+              scroll it with the arrow keys — a scrollable region that cannot
+              take focus is unreachable without a pointer. Named by the
+              caption rather than by a second string. CSS alone decides when it
+              scrolls; there is no client JavaScript here. */}
+          <div
+            className="pc-screenshot-viewport pc-focusable"
+            tabIndex={0}
+            role="region"
+            aria-labelledby="builder-screenshot-caption"
+          >
+            <Image
+              src={BUILDER_CAFE_PRODUCTS.src}
+              alt={BUILDER_CAFE_PRODUCTS.alt}
+              width={BUILDER_CAFE_PRODUCTS.width}
+              height={BUILDER_CAFE_PRODUCTS.height}
+              // Below 1024px the image is held at 992px (62rem) and scrolls,
+              // so it must be fetched for that width, not for the viewport.
+              sizes="(min-width: 1080px) 1000px, (min-width: 1024px) 94vw, 992px"
+              className="pc-screenshot-viewport__image h-auto w-full"
+            />
+          </div>
+
+          <figcaption className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1 text-pc-meta text-ink-subtle">
+            <span id="builder-screenshot-caption">
+              {BUILDER_CAFE_PRODUCTS.caption}
+            </span>
+            <span className="font-semibold uppercase tracking-wider text-brand-teal-deep">
+              POS Canvas screenshot
+            </span>
+          </figcaption>
+        </figure>
       </div>
     </section>
   );

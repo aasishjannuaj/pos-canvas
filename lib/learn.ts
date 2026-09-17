@@ -122,6 +122,35 @@ export const PUBLICLY_ELIGIBLE_TRUTH: readonly ProductTruth[] = [
 ] as const;
 
 // ---------------------------------------------------------------------------
+// Authorship policy
+// ---------------------------------------------------------------------------
+
+/**
+ * The v1.3 authorship policy, decided by the Control Room (Option A).
+ *
+ * Learn articles carry NO named author or byline, and Article structured data
+ * carries no `author` and no `publisher`. Not because either is technically
+ * impossible — Google's Article documentation accepts a Person or an
+ * Organization as author, and Organization's `legalName` is optional — but
+ * because POS Canvas has no approved editorial identity, and an invented
+ * writer, editor, credential or biography is the most common fabrication on a
+ * content site.
+ *
+ * A truthful process or AI-assistance disclosure is still allowed, and is what
+ * `LearnArticle.editorialNote` is for.
+ *
+ * THIS IS A v1.3 POLICY, NOT A PERMANENT PROHIBITION. Named authorship remains
+ * architecturally possible: the decision that has not been made is who is
+ * publicly accountable for this content, not whether the schema could express
+ * it. Changing the policy means changing this constant, the guard that reads
+ * it, and docs/LEARN_EDITORIAL_CONTRACT.md together — deliberately, in one
+ * reviewed change.
+ */
+export const LEARN_AUTHORSHIP_POLICY = "no-named-author" as const;
+
+export type LearnAuthorshipPolicy = typeof LEARN_AUTHORSHIP_POLICY;
+
+// ---------------------------------------------------------------------------
 // Media
 // ---------------------------------------------------------------------------
 
@@ -162,13 +191,54 @@ export type MediaProvenance =
  * customer names or contact details, real order data, or anything visible only
  * in staging. `surface` describes the screen, not the account.
  */
+/**
+ * The surface a screenshot was ACTUALLY taken on.
+ *
+ * Recorded because the same product renders on several: a Builder capture is
+ * not the till, and a till captured in a browser at /device is not the Android
+ * app. A decorative frame around a screenshot must never contradict this.
+ */
+export type ScreenshotPlatform = "web-builder" | "web-device" | "android" | "windows";
+
+export const SCREENSHOT_PLATFORMS: readonly ScreenshotPlatform[] = [
+  "web-builder",
+  "web-device",
+  "android",
+  "windows",
+] as const;
+
+/**
+ * INTERNAL provenance for a real product screenshot. Never rendered.
+ *
+ * STRENGTHENED IN TASK 3D, WHEN THE FIRST REAL ASSET ARRIVED. The Task 3C shape
+ * carried only a surface, a date and an optional version, and the first genuine
+ * capture showed that is not enough to defend the claim "this is the shipped
+ * product": it did not say which PLATFORM the pixels came from, which RELEASE
+ * they represent, or that anyone had checked them. Each of those is now
+ * required, and the two reviews are LITERAL "passed" types, so a record cannot
+ * be written at all without attesting to them.
+ *
+ * Public text lives on the image (`alt`, `caption`). Nothing here is shown to a
+ * reader.
+ */
 export type ScreenshotCapture = {
-  /** The product surface, e.g. "Builder — products panel". */
+  /** The product surface and state, e.g. "Builder (/editor/cafe) — Menu tab". */
   surface: string;
+  /** Where the pixels actually came from. */
+  platform: ScreenshotPlatform;
   /** ISO date the capture was taken. */
   capturedAt: string;
-  /** Optional released version it was captured from, e.g. "1.2.0". */
-  appVersion?: string;
+  /** The released product this represents: a version AND the commit it shipped as. */
+  shippedBasis: { version: string; commit: string };
+  /** How it was captured and processed. */
+  context: string;
+  /** What the screenshot shows a reader, for a reviewer's benefit. */
+  demonstrates: string;
+  /** Human attestations. Literal types: there is no way to record "not checked". */
+  reviews: {
+    unreleasedFeatures: "passed";
+    sensitiveInformation: "passed";
+  };
 };
 
 /**
@@ -589,10 +659,28 @@ function validateImage(
     if (!image.capture)
       issues.push({ slug, field, problem: "real screenshot needs capture details" });
     else {
-      if (image.capture.surface.trim() === "")
+      const capture = image.capture;
+      if (capture.surface.trim() === "")
         issues.push({ slug, field, problem: "screenshot capture needs a surface" });
-      if (!ISO_DATE.test(image.capture.capturedAt))
+      if (!ISO_DATE.test(capture.capturedAt))
         issues.push({ slug, field, problem: "screenshot capturedAt must be an ISO date" });
+      if (!SCREENSHOT_PLATFORMS.includes(capture.platform))
+        issues.push({ slug, field, problem: "screenshot needs a known platform" });
+      // The release it represents: a version a reader would recognise, and the
+      // exact commit that version shipped as.
+      if (!capture.shippedBasis || capture.shippedBasis.version.trim() === "")
+        issues.push({ slug, field, problem: "screenshot needs a shipped version" });
+      if (!capture.shippedBasis || !/^[0-9a-f]{40}$/.test(capture.shippedBasis.commit))
+        issues.push({ slug, field, problem: "screenshot needs the full shipped commit" });
+      if (!capture.context || capture.context.trim() === "")
+        issues.push({ slug, field, problem: "screenshot needs its capture context" });
+      if (!capture.demonstrates || capture.demonstrates.trim() === "")
+        issues.push({ slug, field, problem: "screenshot needs to say what it demonstrates" });
+      // Typed as literals, but data can be cast — check at runtime too.
+      if (capture.reviews?.unreleasedFeatures !== "passed")
+        issues.push({ slug, field, problem: "screenshot lacks an unreleased-feature review" });
+      if (capture.reviews?.sensitiveInformation !== "passed")
+        issues.push({ slug, field, problem: "screenshot lacks a sensitive-information review" });
     }
     // Evidence is never decoration.
     if (image.decorative)
@@ -607,6 +695,17 @@ function validateImage(
       problem: "only a real-product-screenshot may carry capture details",
     });
   }
+}
+
+/**
+ * Validate one image that is used OUTSIDE a Learn article — on the homepage,
+ * say — against the same rules an article figure obeys. One contract for media,
+ * wherever it is shown.
+ */
+export function validateMediaImage(label: string, image: ArticleImage): ArticleIssue[] {
+  const issues: ArticleIssue[] = [];
+  validateImage(label, "image", image, issues);
+  return issues;
 }
 
 /**

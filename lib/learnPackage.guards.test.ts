@@ -17,6 +17,7 @@ import { learnArticles } from "@/data/learn";
 import { buildArticleJsonLd } from "@/lib/seo";
 import {
   CONTENT_TYPE_LABELS,
+  LEARN_AUTHORSHIP_POLICY,
   PUBLICLY_ELIGIBLE_TRUTH,
   TOPICS,
   articleOgDescription,
@@ -33,6 +34,7 @@ import {
   type ArticleImage,
   type LearnArticle,
   type ProductTruth,
+  type ScreenshotCapture,
 } from "@/lib/learn";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -60,6 +62,20 @@ function pkg(overrides: Partial<LearnArticle> = {}): LearnArticle {
     publishedAt: "2026-02-01",
     body: [{ kind: "paragraph", text: "Body." }],
     productTruth: "general-education",
+    ...overrides,
+  };
+}
+
+/** A complete, valid capture record. Tests remove one field at a time. */
+function capture(overrides: Partial<ScreenshotCapture> = {}): ScreenshotCapture {
+  return {
+    surface: "Builder — products panel",
+    platform: "web-builder",
+    capturedAt: "2026-09-01",
+    shippedBasis: { version: "1.2.0", commit: "75f1fd35780e07ac8ee4a1c4484f6a178d03ff30" },
+    context: "Fixture capture.",
+    demonstrates: "A fixture.",
+    reviews: { unreleasedFeatures: "passed", sensitiveInformation: "passed" },
     ...overrides,
   };
 }
@@ -562,11 +578,7 @@ describe("a mockup can never be presented as the product", () => {
           image: image({
             provenance: "real-product-screenshot",
             alt: "The Builder's products panel",
-            capture: {
-              surface: "Builder — products panel",
-              capturedAt: "2026-09-01",
-              appVersion: "1.2.0",
-            },
+            capture: capture(),
           }),
         },
       ],
@@ -583,7 +595,7 @@ describe("a mockup can never be presented as the product", () => {
             provenance: "real-product-screenshot",
             decorative: true,
             alt: "",
-            capture: { surface: "Builder", capturedAt: "2026-09-01" },
+            capture: capture(),
           }),
         },
       ],
@@ -602,7 +614,7 @@ describe("a mockup can never be presented as the product", () => {
           kind: "figure",
           image: image({
             provenance: "illustration",
-            capture: { surface: "Builder", capturedAt: "2026-09-01" },
+            capture: capture(),
           }),
         },
       ],
@@ -821,6 +833,33 @@ describe("the repository knows nothing about editorial scheduling", () => {
       expect(`learn.ts: ${banned}`).toBe(`learn.ts: ${banned}`);
       expect(source).not.toContain(banned);
     }
+  });
+
+  it("records the decided v1.3 authorship policy", () => {
+    // Task 3D — the Control Room decided Option A. The repository now STATES
+    // that rather than merely happening to behave that way, so a future change
+    // is a deliberate edit to the constant, this guard and the contract
+    // together.
+    expect(LEARN_AUTHORSHIP_POLICY).toBe("no-named-author");
+
+    // And the behaviour still matches the policy: no author, no publisher, and
+    // no invented identity anywhere in the article surface.
+    const route = code(read("app/learn/[slug]/page.tsx"));
+    const meta = code(read("components/learn/ArticleMeta.tsx"));
+
+    for (const invented of ["author", "byline", "Editorial Team", "publisher"]) {
+      expect(`article surface: ${invented}`).toBe(`article surface: ${invented}`);
+      expect(route).not.toContain(invented);
+      expect(meta).not.toContain(invented);
+    }
+
+    // Disclosure remains available — the policy forbids invented identity, not
+    // truthful process transparency.
+    expect(route).toContain("editorialNote");
+
+    const contract = read("docs/LEARN_EDITORIAL_CONTRACT.md");
+    expect(contract).toContain("OPTION A — decided");
+    expect(contract).toContain("not a permanent prohibition");
   });
 
   it("documents the contract outside TypeScript", () => {
