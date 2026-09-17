@@ -589,15 +589,31 @@ grant execute on function public.get_current_register_session() to authenticated
 -- ----------------------------------------------------------------------------
 -- 6. close_register_session -- primitive lifecycle close.
 --
--- The argument is a TARGET, not authority: the device is derived, the target
--- must belong to it, and the closer is whoever is signed in there. Sets
--- closed_at and closed_by_employee_id and nothing else -- no cash, no totals.
+-- The argument is a TARGET, not authority: it names a row, and everything that
+-- may act on that row is derived. Sets closed_at and closed_by_employee_id and
+-- nothing else -- no cash, no totals.
 --
--- NATURALLY IDEMPOTENT, so there is no close request id: a target that is
--- already closed answers with its STORED state and is never rewritten, and a
--- retry naming an old session can never touch the newer one. Only the FIRST
--- close requires a signed-in employee; a completed close does not depend on
--- whoever is signed in now.
+-- TARGET FIRST, AND THIS IS THE LOAD-BEARING PART. The caller's own identity is
+-- never used to pick a device row. The target register session is found by id,
+-- its OWN paired_device_id is followed to the exact historical device row that
+-- opened it, and that row's auth_user_id is compared with auth.uid(). A device
+-- that re-pairs gets a NEW paired_devices row under a NEW anonymous auth user,
+-- so resolving "the caller's current pairing" first would either miss an older
+-- session or let a newer pairing speak for it. Neither is allowed: the register
+-- identity of a session is the device row it was opened on, for its whole life.
+--
+-- NATURALLY IDEMPOTENT, so there is no close request id.
+--
+-- A COMPLETED CLOSE IS IMMUTABLE AND IS NOT AN OPERATION. Once closed_at is
+-- set, a retry naming that target returns the STORED state after nothing but
+-- authentication and ownership: no pairing state, no employee session, no
+-- employee, no role, no register state, no lock and no write. Revocation,
+-- unpair, a switch, a logout, a deactivation or a newer register session on the
+-- same till all happen AFTER the fact and cannot change a completed result.
+--
+-- A FIRST close is an operation and keeps full operational authority: the
+-- target's own device must still be active, and an active employee must be
+-- signed in on it.
 -- ----------------------------------------------------------------------------
 create or replace function public.close_register_session(
   p_register_session_id uuid
@@ -609,7 +625,9 @@ set search_path = public, pg_temp
 as $function$
 declare
   v_caller uuid;
-  v_device record;
+  v_device_id uuid;
+  v_project_id uuid;
+  v_device_locked integer;
   v_employee_session record;
   v_has_employee boolean;
   v_register record;
@@ -624,66 +642,41 @@ begin
     return jsonb_build_object('ok', false, 'error', 'not_found');
   end if;
 
-  -- Step 1: the device, FOR UPDATE -- excludes a concurrent sale's FOR SHARE,
-  -- and every other open or close on this till.
-  select d.id, d.project_id
-  into v_device
-  from public.paired_devices d
-  where d.auth_user_id = v_caller
-    and d.revoked_at is null
-    and d.unpaired_at is null
-  for update;
-
-  if not found then
-    return jsonb_build_object('ok', false, 'error', 'not_paired');
-  end if;
-
-  -- Steps 3-4, before the register row, keeping the global order. Required
-  -- only for a first close below.
-  select s.id, s.employee_id
-  into v_employee_session
-  from public.employee_pos_sessions s
-  join public.employees e on e.id = s.employee_id
-  where s.paired_device_id = v_device.id
-    and s.ended_at is null
-    and e.active
-    and e.project_id = v_device.project_id
-    and e.role in ('owner', 'manager', 'cashier')
-  for share of s, e;
-
-  v_has_employee := found;
-
-  -- Step 5: the target, FOR UPDATE, and only if it is this till's. Another
-  -- device's session is indistinguishable from one that does not exist.
+  -- ==========================================================================
+  -- TARGET-FIRST HISTORICAL OWNERSHIP. Unlocked, and deliberately so: this read
+  -- decides only WHOSE row this is, which is immutable. paired_devices.id,
+  -- auth_user_id and project_id are all frozen by
+  -- paired_devices_guard_immutable_columns, and register_sessions.paired_device_id
+  -- has no writer at all, so nothing here can be stale in a way that matters.
+  --
+  -- No revoked_at / unpaired_at filter: those are operational state, not
+  -- ownership, and a completed close must survive both.
+  --
+  -- A target owned by another device, by another project, or one that does not
+  -- exist are ALL the same answer -- the caller learns nothing it did not
+  -- already know.
+  -- ==========================================================================
   select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
-         r.closed_at, r.closed_by_employee_id
+         r.closed_at, r.closed_by_employee_id,
+         d.id as device_id, d.project_id
   into v_register
   from public.register_sessions r
+  join public.paired_devices d on d.id = r.paired_device_id
   where r.id = p_register_session_id
-    and r.paired_device_id = v_device.id
-  for update;
+    and d.auth_user_id = v_caller;
 
   if not found then
     return jsonb_build_object('ok', false, 'error', 'not_found');
   end if;
 
-  if v_register.closed_at is null then
-    if not v_has_employee then
-      return jsonb_build_object('ok', false, 'error', 'employee_session_required');
-    end if;
-
-    update public.register_sessions r
-    set closed_at = clock_timestamp(),
-        closed_by_employee_id = v_employee_session.employee_id
-    where r.id = v_register.id
-      and r.closed_at is null
-    returning r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
-              r.closed_at, r.closed_by_employee_id
-    into v_register;
-
+  -- ==========================================================================
+  -- ALREADY CLOSED: the stored state, immediately. Nothing below this point
+  -- runs -- no pairing check, no employee, no lock, no write.
+  -- ==========================================================================
+  if v_register.closed_at is not null then
     return jsonb_build_object(
       'ok', true,
-      'alreadyClosed', false,
+      'alreadyClosed', true,
       'registerSession', jsonb_build_object(
         'registerSessionId', v_register.id,
         'openedAt', v_register.opened_at,
@@ -695,10 +688,95 @@ begin
     );
   end if;
 
-  -- Already closed: the stored state, unchanged.
+  v_device_id := v_register.device_id;
+  v_project_id := v_register.project_id;
+
+  -- ==========================================================================
+  -- FIRST CLOSE -- an operation, with the approved lock order.
+  --
+  -- Step 1: THAT SAME device row, FOR UPDATE. Not "the caller's device": the
+  -- one the target belongs to. The active-pairing rule is re-checked here,
+  -- under the lock, so a revoke or unpair that commits while this call was
+  -- reading is seen rather than missed -- READ COMMITTED re-evaluates this
+  -- WHERE against the updated row, and the row stops qualifying.
+  -- ==========================================================================
+  select 1
+  into v_device_locked
+  from public.paired_devices d
+  where d.id = v_device_id
+    and d.revoked_at is null
+    and d.unpaired_at is null
+  for update;
+
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_paired');
+  end if;
+
+  -- Steps 3-4: the signed-in employee, FOR SHARE on the session and the
+  -- employee. Recorded, not yet required: if a concurrent close beat this one,
+  -- the answer below is that close's stored state, not a complaint about who
+  -- is signed in now.
+  select s.id, s.employee_id
+  into v_employee_session
+  from public.employee_pos_sessions s
+  join public.employees e on e.id = s.employee_id
+  where s.paired_device_id = v_device_id
+    and s.ended_at is null
+    and e.active
+    and e.project_id = v_project_id
+    and e.role in ('owner', 'manager', 'cashier')
+  for share of s, e;
+
+  v_has_employee := found;
+
+  -- Step 5: the target, FOR UPDATE, re-read under the lock. The pre-lock read
+  -- above decided ownership only; the state it saw is re-established here
+  -- before anything is written.
+  select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+         r.closed_at, r.closed_by_employee_id
+  into v_register
+  from public.register_sessions r
+  where r.id = p_register_session_id
+    and r.paired_device_id = v_device_id
+  for update;
+
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+
+  -- Another close committed while this one waited for the lock. Its result is
+  -- the answer, and it is not rewritten.
+  if v_register.closed_at is not null then
+    return jsonb_build_object(
+      'ok', true,
+      'alreadyClosed', true,
+      'registerSession', jsonb_build_object(
+        'registerSessionId', v_register.id,
+        'openedAt', v_register.opened_at,
+        'openedByEmployeeId', v_register.opened_by_employee_id,
+        'openingCash', v_register.opening_cash::text,
+        'closedAt', v_register.closed_at,
+        'closedByEmployeeId', v_register.closed_by_employee_id
+      )
+    );
+  end if;
+
+  if not v_has_employee then
+    return jsonb_build_object('ok', false, 'error', 'employee_session_required');
+  end if;
+
+  update public.register_sessions r
+  set closed_at = clock_timestamp(),
+      closed_by_employee_id = v_employee_session.employee_id
+  where r.id = v_register.id
+    and r.closed_at is null
+  returning r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+            r.closed_at, r.closed_by_employee_id
+  into v_register;
+
   return jsonb_build_object(
     'ok', true,
-    'alreadyClosed', true,
+    'alreadyClosed', false,
     'registerSession', jsonb_build_object(
       'registerSessionId', v_register.id,
       'openedAt', v_register.opened_at,
@@ -2572,6 +2650,53 @@ begin
   end if;
 
   -- ==========================================================================
+  -- A8b. close_register_session: target-first ownership, and an immutable
+  -- completed close.
+  -- ==========================================================================
+  v_def := pg_get_functiondef(to_regprocedure(v_public_sigs[3]));
+
+  -- Ownership is resolved FROM THE TARGET, through the register session's own
+  -- paired_device_id, and nowhere else: the caller's identity appears exactly
+  -- once, inside that join.
+  if position('join public.paired_devices d on d.id = r.paired_device_id' in v_def) = 0
+     or position('join public.paired_devices d on d.id = r.paired_device_id' in v_def)
+        > position('d.auth_user_id = v_caller' in v_def)
+     or (length(v_def) - length(replace(v_def, 'auth_user_id', ''))) / length('auth_user_id') <> 1 then
+    raise exception 'F1B: close_register_session must resolve ownership from the target register session, not from the caller''s current pairing';
+  end if;
+
+  -- That ownership read carries no operational filter: a completed close must
+  -- survive revocation and unpair.
+  v_text := substring(v_def from 'select r\.id, r\.opened_at.*?d\.auth_user_id = v_caller;');
+
+  -- NOTE the tokens: the SELECT list legitimately carries opened_by_employee_id
+  -- and closed_by_employee_id, so this names tables and operational columns,
+  -- never the substring "employee".
+  if v_text is null
+     or v_text ~ '(revoked_at|unpaired_at|ended_at|\mactive\M|public\.employees|public\.employee_pos_sessions|for update|for share)' then
+    raise exception 'F1B: the close ownership lookup must be an unfiltered, unlocked read of the target';
+  end if;
+
+  -- The stored-state answer precedes every operational requirement and every
+  -- lock in the body.
+  if position('''alreadyClosed'', true,' in v_def) > position('revoked_at is null' in v_def)
+     or position('''alreadyClosed'', true,' in v_def) > position('employee_pos_sessions' in v_def)
+     or position('''alreadyClosed'', true,' in v_def) > position('for update' in v_def)
+     or position('''alreadyClosed'', true,' in v_def) > position('for share' in v_def) then
+    raise exception 'F1B: close_register_session must answer an already-closed target before any pairing, employee or lock';
+  end if;
+
+  -- A first close still needs the target's OWN device to be active, and the
+  -- update still touches only the target and only while it is open.
+  if position('where d.id = v_device_id' in v_def) = 0
+     or position('and d.revoked_at is null' in v_def) = 0
+     or position('and d.unpaired_at is null' in v_def) = 0
+     or position('where r.id = v_register.id' in v_def) = 0
+     or position('and r.closed_at is null' in v_def) = 0 then
+    raise exception 'F1B: the first-close path lost the active-pairing rule or its target-only update';
+  end if;
+
+  -- ==========================================================================
   -- A9. Live smoke calls, as a signed-in caller that is NOT a paired device.
   -- Each proves an argument rule runs, and runs before any lookup, without
   -- touching a row.
@@ -2622,9 +2747,11 @@ begin
     raise exception 'F1B: open_register_session accepted a missing request id';
   end if;
 
+  -- close answers not_found for an unknown target: the caller learns nothing
+  -- about whether that register session exists, or whose it is.
   if public.get_current_register_session() ->> 'error' is distinct from 'not_paired'
      or public.close_register_session(null) ->> 'error' is distinct from 'not_found'
-     or public.close_register_session(gen_random_uuid()) ->> 'error' is distinct from 'not_paired' then
+     or public.close_register_session(gen_random_uuid()) ->> 'error' is distinct from 'not_found' then
     raise exception 'F1B: a register RPC did not refuse a caller that is not a paired device';
   end if;
 

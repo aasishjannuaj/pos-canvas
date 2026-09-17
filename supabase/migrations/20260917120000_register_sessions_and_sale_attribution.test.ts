@@ -1758,8 +1758,10 @@ describe("get_current_register_session", () => {
   });
 });
 
+const closeBody = (): string => src(CLOSE);
+
 describe("close_register_session", () => {
-  const body = () => src(CLOSE);
+  const body = closeBody;
 
   it("takes only the target id and no close request id", () => {
     expect(definitionsIn(executable, FILENAME).find((d) => d.name === "close_register_session")!.header)
@@ -1772,28 +1774,80 @@ describe("close_register_session", () => {
     ]);
   });
 
-  it("finds the target only on the caller's own device", () => {
-    expect(body()).toContain("  where r.id = p_register_session_id\n    and r.paired_device_id = v_device.id\n  for update;");
+  it("resolves ownership FROM THE TARGET, and names the caller exactly once", () => {
+    const b = body();
+
+    expect(b).toContain(
+      "  from public.register_sessions r\n" +
+      "  join public.paired_devices d on d.id = r.paired_device_id\n" +
+      "  where r.id = p_register_session_id\n" +
+      "    and d.auth_user_id = v_caller;"
+    );
+    // The caller's identity is never used to pick a device row on its own.
+    // Counted on the executable text, so a comment cannot satisfy or trip it.
+    expect(effective(CLOSE).body.match(/auth_user_id/g)).toHaveLength(1);
+    expect(b).not.toMatch(/from public\.paired_devices d\s*\n\s*where d\.auth_user_id/);
   });
 
-  it("requires a signed-in employee only for the FIRST close", () => {
-    const b = body();
-    const firstClose = b.indexOf("  if v_register.closed_at is null then");
-    const requirement = b.indexOf("return jsonb_build_object('ok', false, 'error', 'employee_session_required');");
-    const endFirst = b.indexOf("  -- Already closed: the stored state, unchanged.");
+  it("the ownership read is unlocked and unfiltered by operational state", () => {
+    const lookup = statementEnding(body(), "  select r.id, r.opened_at", "d.auth_user_id = v_caller;");
 
-    expect(firstClose).toBeGreaterThan(0);
-    expect(requirement).toBeGreaterThan(firstClose);
-    expect(requirement).toBeLessThan(endFirst);
-    expect(b.slice(endFirst)).toContain("'alreadyClosed', true,");
-    expect(b.slice(endFirst)).not.toContain("v_employee_session");
+    // Tables and operational columns, never the substring "employee": the
+    // SELECT list legitimately carries opened_by_employee_id.
+    for (const forbidden of ["revoked_at", "unpaired_at", "ended_at", "active", "for update", "for share",
+      "public.employees", "public.employee_pos_sessions"]) {
+      expect(`${forbidden}: ${lookup.includes(forbidden)}`).toBe(`${forbidden}: false`);
+    }
+  });
+
+  it("answers an already-closed target before any pairing, employee, lock or write", () => {
+    // Executable text only: a comment must not be able to satisfy or trip this.
+    const b = effective(CLOSE).body;
+    const replay = b.indexOf("  if v_register.closed_at is not null then");
+    // From the first executable statement, not from the declarations.
+    const prelude = b.slice(b.indexOf("  select r.id, r.opened_at"), replay);
+    const answer = b.slice(replay, b.indexOf("  v_device_id := v_register.device_id;"));
+
+    expect(replay).toBeGreaterThan(0);
+    expect(answer).toContain("'alreadyClosed', true,");
+
+    for (const later of ["revoked_at", "unpaired_at", "employee_pos_sessions", "employees",
+      "for update", "for share", "update public.", "v_employee_session"]) {
+      expect(`${later} before the replay: ${prelude.includes(later)}`).toBe(`${later} before the replay: false`);
+      expect(`${later} inside the replay: ${answer.includes(later)}`).toBe(`${later} inside the replay: false`);
+    }
+  });
+
+  it("a FIRST close still requires the target's OWN device to be active", () => {
+    expect(body()).toContain(
+      "  from public.paired_devices d\n" +
+      "  where d.id = v_device_id\n" +
+      "    and d.revoked_at is null\n" +
+      "    and d.unpaired_at is null\n" +
+      "  for update;"
+    );
+  });
+
+  it("re-reads the target under its lock before writing, and yields to a close that won", () => {
+    const b = body();
+    const lock = b.indexOf("  where r.id = p_register_session_id\n    and r.paired_device_id = v_device_id\n  for update;");
+    const recheck = b.indexOf("  if v_register.closed_at is not null then", lock);
+    const requirement = b.indexOf("'error', 'employee_session_required'");
+    const write = b.indexOf("  update public.register_sessions r");
+
+    expect(lock).toBeGreaterThan(0);
+    expect(recheck).toBeGreaterThan(lock);
+    // The stored result of a close that committed first outranks a complaint
+    // about who is signed in now.
+    expect(recheck).toBeLessThan(requirement);
+    expect(requirement).toBeLessThan(write);
   });
 
   it("sets only closed_at and closed_by_employee_id, once", () => {
-    const update = statementEnding(body(), "    update public.register_sessions r", "into v_register;");
+    const update = statementEnding(body(), "  update public.register_sessions r", "into v_register;");
 
-    expect(update).toContain("    set closed_at = clock_timestamp(),\n        closed_by_employee_id = v_employee_session.employee_id\n");
-    expect(update).toContain("    where r.id = v_register.id\n      and r.closed_at is null\n");
+    expect(update).toContain("  set closed_at = clock_timestamp(),\n      closed_by_employee_id = v_employee_session.employee_id\n");
+    expect(update).toContain("  where r.id = v_register.id\n    and r.closed_at is null\n");
     expect((update.match(/=/g) ?? []).length).toBe(3);
     expect(body().match(/\bupdate\s+public\./gi)).toHaveLength(1);
     expect(body()).not.toMatch(/opening_cash\s*=/);
@@ -1801,13 +1855,469 @@ describe("close_register_session", () => {
 
   it("an old target can never close the current session: every write is keyed by the target id", () => {
     expect(body()).not.toMatch(/closed_at is null\s*\n\s*for update/);
-    expect(body()).not.toMatch(/where r\.paired_device_id = v_device\.id\s*\n\s*and r\.closed_at is null/);
+    expect(body()).not.toMatch(/where r\.paired_device_id = v_device_id\s*\n\s*and r\.closed_at is null/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The close contract, simulated from the function's OWN predicates and the
+// order its statements appear in.
+//
+// Every branch condition below is parsed out of the shipped SQL and evaluated;
+// nothing about the outcomes is hard-coded. Mutating the SQL changes the
+// simulated result, which is what makes the negative controls real. What this
+// still cannot do is run two transactions at once — the lock MODES are checked
+// separately, and the real races belong to staging validation.
+// ---------------------------------------------------------------------------
+
+type Device = { id: string; auth_user_id: string; project_id: string; revoked_at: number | null; unpaired_at: number | null };
+type Session = { id: string; paired_device_id: string; opened_at: number; opening_cash: string; closed_at: number | null; closed_by_employee_id: string | null };
+type Signed = { id: string; employee_id: string; paired_device_id: string; ended_at: number | null; active: boolean; project_id: string; role: string };
+
+type World = {
+  caller: string | null;
+  target: string | null;
+  devices: Device[];
+  sessions: Session[];
+  signedIn: Signed | null;
+  /** A concurrent close that commits while this call waits for the row lock. */
+  closedByRace?: { at: number; by: string };
+};
+
+type Outcome = {
+  error?: string;
+  ok?: boolean;
+  alreadyClosed?: boolean;
+  closedAt?: number | null;
+  closedBy?: string | null;
+  /** Session ids this call's UPDATE would match. */
+  wrote: string[];
+};
+
+type CloseModel = {
+  order: { replay: number; device: number; employee: number; lock: number };
+  ownershipJoin: AstNode;
+  ownershipWhere: AstNode;
+  deviceWhere: AstNode;
+  employeeWhere: AstNode;
+  lockWhere: AstNode;
+  updateWhere: AstNode;
+};
+
+/** One statement: from its anchor to its own terminating semicolon. */
+function sliceStatement(body: string, anchor: string, from = 0): string {
+  const start = body.indexOf(anchor, from);
+  if (start < 0) throw new Error(`no statement ${anchor}`);
+  const end = body.indexOf(";", start);
+  if (end < 0) throw new Error(`unterminated ${anchor}`);
+  return body.slice(start, end + 1);
+}
+
+async function closeModel(migration: string): Promise<CloseModel> {
+  const body = rawBody(migration, CLOSE);
+  const ownershipText = sliceStatement(body, "  select r.id, r.opened_at");
+  const ownership = await selectStatement(ownershipText.trim());
+  const device = await selectStatement(sliceStatement(body, "  select 1\n  into v_device_locked").trim());
+  const employee = await selectStatement(sliceStatement(body, "  select s.id, s.employee_id").trim());
+  const lockAnchor = body.indexOf(ownershipText) + ownershipText.length;
+  const lock = await selectStatement(sliceStatement(body, "  select r.id, r.opened_at", lockAnchor).trim());
+  const update = (await parse(
+    sliceStatement(body, "  update public.register_sessions r")
+      .replace(/\breturning\b[\s\S]*$/i, "")
+      .trim()
+  )).stmts[0].stmt.UpdateStmt as AstNode;
+
+  return {
+    order: {
+      replay: body.indexOf("  if v_register.closed_at is not null then"),
+      device: body.indexOf("  select 1\n  into v_device_locked"),
+      employee: body.indexOf("  select s.id, s.employee_id"),
+      lock: body.indexOf("  select r.id, r.opened_at", lockAnchor),
+    },
+    ownershipJoin: ((ownership.fromClause as AstNode[])[0].JoinExpr as AstNode).quals as AstNode,
+    ownershipWhere: ownership.whereClause as AstNode,
+    deviceWhere: device.whereClause as AstNode,
+    employeeWhere: employee.whereClause as AstNode,
+    lockWhere: lock.whereClause as AstNode,
+    updateWhere: update.whereClause as AstNode,
+  };
+}
+
+const at = (v: number | null): Val => (v === null ? null : ts(v));
+
+function sessionEnv(s: Session): Env {
+  return {
+    "r.id": t(s.id), "r.paired_device_id": t(s.paired_device_id),
+    "r.closed_at": at(s.closed_at), "r.opened_at": ts(s.opened_at),
+  };
+}
+
+function deviceEnv(d: Device): Env {
+  return {
+    "d.id": t(d.id), "d.auth_user_id": t(d.auth_user_id), "d.project_id": t(d.project_id),
+    "d.revoked_at": at(d.revoked_at), "d.unpaired_at": at(d.unpaired_at),
+  };
+}
+
+function simulateClose(model: CloseModel, world: World): Outcome {
+  const wrote: string[] = [];
+
+  if (world.caller === null) return { error: "not_authenticated", wrote };
+  if (world.target === null) return { error: "not_found", wrote };
+
+  const env = { v_caller: t(world.caller), p_register_session_id: t(world.target) };
+
+  // Target-first ownership: the join and the WHERE, exactly as written.
+  const owned = world.sessions.flatMap((s) =>
+    world.devices
+      .filter((d) => {
+        const row = { ...env, ...sessionEnv(s), ...deviceEnv(d) };
+        return evaluate(model.ownershipJoin, row) === true && evaluate(model.ownershipWhere, row) === true;
+      })
+      .map((d) => ({ s, d }))
+  );
+
+  if (owned.length === 0) return { error: "not_found", wrote };
+
+  const { s: target, d: device } = owned[0];
+  const steps = [
+    { at: model.order.replay, step: "replay" as const },
+    { at: model.order.device, step: "device" as const },
+    { at: model.order.employee, step: "employee" as const },
+    { at: model.order.lock, step: "lock" as const },
+  ].sort((a, b) => a.at - b.at);
+
+  let hasEmployee = false;
+  let row: Session = target;
+
+  for (const { step } of steps) {
+    if (step === "replay") {
+      if (row.closed_at !== null) {
+        return { ok: true, alreadyClosed: true, closedAt: row.closed_at, closedBy: row.closed_by_employee_id, wrote };
+      }
+    }
+
+    if (step === "device") {
+      const ok = evaluate(model.deviceWhere, { ...deviceEnv(device), v_device_id: t(device.id) }) === true;
+      if (!ok) return { error: "not_paired", wrote };
+    }
+
+    if (step === "employee") {
+      const s = world.signedIn;
+      hasEmployee = s
+        ? evaluate(model.employeeWhere, {
+            "s.paired_device_id": t(s.paired_device_id), "s.ended_at": at(s.ended_at),
+            "e.active": s.active, "e.project_id": t(s.project_id), "e.role": t(s.role),
+            v_device_id: t(device.id), v_project_id: t(device.project_id),
+          }) === true
+        : false;
+    }
+
+    if (step === "lock") {
+      // A concurrent close commits while this call waits for the row lock.
+      if (world.closedByRace) {
+        row = { ...row, closed_at: world.closedByRace.at, closed_by_employee_id: world.closedByRace.by };
+      }
+
+      const visible = evaluate(model.lockWhere, { ...env, ...sessionEnv(row), v_device_id: t(device.id) }) === true;
+      if (!visible) return { error: "not_found", wrote };
+
+      if (row.closed_at !== null) {
+        return { ok: true, alreadyClosed: true, closedAt: row.closed_at, closedBy: row.closed_by_employee_id, wrote };
+      }
+    }
+  }
+
+  if (!hasEmployee) return { error: "employee_session_required", wrote };
+
+  // The UPDATE's own WHERE, evaluated against EVERY session in the world.
+  const now = 9_000_000;
+  for (const s of world.sessions) {
+    if (evaluate(model.updateWhere, { ...sessionEnv(s), "v_register.id": t(row.id) }) === true) {
+      wrote.push(s.id);
+    }
+  }
+
+  return { ok: true, alreadyClosed: false, closedAt: now, closedBy: world.signedIn!.employee_id, wrote };
+}
+
+describe("close_register_session: the idempotency contract, simulated from the SQL", () => {
+  const OLD_DEVICE: Device = { id: "dev-old", auth_user_id: "auth-old", project_id: "proj-1", revoked_at: null, unpaired_at: null };
+  const NEW_DEVICE: Device = { id: "dev-new", auth_user_id: "auth-new", project_id: "proj-1", revoked_at: null, unpaired_at: null };
+  const OTHER_DEVICE: Device = { id: "dev-other", auth_user_id: "auth-other", project_id: "proj-2", revoked_at: null, unpaired_at: null };
+
+  const OPEN_TARGET: Session = { id: "reg-1", paired_device_id: "dev-old", opened_at: 1000, opening_cash: "50.00", closed_at: null, closed_by_employee_id: null };
+  const CLOSED_TARGET: Session = { ...OPEN_TARGET, closed_at: 2000, closed_by_employee_id: "emp-a" };
+  const NEWER_OPEN: Session = { id: "reg-2", paired_device_id: "dev-old", opened_at: 3000, opening_cash: "10.00", closed_at: null, closed_by_employee_id: null };
+
+  const SIGNED_IN: Signed = { id: "sess-b", employee_id: "emp-b", paired_device_id: "dev-old", ended_at: null, active: true, project_id: "proj-1", role: "cashier" };
+
+  const world = (over: Partial<World> = {}): World => ({
+    caller: "auth-old",
+    target: "reg-1",
+    devices: [OLD_DEVICE],
+    sessions: [CLOSED_TARGET],
+    signedIn: SIGNED_IN,
+    ...over,
+  });
+
+  let model: CloseModel;
+
+  beforeAll(async () => {
+    model = await closeModel(sql);
+  });
+
+  const stored = { ok: true, alreadyClosed: true, closedAt: 2000, closedBy: "emp-a", wrote: [] };
+
+  it("1. a first close succeeds", () => {
+    const out = simulateClose(model, world({ sessions: [OPEN_TARGET] }));
+
+    expect(out.ok).toBe(true);
+    expect(out.alreadyClosed).toBe(false);
+    expect(out.closedBy).toBe("emp-b");
+    expect(out.wrote).toEqual(["reg-1"]);
+  });
+
+  it("2. an immediate retry returns the original stored close", () => {
+    expect(simulateClose(model, world())).toEqual(stored);
+  });
+
+  it("3. a retry after an employee switch returns the original stored close", () => {
+    expect(simulateClose(model, world({
+      signedIn: { ...SIGNED_IN, id: "sess-c", employee_id: "emp-c" },
+    }))).toEqual(stored);
+  });
+
+  it("4. a retry after logout returns the original stored close", () => {
+    expect(simulateClose(model, world({ signedIn: null }))).toEqual(stored);
+    expect(simulateClose(model, world({ signedIn: { ...SIGNED_IN, ended_at: 2500 } }))).toEqual(stored);
+  });
+
+  it("5. a retry after the closer was deactivated returns the original stored close", () => {
+    expect(simulateClose(model, world({ signedIn: { ...SIGNED_IN, active: false } }))).toEqual(stored);
+  });
+
+  it("6. a retry after the device was revoked returns the original stored close", () => {
+    expect(simulateClose(model, world({ devices: [{ ...OLD_DEVICE, revoked_at: 2500 }] }))).toEqual(stored);
+  });
+
+  it("7. a retry after the device unpaired returns the original stored close", () => {
+    expect(simulateClose(model, world({ devices: [{ ...OLD_DEVICE, unpaired_at: 2500 }] }))).toEqual(stored);
+    expect(simulateClose(model, world({
+      devices: [{ ...OLD_DEVICE, revoked_at: 2400, unpaired_at: 2500 }],
+      signedIn: null,
+    }))).toEqual(stored);
+  });
+
+  it("8. a revoked device cannot FIRST-close an open target", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2500 }],
+    }))).toEqual({ error: "not_paired", wrote: [] });
+  });
+
+  it("9. an unpaired device cannot FIRST-close an open target", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, unpaired_at: 2500 }],
+    }))).toEqual({ error: "not_paired", wrote: [] });
+  });
+
+  it("10. retrying a closed old session while a newer one is open returns only the old stored state", () => {
+    expect(simulateClose(model, world({ sessions: [CLOSED_TARGET, NEWER_OPEN] }))).toEqual(stored);
+  });
+
+  it("11. that retry writes nothing at all, so the newer session is untouched", () => {
+    const out = simulateClose(model, world({ sessions: [CLOSED_TARGET, NEWER_OPEN] }));
+
+    expect(out.wrote).toEqual([]);
+    // And a FIRST close of the old target could never match the newer row either.
+    const first = simulateClose(model, world({ sessions: [OPEN_TARGET, NEWER_OPEN] }));
+    expect(first.wrote).toEqual(["reg-1"]);
+  });
+
+  it("12. another device cannot replay this target", () => {
+    expect(simulateClose(model, world({
+      caller: "auth-other",
+      devices: [OLD_DEVICE, OTHER_DEVICE],
+    }))).toEqual({ error: "not_found", wrote: [] });
+  });
+
+  it("13. a caller from another project cannot replay this target", () => {
+    expect(simulateClose(model, world({
+      caller: "auth-other",
+      devices: [OLD_DEVICE, { ...OTHER_DEVICE, project_id: "proj-2" }],
+      sessions: [CLOSED_TARGET, { ...CLOSED_TARGET, id: "reg-9", paired_device_id: "dev-other" }],
+    }))).toEqual({ error: "not_found", wrote: [] });
+  });
+
+  it("14. knowing a register session's uuid leaks nothing: unknown and not-yours are the same answer", () => {
+    const unknown = simulateClose(model, world({ target: "reg-unknown" }));
+    const notMine = simulateClose(model, world({ caller: "auth-other", devices: [OLD_DEVICE, OTHER_DEVICE] }));
+
+    expect(unknown).toEqual({ error: "not_found", wrote: [] });
+    expect(unknown).toEqual(notMine);
+  });
+
+  it("15+16. a replay returns closed_at and closed_by_employee_id exactly as stored", () => {
+    for (const w of [
+      world(),
+      world({ signedIn: null }),
+      world({ devices: [{ ...OLD_DEVICE, revoked_at: 2500, unpaired_at: 2600 }] }),
+      world({ sessions: [CLOSED_TARGET, NEWER_OPEN], signedIn: { ...SIGNED_IN, employee_id: "emp-z" } }),
+    ]) {
+      const out = simulateClose(model, w);
+
+      expect(out.closedAt).toBe(CLOSED_TARGET.closed_at);
+      expect(out.closedBy).toBe(CLOSED_TARGET.closed_by_employee_id);
+    }
+  });
+
+  it("17. a replay performs no database mutation, in the model and in the source", () => {
+    expect(simulateClose(model, world()).wrote).toEqual([]);
+
+    const b = closeBody();
+    const replayPath = b.slice(0, b.indexOf("  v_device_id := v_register.device_id;"));
+
+    expect(replayPath).not.toMatch(/\b(update|insert|delete|for update|for share|nextval|set_config)\b/i);
+  });
+
+  it("18+19. after a re-pair, the target's OWN historical device row is the authority", () => {
+    const repaired = { devices: [{ ...OLD_DEVICE, unpaired_at: 2500 }, NEW_DEVICE], sessions: [CLOSED_TARGET, NEWER_OPEN] };
+
+    // The old identity still replays its own closed session.
+    expect(simulateClose(model, world({ ...repaired, caller: "auth-old" }))).toEqual(stored);
+
+    // The new pairing — same till, same project — is NOT authority for it.
+    expect(simulateClose(model, world({ ...repaired, caller: "auth-new" })))
+      .toEqual({ error: "not_found", wrote: [] });
+
+    // Nor can the new pairing first-close the old device's open session.
+    expect(simulateClose(model, world({
+      ...repaired, caller: "auth-new", sessions: [OPEN_TARGET, NEWER_OPEN],
+    }))).toEqual({ error: "not_found", wrote: [] });
+  });
+
+  it("a close that loses the race returns the winner's stored state and rewrites nothing", () => {
+    const out = simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      closedByRace: { at: 2750, by: "emp-a" },
+    }));
+
+    expect(out).toEqual({ ok: true, alreadyClosed: true, closedAt: 2750, closedBy: "emp-a", wrote: [] });
+  });
+
+  it("a race that closes the target is answered even when nobody is signed in now", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      signedIn: null,
+      closedByRace: { at: 2750, by: "emp-a" },
+    }))).toEqual({ ok: true, alreadyClosed: true, closedAt: 2750, closedBy: "emp-a", wrote: [] });
+  });
+
+  it("an open target with nobody signed in is refused, and writes nothing", () => {
+    expect(simulateClose(model, world({ sessions: [OPEN_TARGET], signedIn: null })))
+      .toEqual({ error: "employee_session_required", wrote: [] });
+  });
+
+  it("an open target whose signed-in employee belongs elsewhere is refused", () => {
+    for (const over of [
+      { paired_device_id: "dev-new" },
+      { project_id: "proj-2" },
+      { active: false },
+      { ended_at: 2500 },
+    ]) {
+      expect(simulateClose(model, world({
+        sessions: [OPEN_TARGET],
+        signedIn: { ...SIGNED_IN, ...over },
+      }))).toEqual({ error: "employee_session_required", wrote: [] });
+    }
+  });
+
+  it("no caller and no target are refused before anything is read", () => {
+    expect(simulateClose(model, world({ caller: null }))).toEqual({ error: "not_authenticated", wrote: [] });
+    expect(simulateClose(model, world({ target: null }))).toEqual({ error: "not_found", wrote: [] });
+  });
+
+  // -------------------------------------------------------------------------
+  // NEGATIVE CONTROLS — each restores a version of the defect and fails.
+  // -------------------------------------------------------------------------
+
+  it("NEGATIVE CONTROL: requiring active pairing BEFORE the closed replay breaks the revoked and unpaired retries", async () => {
+    const mutated = sql.replace(
+      "  where r.id = p_register_session_id\n    and d.auth_user_id = v_caller;",
+      "  where r.id = p_register_session_id\n    and d.auth_user_id = v_caller\n    and d.revoked_at is null\n    and d.unpaired_at is null;"
+    );
+
+    expect(mutated).not.toBe(sql);
+
+    const broken = await closeModel(mutated);
+
+    expect(simulateClose(broken, world({ devices: [{ ...OLD_DEVICE, revoked_at: 2500 }] })))
+      .toEqual({ error: "not_found", wrote: [] });
+    expect(simulateClose(broken, world({ devices: [{ ...OLD_DEVICE, unpaired_at: 2500 }] })))
+      .toEqual({ error: "not_found", wrote: [] });
+    // The healthy case still passes, so the control isolates the defect.
+    expect(simulateClose(broken, world())).toEqual(stored);
+  });
+
+  it("NEGATIVE CONTROL: hoisting the device gate above the replay breaks the same retries", async () => {
+    const b = rawBody(sql, CLOSE);
+    const gate = statementEnding(b, "  select 1\n  into v_device_locked", "for update;") +
+      "\n\n  if not found then\n    return jsonb_build_object('ok', false, 'error', 'not_paired');\n  end if;\n";
+    const mutated = sql
+      .replace(gate, "")
+      .replace("  if v_register.closed_at is not null then", `${gate}\n  if v_register.closed_at is not null then`);
+
+    expect(mutated).not.toBe(sql);
+
+    const broken = await closeModel(mutated);
+
+    expect(broken.order.device).toBeLessThan(broken.order.replay);
+    expect(simulateClose(broken, world({ devices: [{ ...OLD_DEVICE, revoked_at: 2500 }] })))
+      .toEqual({ error: "not_paired", wrote: [] });
+  });
+
+  it("NEGATIVE CONTROL: resolving the caller's current pairing first lets a re-paired till speak for an old target", async () => {
+    const mutated = sql.replace(
+      "  join public.paired_devices d on d.id = r.paired_device_id\n" +
+      "  where r.id = p_register_session_id\n" +
+      "    and d.auth_user_id = v_caller;",
+      "  join public.paired_devices d on d.project_id = (select d2.project_id from public.paired_devices d2 where d2.auth_user_id = v_caller)\n" +
+      "  where r.id = p_register_session_id\n" +
+      "    and d.project_id = d.project_id;"
+    );
+
+    expect(mutated).not.toBe(sql);
+
+    const broken = rawBody(mutated, CLOSE);
+
+    // The structural guards catch it without any simulation.
+    expect(broken.match(/auth_user_id/g)?.length).not.toBe(1);
+    expect(broken).not.toContain("join public.paired_devices d on d.id = r.paired_device_id");
+  });
+
+  it("NEGATIVE CONTROL: requiring a current employee for the replay breaks every post-operation retry", async () => {
+    const mutated = sql.replace(
+      "  if v_register.closed_at is not null then\n    return jsonb_build_object(\n      'ok', true,\n      'alreadyClosed', true,",
+      "  if v_register.closed_at is not null and v_has_employee then\n    return jsonb_build_object(\n      'ok', true,\n      'alreadyClosed', true,"
+    );
+
+    expect(mutated).not.toBe(sql);
+    expect(rawBody(mutated, CLOSE)).toMatch(/closed_at is not null and v_has_employee/);
+    // The replay branch itself must not name the employee at all.
+    const b = effective(CLOSE).body;
+    const replay = b.slice(b.indexOf("  if v_register.closed_at is not null then"),
+                           b.indexOf("  v_device_id := v_register.device_id;"));
+
+    expect(replay).not.toContain("v_has_employee");
+    expect(replay).not.toContain("v_employee_session");
   });
 
   it("NEGATIVE CONTROL: closing 'the open session' instead of the target is detected", () => {
-    const mutated = body().replace(
-      "  where r.id = p_register_session_id\n    and r.paired_device_id = v_device.id\n  for update;",
-      "  where r.paired_device_id = v_device.id\n    and r.closed_at is null\n  for update;"
+    const mutated = closeBody().replace(
+      "  where r.id = p_register_session_id\n    and r.paired_device_id = v_device_id\n  for update;",
+      "  where r.paired_device_id = v_device_id\n    and r.closed_at is null\n  for update;"
     );
 
     expect(mutated).toMatch(/closed_at is null\s*\n\s*for update/);
@@ -2508,6 +3018,11 @@ describe("apply-time verification", () => {
       "F1B: complete_sale_v5 must lock the device before the project",
       "F1B: a register RPC answered an anonymous caller",
       "F1B: a register RPC did not refuse a caller that is not a paired device",
+      "F1B: close_register_session must resolve ownership from the target register session, not from the caller''s current pairing",
+      "F1B: the close ownership lookup must be an unfiltered, unlocked read of the target",
+      "public\\.employees|public\\.employee_pos_sessions|for update|for share)",
+      "F1B: close_register_session must answer an already-closed target before any pairing, employee or lock",
+      "F1B: the first-close path lost the active-pairing rule or its target-only update",
       "F1B: complete_sale_v5 accepted a sale from a caller that is not a paired device",
       "F1B: register_sessions must be empty after this migration",
       "F1B: public policies changed",
