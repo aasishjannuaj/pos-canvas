@@ -233,10 +233,19 @@ async function evaluateCase(body: string, param: string, value: number): Promise
 // ===========================================================================
 
 describe("ordering and immutability", () => {
-  it("sorts after both applied employee migrations and is the newest", () => {
+  it("sorts after both applied employee migrations, and nothing later redefines its functions", () => {
     expect(F1A < FILENAME).toBe(true);
     expect(F1A1 < FILENAME).toBe(true);
-    expect(orderedFiles[orderedFiles.length - 1]).toBe(FILENAME);
+
+    // NARROWED BY v1.3 Feature 1B. This pinned "is the newest file", which any
+    // later migration breaks by existing. The property that matters is that no
+    // later file takes over either function this migration defines.
+    const later = orderedFiles.filter((file) => file > FILENAME);
+
+    for (const file of later) {
+      const defined = definitionsIn(stripComments(read(file)), file).map((d) => `${d.name}(${d.types})`);
+      expect(`${file}: ${defined.filter((key) => key === CREATE || key === ACTIVE).join(",")}`).toBe(`${file}: `);
+    }
   });
 
   for (const [file, digest] of [
