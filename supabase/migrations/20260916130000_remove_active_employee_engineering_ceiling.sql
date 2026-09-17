@@ -655,14 +655,14 @@ begin
 
   select array_agg(x order by x) into v_new_triggers
   from (
-    select c.relname || '.' || t.tgname || ':' || t.tgtype || ':' || t.tgenabled || ':' || pr.proname as x
+    select c.relname || '.' || t.tgname || ':' || t.tgtype::text || ':' || t.tgenabled::text || ':' || pr.proname as x
     from pg_trigger t
     join pg_class c on c.oid = t.tgrelid
     join pg_namespace n on n.oid = c.relnamespace
     join pg_proc pr on pr.oid = t.tgfoid
     where n.nspname = 'public' and not t.tgisinternal
     except
-    select b.relname || '.' || b.tgname || ':' || b.tgtype || ':' || b.tgenabled || ':' || b.proname
+    select b.relname || '.' || b.tgname || ':' || b.tgtype::text || ':' || b.tgenabled::text || ':' || b.proname
     from f1a2_trg_baseline b
   ) s;
 

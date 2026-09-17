@@ -737,6 +737,86 @@ describe("security posture", () => {
 // Inertness
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Trigger fingerprint typing — regression guard for a defect found on staging
+//
+// pg_trigger.tgenabled is PostgreSQL type "char". In PostgreSQL 17,
+// `text || "char"` is ambiguous (42725 "operator is not unique"). The first
+// version of this migration concatenated it uncast; libpg-query parses that
+// fine and PL/pgSQL defers planning, so it only failed when the verification
+// block reached it. Both trigger columns in the fingerprint are now cast
+// explicitly, and this guard keeps them that way.
+// ---------------------------------------------------------------------------
+
+/** The live and baseline trigger fingerprint lines of this migration. */
+function triggerFingerprintLines(text: string): string[] {
+  return text.split("\n").filter((line) => line.includes("||") && /\btg(enabled|type)\b/.test(line));
+}
+
+/** Every trigger column concatenated without an explicit ::text cast. */
+function uncastTriggerColumns(text: string): string[] {
+  return triggerFingerprintLines(text).flatMap((line) =>
+    [...line.matchAll(/\b(\w+)\.(tgenabled|tgtype)\b(?!::text)/g)].map((m) => `${m[1]}.${m[2]}`)
+  );
+}
+
+const LIVE_FINGERPRINT =
+  "    select c.relname || '.' || t.tgname || ':' || t.tgtype::text || ':' || t.tgenabled::text || ':' || pr.proname as x";
+const BASELINE_FINGERPRINT =
+  "    select b.relname || '.' || b.tgname || ':' || b.tgtype::text || ':' || b.tgenabled::text || ':' || b.proname";
+
+describe("trigger fingerprint casts the \"char\" catalog columns explicitly", () => {
+  it("contains exactly the corrected live and baseline expressions", () => {
+    expect(triggerFingerprintLines(executable)).toEqual([LIVE_FINGERPRINT, BASELINE_FINGERPRINT]);
+  });
+
+  it("casts t.tgenabled, b.tgenabled, t.tgtype and b.tgtype to text", () => {
+    for (const cast of ["t.tgenabled::text", "b.tgenabled::text", "t.tgtype::text", "b.tgtype::text"]) {
+      expect(executable).toContain(cast);
+    }
+
+    expect(uncastTriggerColumns(executable)).toEqual([]);
+  });
+
+  it("the live and baseline fingerprints are the same expression apart from their aliases", () => {
+    const normalize = (line: string) =>
+      line.replace(/ as x$/, "").replace(/\b(t|c|pr|b)\./g, "_.");
+
+    expect(normalize(LIVE_FINGERPRINT)).toBe(normalize(BASELINE_FINGERPRINT));
+  });
+
+  it("keeps the trigger inertness assertion itself", () => {
+    expect(executable).toContain("raise exception 'F1A.2: triggers changed';");
+    expect(executable).toContain("from f1a2_trg_baseline b");
+  });
+
+  for (const [label, from, to] of [
+    ["live t.tgenabled", "t.tgenabled::text", "t.tgenabled"],
+    ["baseline b.tgenabled", "b.tgenabled::text", "b.tgenabled"],
+    ["live t.tgtype", "t.tgtype::text", "t.tgtype"],
+    ["baseline b.tgtype", "b.tgtype::text", "b.tgtype"],
+  ] as const) {
+    it(`NEGATIVE CONTROL: removing the cast from ${label} is rejected`, () => {
+      const mutated = executable.replace(from, to);
+
+      expect(mutated).not.toBe(executable);
+      expect(uncastTriggerColumns(mutated)).toEqual([to]);
+      expect(triggerFingerprintLines(mutated)).not.toEqual([LIVE_FINGERPRINT, BASELINE_FINGERPRINT]);
+    });
+  }
+
+  it("NEGATIVE CONTROL: the original defective form is rejected", () => {
+    const original = executable.replace(LIVE_FINGERPRINT, LIVE_FINGERPRINT.replaceAll("::text", "")).replace(
+      BASELINE_FINGERPRINT,
+      BASELINE_FINGERPRINT.replaceAll("::text", "")
+    );
+
+    expect(uncastTriggerColumns(original).sort()).toEqual(
+      ["b.tgenabled", "b.tgtype", "t.tgenabled", "t.tgtype"].sort()
+    );
+  });
+});
+
 describe("the rest of the schema is proven unchanged at apply time", () => {
   it("captures every baseline before the first redefinition", () => {
     const firstDdl = executable.indexOf("create or replace function public.create_employee(");
