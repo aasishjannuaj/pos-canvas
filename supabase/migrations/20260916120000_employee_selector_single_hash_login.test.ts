@@ -276,10 +276,17 @@ describe("migration ordering and immutability", () => {
     }
   });
 
-  it("is the newest migration", () => {
-    const newest = allMigrations[allMigrations.length - 1].file;
+  it("no later migration redefines the login or the selector", () => {
+    // Later forward migrations may exist; the single-hash contract established
+    // here must remain the effective one.
+    const later = allMigrations.filter((m) => m.file > FILENAME);
 
-    expect(newest).toBe(FILENAME);
+    for (const { file, text } of later) {
+      const redefined = definitionsIn(text, file).map((d) => `${d.name}(${d.types})`);
+
+      expect(redefined).not.toContain("employee_login(uuid,text)");
+      expect(redefined).not.toContain("list_login_employees()");
+    }
   });
 
   it("leaves the applied Feature 1A migration byte-for-byte as staging received it", () => {
@@ -451,9 +458,16 @@ describe("duplicate-PIN scanning is gone", () => {
 
   for (const key of OWNER_WRITERS) {
     it(`${key} no longer verifies, scans, or reports a duplicate`, () => {
+      // Both the definition written here and whatever is effective now.
+      for (const body of [bodyHere(key), effective(key).body]) {
+        expect(body).not.toContain("employee_pin_verify");
+        expect(body).not.toContain("employee_project_pin_taken");
+        expect(body).not.toContain("duplicate_pin");
+        expect(body).not.toMatch(/\bloop\b/i);
+      }
+
       const def = effective(key);
 
-      expect(def.file).toBe(FILENAME);
       expect(def.body).not.toContain("employee_pin_verify");
       expect(def.body).not.toContain("employee_project_pin_taken");
       expect(def.body).not.toContain("duplicate_pin");
@@ -503,18 +517,21 @@ describe("duplicate-PIN scanning is gone", () => {
 });
 
 // ===========================================================================
-// The provisional ceiling is untouched
+// The provisional ceiling, as this migration left it
 // ===========================================================================
 
-describe("the 50 active-employee engineering ceiling remains", () => {
-  for (const key of ["create_employee(uuid,text,text,text)", "set_employee_active(uuid,boolean)"]) {
-    it(`${key} still enforces it`, () => {
-      expect(effective(key).body).toContain("if v_active_count >= 50 then");
-    });
-  }
+// The ceiling was deliberately left in place by THIS migration and removed later
+// by 20260916130000 after staging validation. These tests describe what this
+// file did; the effective schema is covered by the later migration's suite.
+describe("this migration left the 50 active-employee engineering ceiling in place", () => {
+  it("its create_employee still enforced it", () => {
+    expect(bodyHere("create_employee(uuid,text,text,text)")).toContain("if v_active_count >= 50 then");
+  });
 
   it("set_employee_active is not redefined here", () => {
-    expect(effective("set_employee_active(uuid,boolean)").file).toBe(PREVIOUS);
+    const defined = definitionsIn(executable, FILENAME).map((d) => `${d.name}(${d.types})`);
+
+    expect(defined).not.toContain("set_employee_active(uuid,boolean)");
   });
 
   it("is described as provisional, never as a product limit", () => {
