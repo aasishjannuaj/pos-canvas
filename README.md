@@ -1,24 +1,55 @@
 # POS Canvas
 
-A point-of-sale builder. An owner designs a POS in the browser — menu, pricing,
-tax, branding, receipt settings — and runs it as a live till backed by
-server-authoritative checkout, inventory and reporting.
+A configurable point-of-sale platform. An owner chooses a POS template,
+configures their own business in the browser — products, pricing, tax, branding,
+receipt settings — publishes that configuration, and runs it as a live till
+backed by server-authoritative checkout, inventory and reporting.
+
+Three pieces make one POS:
+
+| Piece | What it is |
+|---|---|
+| **Template** | The starting catalogue and the layout the till screen uses. Templates can present differently; they all run the same engine |
+| **Business configuration** | Everything the owner sets in the Builder, frozen into a published `GeneratedPosConfig` |
+| **Shared POS platform** | One runtime per platform, the same for every business, which becomes a specific till by pairing |
+
+No application is generated per business, there is no separate engine per
+template, and the Builder is not a freeform screen designer: the template
+decides the layout, and the Builder configures what sits inside it.
 
 Built with Next.js 16 (App Router) and Supabase (Postgres, Auth, Storage).
 
 For hosting, environment variables and Supabase dashboard setup, see
 [DEPLOYMENT.md](./DEPLOYMENT.md).
 
+## What is released
+
+The released baseline is **POS Canvas v1.2.0**.
+
+| Platform | Released | Requirements |
+|---|---|---|
+| Web — owner Builder and owner POS runtime | Deployed from `main` | A modern browser |
+| Android app | **1.2.0** | Android 7.0 or newer |
+| Windows app | **1.2.0** | Windows 10 or newer, x64. The installer is unsigned |
+
+Both apps are one universal binary per platform: they become a particular
+business's till by pairing to a published configuration, not by being built per
+project.
+
+Work on the `feature/v1.3.0-*` branches is **development, not released**.
+Nothing on those branches is part of 1.2.0, and this README describes 1.2.0.
+
 ## What exists today
 
 | Area | State |
 |---|---|
 | Owner web app — sign-up, projects, editor, live preview | Working |
-| Owner POS runtime — cash/card sales, receipts, inventory | Working |
-| Server-authoritative checkout (`complete_sale_v2`) | Working — prices, totals and order numbers are computed in the database, never trusted from the browser |
+| Owner POS runtime — sales, receipts, inventory | Working — cash and card are recorded as the tender; nothing is processed |
+| Server-authoritative checkout (`complete_sale_v3`, and `complete_sale_v4` for queued offline sales) | Working — prices, totals and order numbers are computed in the database, never trusted from the browser |
 | Dashboard, sales / product / inventory reports | Working |
-| Build jobs + artifact download | Working — requesting a build starts a GitHub Actions worker on demand (Android target) |
-| Android shell | Proves the **owner** website runs in a WebView. It is a packaging proof, not a till |
+| Build jobs + artifact download | Working — requesting a build starts a GitHub Actions worker on demand; the artifact it produces is the project's `json_config`, not an app |
+| Android app | Released 1.2.0 — a real paired till. It carries its own packaged runtime, so it starts and sells without fetching the site |
+| Windows app | Released 1.2.0 — the same till in an Electron shell |
 | Paired-device pairing — database and server layer | Complete and hardened |
 | Paired-device **product UI** | Working — owner Devices section creates pairing codes; `/device` runs the paired till |
 
@@ -36,9 +67,26 @@ These are known and intentional at this stage:
   is no polling schedule. The build row is the source of truth, so if GitHub
   cannot be reached the build stays safely queued and the Builder offers "Retry
   processing" rather than losing it.
-- **No offline mode** — the Android shell shows an honest failure screen when the
-  network is unavailable.
-- **No native printing** — printing uses the browser print path.
+- **Offline selling is bounded, and only on a paired native till.** An Android
+  or Windows device that has been set up online once keeps taking sales when the
+  connection drops; they queue on the device and sync when it returns. The lease
+  is **seven days**, and the till also checks its saved state, its clock, and
+  that it has not been unpaired or revoked before it sells offline. The owner
+  POS in the browser has no offline mode. See
+  [docs/OFFLINE_ARCHITECTURE.md](./docs/OFFLINE_ARCHITECTURE.md).
+- **Offline inventory conflicts favour the recorded sale.** An online sale with
+  insufficient tracked stock is rejected at completion. A queued offline sale
+  that syncs later is kept: affected stock floors at zero rather than going
+  negative, and the shortfall is recorded for the owner to reconcile.
+- **No receipt printing on Android** — the Android till shows the receipt on
+  screen. Windows and the browser print through the browser print path. There is
+  no printer-hardware integration on any platform.
+- **No payment processing** — cash and card are recorded as the tender on a
+  sale. There is no gateway, card terminal, acquiring or settlement, online or
+  offline.
+- **No layout editing** — the template a project starts from determines the till
+  layout. The Builder configures products, pricing, tax, receipt settings and
+  branding inside it.
 
 ## Local development
 
@@ -133,14 +181,25 @@ never imports the brand module.
 - **24.1 — complete.** Identity centralised; website metadata fixed (it was
   still `Create Next App`); About panel added to the editor's Settings section;
   asset contract documented in `assets/brand/README.md`.
-- **Final artwork is not chosen.** Android, Windows and the favicon all still
-  carry their toolchains' default marks.
-- **24.2** will implement the Android icon, adaptive icon and splash.
-- **24.3** will implement the Windows icon, splash and installer branding.
+- **24.2 — complete.** Android launcher, adaptive and themed icons, the Android
+  splash, and the website favicon, all drawn from the approved mark.
+- **24.3 — complete.** Windows application and installer icon, installer wizard
+  artwork, and the Windows startup splash.
+- **Concept D is TEMPORARY branding.** `assets/brand/README.md` records what the
+  owner approved, which assets are generated from it, and what would have to
+  change if the brand does. Nothing was generated, downloaded or improvised in
+  place of an owner-approved master.
 
-The owner must supply and approve the master assets listed in
-`assets/brand/README.md` before either can start. Nothing was generated,
-downloaded or improvised in their place.
+## Deeper documentation
+
+| Document | What it covers |
+|---|---|
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Hosting, environment variables, Supabase dashboard setup, the build worker |
+| [docs/OFFLINE_ARCHITECTURE.md](./docs/OFFLINE_ARCHITECTURE.md) | The offline till: cache, lease, queued sales and sync |
+| [docs/RELEASE_CHECKLIST.md](./docs/RELEASE_CHECKLIST.md) | What is verified before a release goes out |
+| [windows-shell/README.md](./windows-shell/README.md) | The Windows shell, its security posture, and building the installer |
+| [assets/brand/README.md](./assets/brand/README.md) | Approved brand assets and the generated targets |
+| [docs/LEARN_EDITORIAL_CONTRACT.md](./docs/LEARN_EDITORIAL_CONTRACT.md) | The rules for publishing POS Canvas Learn content |
 
 ## Architecture notes
 
