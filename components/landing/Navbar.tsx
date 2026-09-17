@@ -2,7 +2,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import PosCanvasLockup from "@/components/brand/PosCanvasLockup";
 import {
-  LANDING_SECTION_ANCHORS,
+  LANDING_HOME_SECTION_LINKS,
   getLandingPrimaryAction,
   getLandingSignInAction,
 } from "@/lib/landingNav";
@@ -43,13 +43,18 @@ import {
 // Any future mobile navigation work belongs in the gap this leaves, not in a
 // visual pass.
 
-// The in-page sections, taken from the shared anchor constants rather than
-// typed as literals, so a destination cannot drift away from the section that
-// renders it.
+// The homepage sections, taken from the shared constants rather than typed as
+// literals, so a destination cannot drift away from the section that renders
+// it.
+//
+// Lane 3 Task 4 — ROOT-QUALIFIED ("/#features"), because this header also
+// renders on Learn and on the SEO landing pages, where a bare "#features" has
+// no target. Only the destination changed; the items, labels and breakpoint are
+// the released ones.
 const SECTION_LINKS = [
-  { label: "Templates", href: LANDING_SECTION_ANCHORS.templates },
-  { label: "Features", href: LANDING_SECTION_ANCHORS.features },
-  { label: "How It Works", href: LANDING_SECTION_ANCHORS.howItWorks },
+  { label: "Templates", href: LANDING_HOME_SECTION_LINKS.templates },
+  { label: "Features", href: LANDING_HOME_SECTION_LINKS.features },
+  { label: "How It Works", href: LANDING_HOME_SECTION_LINKS.howItWorks },
 ] as const;
 
 export default async function Navbar() {

@@ -258,14 +258,19 @@ describe("the header still decides what to show the way it did", () => {
   });
 
   it("every section anchor still comes from the shared constants", () => {
+    // Lane 3 Task 4 — the root-qualified form ("/#features"), because the
+    // header also renders on routes that have no such section. Still the
+    // shared constants, never literals; lib/landingNav.test.ts checks that
+    // each one lands on a section the homepage renders.
     for (const anchor of [
-      "LANDING_SECTION_ANCHORS.templates",
-      "LANDING_SECTION_ANCHORS.features",
-      "LANDING_SECTION_ANCHORS.howItWorks",
+      "LANDING_HOME_SECTION_LINKS.templates",
+      "LANDING_HOME_SECTION_LINKS.features",
+      "LANDING_HOME_SECTION_LINKS.howItWorks",
     ]) {
       expect(`${NAVBAR}: ${anchor}`).toBe(`${NAVBAR}: ${anchor}`);
       expect(navbar).toContain(anchor);
     }
+    expect(navbar).not.toContain("LANDING_SECTION_ANCHORS");
   });
 
   it("the released responsive behaviour is preserved, not redesigned", () => {

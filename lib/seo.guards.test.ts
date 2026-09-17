@@ -29,6 +29,7 @@ import { PRODUCTION_SITE_ORIGIN } from "@/lib/siteOrigin";
 import { templates } from "@/data/templates";
 import { learnArticles } from "@/data/learn";
 import { publishedArticles } from "@/lib/learn";
+import { LANDING_PAGES } from "@/lib/landingPages";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -110,10 +111,14 @@ describe("the sitemap advertises only real, public, indexable pages", () => {
     // Composed from the parts rather than a literal, so adding a template or
     // publishing an article updates it, while an UNEXPECTED url — a draft, a
     // category placeholder, a private route — still fails. Lane 3 Task 3B
-    // added the Learn hub and its published articles; the count is exact, not
-    // loosened to a minimum.
+    // added the Learn hub and its published articles, and Task 4 the three
+    // approved landing pages; the count is exact, not loosened to a minimum.
     expect(urls).toHaveLength(
-      2 + templates.length + 1 + publishedArticles(learnArticles).length
+      2 +
+        templates.length +
+        1 +
+        publishedArticles(learnArticles).length +
+        LANDING_PAGES.length
     );
   });
 
@@ -146,20 +151,27 @@ describe("the sitemap advertises only real, public, indexable pages", () => {
     }
   });
 
-  it("excludes the four SEO landing pages that do not exist yet", () => {
-    // PLAN ONLY as of Task 3. A sitemap entry for an unbuilt route is a
-    // self-inflicted crawl error, and the fastest way to teach a crawler to
-    // distrust the file.
-    for (const planned of [
+  it("lists each approved landing page exactly once, at a route that exists", () => {
+    // Task 3 planned four landing pages; Task 4 approved three. Each is listed
+    // once — a duplicate entry is a crawl signal nobody meant to send.
+    for (const slug of [
       "customizable-pos",
       "pos-for-small-business",
-      "liquor-store-pos",
       "no-code-pos-builder",
     ]) {
-      expect(`sitemap has unbuilt ${planned}`).toBe(`sitemap has unbuilt ${planned}`);
-      expect(urls.some((url) => url.includes(planned))).toBe(false);
-      expect(existsSync(join(repoRoot, "app", planned, "page.tsx"))).toBe(false);
+      const url = absoluteUrl(`/${slug}`);
+      expect(`sitemap has ${slug}`).toBe(`sitemap has ${slug}`);
+      expect(urls.filter((entry) => entry === url)).toHaveLength(1);
+      expect(existsSync(join(repoRoot, "app", slug, "page.tsx"))).toBe(true);
     }
+  });
+
+  it("excludes the landing page that was planned but not approved", () => {
+    // /liquor-store-pos was PLAN ONLY in Task 3 and was not approved in Task 4.
+    // A sitemap entry for an unbuilt route is a self-inflicted crawl error, and
+    // the fastest way to teach a crawler to distrust the file.
+    expect(urls.some((url) => url.includes("liquor-store-pos"))).toBe(false);
+    expect(existsSync(join(repoRoot, "app", "liquor-store-pos"))).toBe(false);
   });
 
   it("every listed page has a route that actually exists", () => {
@@ -297,6 +309,16 @@ describe("each route canonicalises to itself, and only the right ones index", ()
 
     expect(INDEXABLE_PATHS).toContain("/");
     expect(INDEXABLE_PATHS).toContain("/templates");
+
+    // Lane 3 Task 4 — the landing pages index, and none carries a robots
+    // directive of its own.
+    for (const page of LANDING_PAGES) {
+      const file = `app${page.path}/page.tsx`;
+      expect(`${file}`).toBe(file);
+      expect(INDEXABLE_PATHS).toContain(page.path);
+      expect(code(read(file))).not.toContain("NOINDEX_ROBOTS");
+      expect(code(read(file))).not.toContain("robots");
+    }
   });
 });
 
@@ -412,6 +434,8 @@ describe("no public surface claims coverage the product does not have", () => {
     "app/templates/page.tsx",
     "app/templates/[id]/page.tsx",
     "lib/seo.ts",
+    // Lane 3 Task 4 — every landing page title and description lives here.
+    "lib/landingPages.ts",
   ];
 
   /** Public marketing copy a searcher or visitor actually reads. */
@@ -422,6 +446,14 @@ describe("no public surface claims coverage the product does not have", () => {
     "components/landing/TemplateCard.tsx",
     "components/landing/BusinessTypes.tsx",
     "components/landing/Hero.tsx",
+    // Lane 3 Task 4 — the landing page bodies and their shared pieces. Body
+    // copy, so "the same download for every business" stays allowed here as
+    // architecture, exactly as it is on the homepage.
+    "app/customizable-pos/page.tsx",
+    "app/pos-for-small-business/page.tsx",
+    "app/no-code-pos-builder/page.tsx",
+    "components/seo-landing/LandingClosing.tsx",
+    "components/seo-landing/RelatedPages.tsx",
   ];
 
   /**
@@ -581,6 +613,7 @@ describe("search metadata markets only what has shipped", () => {
     "app/templates/page.tsx",
     "app/templates/[id]/page.tsx",
     "lib/seo.ts",
+    "lib/landingPages.ts",
   ];
 
   it("names no unreleased v1.3 capability", () => {

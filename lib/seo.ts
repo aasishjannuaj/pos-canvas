@@ -21,7 +21,10 @@
 //
 // Dependency-free of React and Supabase, so the classification and the
 // structured data are unit-testable.
+import type { Metadata } from "next";
 import { BRAND, BRAND_TAGLINE } from "@/lib/brand";
+import { LANDING_PAGE_PATHS } from "@/lib/landingPages";
+import type { LandingPage } from "@/lib/landingPages";
 import { getPlatformDownloads, isDownloadable } from "@/lib/platformDownloads";
 import { PRODUCTION_SITE_ORIGIN } from "@/lib/siteOrigin";
 
@@ -62,7 +65,14 @@ export function absoluteUrl(path: string): string {
  * six real pages with a name, a description, a starter catalogue and a preview,
  * not an open-ended dynamic space.
  */
-export const INDEXABLE_PATHS = ["/", "/templates", "/learn"] as const;
+export const INDEXABLE_PATHS = [
+  "/",
+  "/templates",
+  "/learn",
+  // Lane 3 Task 4 — the SEO landing pages, read from their registry so a
+  // page cannot be indexable here under one path and live under another.
+  ...LANDING_PAGE_PATHS,
+] as const;
 
 /**
  * Publicly reachable pages that should NOT compete in search.
@@ -144,6 +154,32 @@ export function buildOpenGraph(input: {
     siteName: BRAND.websiteName,
     type: "website" as const,
     locale: "en_US",
+  };
+}
+
+/**
+ * The complete metadata for one SEO landing page (Lane 3 Task 4).
+ *
+ * ONE BUILDER FOR THE THREE PAGES, so the parts that must never differ cannot:
+ * each page canonicalises to its own registry path, its og:url is that same
+ * path, and none of them carries a robots directive — they are meant to index.
+ * The title is a plain string, so the root layout's " · POS Canvas" template
+ * applies, as it does on /templates and /learn.
+ *
+ * No `images`: no approved social card exists (lib/seo.guards.test.ts), and no
+ * structured data is returned — a landing page is not a Product, an Offer, an
+ * FAQ or a review, and claiming any of those would be invented.
+ */
+export function buildLandingPageMetadata(page: LandingPage): Metadata {
+  return {
+    title: page.title,
+    description: page.description,
+    alternates: { canonical: absoluteUrl(page.path) },
+    openGraph: buildOpenGraph({
+      title: page.title,
+      description: page.socialDescription,
+      path: page.path,
+    }),
   };
 }
 

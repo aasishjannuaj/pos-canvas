@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  LANDING_HOME_SECTION_LINKS,
   LANDING_ROUTES,
   LANDING_SECTION_ANCHORS,
   LANDING_SECTION_IDS,
@@ -118,6 +119,91 @@ describe("landing section anchors match the ids the sections render", () => {
     expect(readLandingComponent("HowItWorks.tsx")).toContain(
       `id="${LANDING_SECTION_IDS.howItWorks}"`
     );
+  });
+});
+
+// Lane 3 Task 4 — the shared header and footer are not homepage-only.
+//
+// They render on /, on Learn and on the SEO landing pages. A bare "#features"
+// only resolves on the page that has that section, so from anywhere else the
+// click went nowhere. These guards hold the root-qualified form in place and
+// check that each one still lands on a section the homepage really renders.
+describe("shared home-section links work from every route", () => {
+  const SHARED = ["Navbar.tsx", "Footer.tsx"] as const;
+  const KEYS = ["templates", "features", "howItWorks"] as const;
+
+  /**
+   * Every element id the homepage renders, read from the landing components
+   * app/page.tsx imports. A literal id="..." counts, and so does
+   * id={LANDING_SECTION_IDS.key}, resolved through the real constant.
+   */
+  function homepageIds(): Set<string> {
+    const home = readFileSync(join(repoRoot, "app", "page.tsx"), "utf-8");
+    const components = [
+      ...home.matchAll(/from "@\/components\/landing\/([A-Za-z]+)"/g),
+    ].map((match) => `${match[1]}.tsx`);
+    const ids = new Set<string>();
+
+    for (const name of components) {
+      const markup = readLandingMarkup(name);
+      for (const match of markup.matchAll(/\bid="([^"]+)"/g)) ids.add(match[1]);
+      for (const match of markup.matchAll(/\bid=\{LANDING_SECTION_IDS\.(\w+)\}/g)) {
+        const key = match[1] as keyof typeof LANDING_SECTION_IDS;
+        if (key in LANDING_SECTION_IDS) ids.add(LANDING_SECTION_IDS[key]);
+      }
+    }
+
+    return ids;
+  }
+
+  it("each link is the homepage path plus the section's own id", () => {
+    for (const key of KEYS) {
+      expect(`${key}`).toBe(key);
+      expect(LANDING_HOME_SECTION_LINKS[key]).toBe(`/#${LANDING_SECTION_IDS[key]}`);
+      expect(LANDING_HOME_SECTION_LINKS[key]).toBe(`/${LANDING_SECTION_ANCHORS[key]}`);
+    }
+  });
+
+  it("each link resolves to a section the homepage actually renders", () => {
+    const ids = homepageIds();
+
+    for (const key of KEYS) {
+      const [path, fragment] = LANDING_HOME_SECTION_LINKS[key].split("#");
+      expect(`${key} -> ${LANDING_HOME_SECTION_LINKS[key]}`).toBe(
+        `${key} -> ${path}#${fragment}`
+      );
+      expect(path).toBe("/");
+      expect(ids.has(fragment)).toBe(true);
+    }
+  });
+
+  for (const name of SHARED) {
+    it(`${name} uses the root-qualified links for every home section`, () => {
+      const markup = readLandingMarkup(name);
+
+      for (const key of KEYS) {
+        expect(`${name}: ${key}`).toBe(`${name}: ${key}`);
+        expect(markup).toContain(`LANDING_HOME_SECTION_LINKS.${key}`);
+      }
+      // No same-page anchor, by constant or by literal: either one is dead on
+      // every route except the homepage.
+      expect(markup).not.toContain("LANDING_SECTION_ANCHORS");
+      expect(markup).not.toMatch(/\bhref=["{]\s*["'`]?#/);
+      expect(markup).not.toMatch(/\bhref:\s*["'`]#/);
+    });
+  }
+
+  it("the shared header and footer really do render off the homepage", () => {
+    // The reason the links above must be root-qualified. If this stops being
+    // true the guard is still harmless, but the comment in lib/landingNav.ts
+    // should be revisited.
+    const learn = readFileSync(join(repoRoot, "app", "learn", "page.tsx"), "utf-8");
+    expect(learn).toContain("<Navbar />");
+    expect(learn).toContain("<Footer />");
+  });
+
+  it("the homepage-only hero keeps its same-page anchor", () => {
+    expect(readLandingMarkup("Hero.tsx")).toContain("LANDING_SECTION_ANCHORS.templates");
   });
 });
 

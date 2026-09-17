@@ -30,6 +30,23 @@ export const LANDING_SECTION_ANCHORS = {
   howItWorks: `#${LANDING_SECTION_IDS.howItWorks}`,
 } as const;
 
+// Lane 3 Task 4 — the same homepage sections, addressed from ANY route.
+//
+// The header and footer are shared: they render on the homepage, on Learn and
+// on the SEO landing pages. A bare "#features" only means something on the
+// page that has a #features section, so from /learn it pointed at nothing and
+// the click went nowhere. "/#features" goes to the homepage and then to the
+// section — and on the homepage itself it is still an in-page jump, because the
+// URL differs only by its fragment.
+//
+// LANDING_SECTION_ANCHORS stays for links that only ever render on the
+// homepage (the hero's "See Templates"), where a same-page anchor is right.
+export const LANDING_HOME_SECTION_LINKS = {
+  templates: `/${LANDING_SECTION_ANCHORS.templates}`,
+  features: `/${LANDING_SECTION_ANCHORS.features}`,
+  howItWorks: `/${LANDING_SECTION_ANCHORS.howItWorks}`,
+} as const;
+
 // The editor is the canonical "use this template" destination, matching what
 // components/templates/TemplateGalleryCard.tsx and
 // components/template-detail/TemplateActionPanel.tsx already link to. Note

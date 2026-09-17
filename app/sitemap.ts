@@ -1,14 +1,15 @@
 import type { MetadataRoute } from "next";
 import { templates } from "@/data/templates";
 import { learnArticles } from "@/data/learn";
+import { LANDING_PAGES } from "@/lib/landingPages";
 import { publishedArticles } from "@/lib/learn";
 import { absoluteUrl } from "@/lib/seo";
 
 // Lane 3 Task 3 — the sitemap, which is a claim about what is worth indexing.
 //
-// WHAT IS IN IT: the homepage, the template gallery, and one page per template
-// in the canonical registry. Nothing else. Each is a real, public, crawlable
-// page with content a searcher could want.
+// WHAT IS IN IT: the homepage, the template gallery, one page per template in
+// the canonical registry, Learn, and the SEO landing pages. Nothing else. Each
+// is a real, public, crawlable page with content a searcher could want.
 //
 // TEMPLATE PAGES ARE ENUMERATED FROM THE REGISTRY, not matched by pattern.
 // data/templates.ts is the single source of truth for which templates exist
@@ -24,13 +25,10 @@ import { absoluteUrl } from "@/lib/seo";
 //   /login, /signup, /forgot-password,  publicly reachable but thin; they carry
 //   /reset-password, /device            `noindex` instead
 //   /auth/*                             a route handler, not a page
-//   the four planned SEO landing pages  /customizable-pos,
-//                                       /pos-for-small-business,
-//                                       /liquor-store-pos and
-//                                       /no-code-pos-builder are PLAN ONLY.
-//                                       They do not exist, and a sitemap entry
-//                                       for a 404 is a self-inflicted crawl
-//                                       error.
+//   /liquor-store-pos                   planned in Task 3, NOT approved in
+//                                       Task 4. It does not exist, and a
+//                                       sitemap entry for a 404 is a
+//                                       self-inflicted crawl error.
 //
 // No `lastModified`: this repository has no per-page content timestamp, and a
 // build-time `new Date()` would tell crawlers every page changed on every
@@ -57,5 +55,10 @@ export default function sitemap(): MetadataRoute.Sitemap {
     ...publishedArticles(learnArticles).map((article) => ({
       url: absoluteUrl(`/learn/${article.slug}`),
     })),
+    // Lane 3 Task 4 — the three approved SEO landing pages, from their
+    // registry (lib/landingPages.ts). The same list decides their metadata and
+    // their place in INDEXABLE_PATHS, so a page cannot be listed here under a
+    // path it does not render at.
+    ...LANDING_PAGES.map((page) => ({ url: absoluteUrl(page.path) })),
   ];
 }

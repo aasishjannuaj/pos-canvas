@@ -1,11 +1,15 @@
 import Link from "next/link";
 import PosCanvasLockup from "@/components/brand/PosCanvasLockup";
 import { BRAND, BRAND_TAGLINE } from "@/lib/brand";
-import { LANDING_ROUTES, LANDING_SECTION_ANCHORS } from "@/lib/landingNav";
+import { LANDING_HOME_SECTION_LINKS, LANDING_ROUTES } from "@/lib/landingNav";
 
 // Footer links were already working in-page anchors; they reference the shared
 // anchor constants so they cannot drift from the section ids the landing
 // sections actually render.
+//
+// Lane 3 Task 4 — the three section links are ROOT-QUALIFIED ("/#features").
+// This footer also renders on Learn and on the SEO landing pages, where a bare
+// "#features" pointed at nothing. Only the destinations changed.
 //
 // Lane 3 Task 2 — brought into the Concept D system, and deliberately kept
 // SHORT.
@@ -51,15 +55,15 @@ export default function Footer() {
                 Explore
               </h2>
 
-              <a href={LANDING_SECTION_ANCHORS.templates} className="pc-navlink py-1">
+              <a href={LANDING_HOME_SECTION_LINKS.templates} className="pc-navlink py-1">
                 Templates
               </a>
 
-              <a href={LANDING_SECTION_ANCHORS.features} className="pc-navlink py-1">
+              <a href={LANDING_HOME_SECTION_LINKS.features} className="pc-navlink py-1">
                 Features
               </a>
 
-              <a href={LANDING_SECTION_ANCHORS.howItWorks} className="pc-navlink py-1">
+              <a href={LANDING_HOME_SECTION_LINKS.howItWorks} className="pc-navlink py-1">
                 How It Works
               </a>
 
