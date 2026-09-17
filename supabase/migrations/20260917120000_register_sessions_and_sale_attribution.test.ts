@@ -1760,6 +1760,26 @@ describe("get_current_register_session", () => {
 
 const closeBody = (): string => src(CLOSE);
 
+const TARGET_JOIN = "join public.paired_devices d on d.id = r.paired_device_id";
+
+/** Every way a close body could stop resolving ownership from the target. */
+function targetFirstViolations(code: string): string[] {
+  const joins = code.match(/join public\.paired_devices d on d\.id = r\.paired_device_id/g)?.length ?? 0;
+  const callers = code.match(/auth_user_id/g)?.length ?? 0;
+  const out: string[] = [];
+
+  if (joins === 0) out.push("no target join");
+  if (callers !== joins) out.push(`${callers} caller mentions for ${joins} target join(s)`);
+  if (joins > 0 && code.indexOf(TARGET_JOIN) > code.indexOf("d.auth_user_id = v_caller")) {
+    out.push("caller named before the target join");
+  }
+  if (/from public\.paired_devices d\s*\n\s*where d\.auth_user_id/.test(code)) {
+    out.push("resolves a device from the caller alone");
+  }
+
+  return out;
+}
+
 describe("close_register_session", () => {
   const body = closeBody;
 
@@ -1783,9 +1803,10 @@ describe("close_register_session", () => {
       "  where r.id = p_register_session_id\n" +
       "    and d.auth_user_id = v_caller;"
     );
-    // The caller's identity is never used to pick a device row on its own.
-    // Counted on the executable text, so a comment cannot satisfy or trip it.
-    expect(effective(CLOSE).body.match(/auth_user_id/g)).toHaveLength(1);
+    // The caller's identity is never used to pick a device row on its own:
+    // every mention of it sits inside a target join. Counted on the executable
+    // text, so a comment cannot satisfy or trip it.
+    expect(targetFirstViolations(effective(CLOSE).body)).toEqual([]);
     expect(b).not.toMatch(/from public\.paired_devices d\s*\n\s*where d\.auth_user_id/);
   });
 
@@ -1880,8 +1901,13 @@ type World = {
   devices: Device[];
   sessions: Session[];
   signedIn: Signed | null;
-  /** A concurrent close that commits while this call waits for the row lock. */
-  closedByRace?: { at: number; by: string };
+  /**
+   * A concurrent close that commits during this call. `visibleFrom` says when
+   * it becomes observable: "device" means it committed before this call reached
+   * the active-pairing gate (the interleaving where a revoke or unpair then
+   * lands on top of it), "lock" means it won the row lock race later.
+   */
+  closedByRace?: { at: number; by: string; visibleFrom?: "device" | "lock" };
 };
 
 type Outcome = {
@@ -1902,6 +1928,8 @@ type CloseModel = {
   employeeWhere: AstNode;
   lockWhere: AstNode;
   updateWhere: AstNode;
+  /** The read-only re-check after a failed active-pairing gate, if there is one. */
+  fallback: { join: AstNode; where: AstNode } | null;
 };
 
 /** One statement: from its anchor to its own terminating semicolon. */
@@ -1919,21 +1947,39 @@ async function closeModel(migration: string): Promise<CloseModel> {
   const ownership = await selectStatement(ownershipText.trim());
   const device = await selectStatement(sliceStatement(body, "  select 1\n  into v_device_locked").trim());
   const employee = await selectStatement(sliceStatement(body, "  select s.id, s.employee_id").trim());
-  const lockAnchor = body.indexOf(ownershipText) + ownershipText.length;
+  // Located by its own WHERE, so an added statement in between cannot shift it.
+  const lockWhereText = "  where r.id = p_register_session_id\n    and r.paired_device_id = v_device_id\n  for update;";
+  const lockAnchor = body.lastIndexOf("  select r.id, r.opened_at", body.indexOf(lockWhereText));
   const lock = await selectStatement(sliceStatement(body, "  select r.id, r.opened_at", lockAnchor).trim());
+  void ownershipText;
   const update = (await parse(
     sliceStatement(body, "  update public.register_sessions r")
       .replace(/\breturning\b[\s\S]*$/i, "")
       .trim()
   )).stmts[0].stmt.UpdateStmt as AstNode;
 
+  // The gate's failure branch: everything between its lock clause and the
+  // not_paired it may end with.
+  const gate = body.indexOf("  select 1\n  into v_device_locked");
+  const gateFail = body.slice(gate, body.indexOf("'not_paired'", gate));
+  const fallbackAnchor = gateFail.indexOf("    select r.id, r.opened_at");
+  const fallback = fallbackAnchor < 0
+    ? null
+    : await selectStatement(sliceStatement(gateFail, "    select r.id, r.opened_at").trim());
+
   return {
     order: {
       replay: body.indexOf("  if v_register.closed_at is not null then"),
-      device: body.indexOf("  select 1\n  into v_device_locked"),
+      device: gate,
       employee: body.indexOf("  select s.id, s.employee_id"),
       lock: body.indexOf("  select r.id, r.opened_at", lockAnchor),
     },
+    fallback: fallback
+      ? {
+          join: ((fallback.fromClause as AstNode[])[0].JoinExpr as AstNode).quals as AstNode,
+          where: fallback.whereClause as AstNode,
+        }
+      : null,
     ownershipJoin: ((ownership.fromClause as AstNode[])[0].JoinExpr as AstNode).quals as AstNode,
     ownershipWhere: ownership.whereClause as AstNode,
     deviceWhere: device.whereClause as AstNode,
@@ -1989,6 +2035,10 @@ function simulateClose(model: CloseModel, world: World): Outcome {
 
   let hasEmployee = false;
   let row: Session = target;
+  const race = world.closedByRace;
+  const applyRace = () => {
+    if (race) row = { ...row, closed_at: race.at, closed_by_employee_id: race.by };
+  };
 
   for (const { step } of steps) {
     if (step === "replay") {
@@ -1998,8 +2048,24 @@ function simulateClose(model: CloseModel, world: World): Outcome {
     }
 
     if (step === "device") {
+      if (race && race.visibleFrom === "device") applyRace();
+
       const ok = evaluate(model.deviceWhere, { ...deviceEnv(device), v_device_id: t(device.id) }) === true;
-      if (!ok) return { error: "not_paired", wrote };
+
+      if (!ok) {
+        // The gate failed. A completed close must still be able to answer.
+        if (model.fallback) {
+          const env2 = { ...env, ...sessionEnv(row), ...deviceEnv(device) };
+          const owned2 =
+            evaluate(model.fallback.join, env2) === true && evaluate(model.fallback.where, env2) === true;
+
+          if (owned2 && row.closed_at !== null) {
+            return { ok: true, alreadyClosed: true, closedAt: row.closed_at, closedBy: row.closed_by_employee_id, wrote };
+          }
+        }
+
+        return { error: "not_paired", wrote };
+      }
     }
 
     if (step === "employee") {
@@ -2015,9 +2081,7 @@ function simulateClose(model: CloseModel, world: World): Outcome {
 
     if (step === "lock") {
       // A concurrent close commits while this call waits for the row lock.
-      if (world.closedByRace) {
-        row = { ...row, closed_at: world.closedByRace.at, closed_by_employee_id: world.closedByRace.by };
-      }
+      applyRace();
 
       const visible = evaluate(model.lockWhere, { ...env, ...sessionEnv(row), v_device_id: t(device.id) }) === true;
       if (!visible) return { error: "not_found", wrote };
@@ -2240,8 +2304,142 @@ describe("close_register_session: the idempotency contract, simulated from the S
   });
 
   // -------------------------------------------------------------------------
+  // The close-won-then-revoked interleaving: a completed close outranks an
+  // event that happened after it, even when that event fails the gate.
+  // -------------------------------------------------------------------------
+
+  const WON = { at: 2750, by: "emp-a", visibleFrom: "device" as const };
+  const wonStored = { ok: true, alreadyClosed: true, closedAt: 2750, closedBy: "emp-a", wrote: [] };
+
+  it("R1. close commits, THEN the device is revoked: the retry returns the stored close, not not_paired", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2800 }],
+      closedByRace: WON,
+    }))).toEqual(wonStored);
+  });
+
+  it("R2. close commits, THEN the device unpairs: the retry returns the stored close", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, unpaired_at: 2800 }],
+      closedByRace: WON,
+    }))).toEqual(wonStored);
+
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2800, unpaired_at: 2900 }],
+      closedByRace: WON,
+    }))).toEqual(wonStored);
+  });
+
+  it("R3. revoked device with the target STILL OPEN is refused", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2800 }],
+    }))).toEqual({ error: "not_paired", wrote: [] });
+  });
+
+  it("R4. unpaired device with the target STILL OPEN is refused", () => {
+    expect(simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, unpaired_at: 2800 }],
+    }))).toEqual({ error: "not_paired", wrote: [] });
+  });
+
+  it("R5. the fallback answer is the stored one: values intact, no write, nobody signed in needed", () => {
+    const out = simulateClose(model, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2800 }],
+      signedIn: null,
+      closedByRace: WON,
+    }));
+
+    expect(out).toEqual(wonStored);
+    expect(out.closedAt).toBe(WON.at);
+    expect(out.closedBy).toBe(WON.by);
+    expect(out.wrote).toEqual([]);
+  });
+
+  it("R6-R8. the fallback re-proves ownership: another device, another project and a re-pair are all refused", () => {
+    expect(model.fallback).not.toBeNull();
+
+    const probe = (device: Device, caller: string) =>
+      evaluate(model.fallback!.join, {
+        ...sessionEnv(CLOSED_TARGET), ...deviceEnv(device),
+        v_caller: t(caller), p_register_session_id: t("reg-1"),
+      }) === true &&
+      evaluate(model.fallback!.where, {
+        ...sessionEnv(CLOSED_TARGET), ...deviceEnv(device),
+        v_caller: t(caller), p_register_session_id: t("reg-1"),
+      }) === true;
+
+    // Its own device and identity: yes. Anything else: no.
+    expect(probe(OLD_DEVICE, "auth-old")).toBe(true);
+    expect(probe(OTHER_DEVICE, "auth-other")).toBe(false);
+    expect(probe({ ...OTHER_DEVICE, project_id: "proj-1" }, "auth-other")).toBe(false);
+    expect(probe(NEW_DEVICE, "auth-new")).toBe(false);
+    expect(probe(OLD_DEVICE, "auth-new")).toBe(false);
+
+    // And end to end, those callers never get past the first ownership read.
+    for (const caller of ["auth-other", "auth-new"]) {
+      expect(simulateClose(model, world({
+        caller,
+        devices: [{ ...OLD_DEVICE, revoked_at: 2800 }, NEW_DEVICE, OTHER_DEVICE],
+        sessions: [OPEN_TARGET],
+        closedByRace: WON,
+      }))).toEqual({ error: "not_found", wrote: [] });
+    }
+  });
+
+  it("R9. the fallback takes no lock and writes nothing, in the source", () => {
+    const b = effective(CLOSE).body;
+    const gate = b.indexOf("  select 1\n  into v_device_locked");
+    const fallback = b.slice(gate, b.indexOf("'not_paired'", gate));
+
+    expect(fallback).toContain("join public.paired_devices d on d.id = r.paired_device_id");
+    expect(fallback).toContain("d.auth_user_id = v_caller");
+    // The gate's own FOR UPDATE is the only lock in this stretch.
+    expect(fallback.match(/for update/g)).toHaveLength(1);
+    expect(fallback).not.toMatch(/for share|update public\.|insert into|delete from/);
+  });
+
+  // -------------------------------------------------------------------------
   // NEGATIVE CONTROLS — each restores a version of the defect and fails.
   // -------------------------------------------------------------------------
+
+  it("NEGATIVE CONTROL: answering not_paired without re-reading the target restores the race", async () => {
+    const start = sql.indexOf("  if not found then\n    -- =====", sql.indexOf("  into v_device_locked"));
+    const endMarker = "    return jsonb_build_object('ok', false, 'error', 'not_paired');\n  end if;";
+    const end = sql.indexOf(endMarker, start) + endMarker.length;
+    const mutated =
+      sql.slice(0, start) +
+      "  if not found then\n    return jsonb_build_object('ok', false, 'error', 'not_paired');\n  end if;" +
+      sql.slice(end);
+
+    expect(mutated).not.toBe(sql);
+
+    const broken = await closeModel(mutated);
+
+    expect(broken.fallback).toBeNull();
+
+    // The two interleavings this correction exists for now fail.
+    expect(simulateClose(broken, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, revoked_at: 2800 }],
+      closedByRace: WON,
+    }))).toEqual({ error: "not_paired", wrote: [] });
+
+    expect(simulateClose(broken, world({
+      sessions: [OPEN_TARGET],
+      devices: [{ ...OLD_DEVICE, unpaired_at: 2800 }],
+      closedByRace: WON,
+    }))).toEqual({ error: "not_paired", wrote: [] });
+
+    // Everything else still behaves, so the control isolates this defect.
+    expect(simulateClose(broken, world())).toEqual(stored);
+    expect(simulateClose(broken, world({ sessions: [OPEN_TARGET] })).wrote).toEqual(["reg-1"]);
+  });
 
   it("NEGATIVE CONTROL: requiring active pairing BEFORE the closed replay breaks the revoked and unpaired retries", async () => {
     const mutated = sql.replace(
@@ -2290,11 +2488,8 @@ describe("close_register_session: the idempotency contract, simulated from the S
 
     expect(mutated).not.toBe(sql);
 
-    const broken = rawBody(mutated, CLOSE);
-
-    // The structural guards catch it without any simulation.
-    expect(broken.match(/auth_user_id/g)?.length).not.toBe(1);
-    expect(broken).not.toContain("join public.paired_devices d on d.id = r.paired_device_id");
+    // The structural guard catches it without any simulation.
+    expect(targetFirstViolations(stripComments(rawBody(mutated, CLOSE)))).not.toEqual([]);
   });
 
   it("NEGATIVE CONTROL: requiring a current employee for the replay breaks every post-operation retry", async () => {
@@ -3023,6 +3218,7 @@ describe("apply-time verification", () => {
       "public\\.employees|public\\.employee_pos_sessions|for update|for share)",
       "F1B: close_register_session must answer an already-closed target before any pairing, employee or lock",
       "F1B: the first-close path lost the active-pairing rule or its target-only update",
+      "F1B: a failed active-pairing gate must re-read the historically owned target and return a completed close before not_paired",
       "F1B: complete_sale_v5 accepted a sale from a caller that is not a paired device",
       "F1B: register_sessions must be empty after this migration",
       "F1B: public policies changed",

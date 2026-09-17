@@ -709,6 +709,50 @@ begin
   for update;
 
   if not found then
+    -- ========================================================================
+    -- THE GATE FAILED -- but a close may already have COMMITTED.
+    --
+    -- The interleaving this closes: this call read the target while it was
+    -- open, another valid close then took the device lock and closed it, and
+    -- the revoke or unpair landed after that. Returning not_paired here would
+    -- let an event that happened AFTER a completed close change its retry
+    -- result, which is exactly what a completed close is not allowed to do.
+    --
+    -- SAFE WITHOUT REVERSING ANY LOCK ORDER, because this takes nothing: any
+    -- close that could have won had to hold this same device row FOR UPDATE,
+    -- and the revoke or unpair that just failed the gate could not commit
+    -- until that close released it. So if a winning close exists, this read
+    -- sees it.
+    --
+    -- The ownership proof is repeated rather than assumed: the target's own
+    -- paired_device_id, that exact device row, and its auth_user_id. An
+    -- ownership failure is the same not_found as everywhere else, so this
+    -- fallback cannot be used to probe for register sessions.
+    -- ========================================================================
+    select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+           r.closed_at, r.closed_by_employee_id
+    into v_register
+    from public.register_sessions r
+    join public.paired_devices d on d.id = r.paired_device_id
+    where r.id = p_register_session_id
+      and d.auth_user_id = v_caller;
+
+    if found and v_register.closed_at is not null then
+      return jsonb_build_object(
+        'ok', true,
+        'alreadyClosed', true,
+        'registerSession', jsonb_build_object(
+          'registerSessionId', v_register.id,
+          'openedAt', v_register.opened_at,
+          'openedByEmployeeId', v_register.opened_by_employee_id,
+          'openingCash', v_register.opening_cash::text,
+          'closedAt', v_register.closed_at,
+          'closedByEmployeeId', v_register.closed_by_employee_id
+        )
+      );
+    end if;
+
+    -- Still open, and this device may no longer operate: no first close.
     return jsonb_build_object('ok', false, 'error', 'not_paired');
   end if;
 
@@ -2656,12 +2700,17 @@ begin
   v_def := pg_get_functiondef(to_regprocedure(v_public_sigs[3]));
 
   -- Ownership is resolved FROM THE TARGET, through the register session's own
-  -- paired_device_id, and nowhere else: the caller's identity appears exactly
-  -- once, inside that join.
+  -- paired_device_id, and nowhere else. Every mention of the caller's identity
+  -- sits inside such a join -- the counts must match -- and no read resolves a
+  -- device from auth.uid() on its own.
   if position('join public.paired_devices d on d.id = r.paired_device_id' in v_def) = 0
      or position('join public.paired_devices d on d.id = r.paired_device_id' in v_def)
         > position('d.auth_user_id = v_caller' in v_def)
-     or (length(v_def) - length(replace(v_def, 'auth_user_id', ''))) / length('auth_user_id') <> 1 then
+     or (length(v_def) - length(replace(v_def, 'auth_user_id', ''))) / length('auth_user_id')
+        is distinct from
+        (length(v_def) - length(replace(v_def, 'join public.paired_devices d on d.id = r.paired_device_id', '')))
+        / length('join public.paired_devices d on d.id = r.paired_device_id')
+     or v_def ~ 'from public\.paired_devices d\s*\n\s*where d\.auth_user_id' then
     raise exception 'F1B: close_register_session must resolve ownership from the target register session, not from the caller''s current pairing';
   end if;
 
@@ -2684,6 +2733,24 @@ begin
      or position('''alreadyClosed'', true,' in v_def) > position('for update' in v_def)
      or position('''alreadyClosed'', true,' in v_def) > position('for share' in v_def) then
     raise exception 'F1B: close_register_session must answer an already-closed target before any pairing, employee or lock';
+  end if;
+
+  -- A FAILED active-pairing gate may not answer not_paired until a target that
+  -- has since been closed has had the chance to return its stored result. The
+  -- fallback re-proves ownership through the target's own device and takes no
+  -- lock and writes nothing.
+  -- Parenthesised, so the captured text starts AFTER the gate's own lock
+  -- clause: what is checked below is the fallback, not the gate.
+  v_text := substring(v_def from 'd\.unpaired_at is null\s*\n  for update;(.*?''not_paired'')');
+
+  if v_text is null
+     or position('from public.register_sessions r' in v_text) = 0
+     or position('join public.paired_devices d on d.id = r.paired_device_id' in v_text) = 0
+     or position('d.auth_user_id = v_caller' in v_text) = 0
+     or position('v_register.closed_at is not null' in v_text) = 0
+     or position('''alreadyClosed'', true,' in v_text) = 0
+     or v_text ~ '(for update|for share|update public\.|insert into|delete from)' then
+    raise exception 'F1B: a failed active-pairing gate must re-read the historically owned target and return a completed close before not_paired';
   end if;
 
   -- A first close still needs the target's OWN device to be active, and the
