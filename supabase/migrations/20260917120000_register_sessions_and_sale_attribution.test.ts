@@ -3180,6 +3180,210 @@ describe("legacy sale functions", () => {
 // 11. The apply-time verification block
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// A8b, reproduced exactly.
+//
+// There is no local Postgres, so the apply-time ownership assertion is mirrored
+// here — the same comment strip, the same whitespace collapse, the same shape
+// string, the same counts — and run against a stand-in for pg_get_functiondef
+// built from the migration's own header and body, COMMENTS INCLUDED. That is
+// what proves those comments cannot abort a correct apply.
+// ---------------------------------------------------------------------------
+
+/** What pg_get_functiondef returns for close_register_session: header + body. */
+function closeFunctionDef(migration: string = sql): string {
+  return (
+    "CREATE OR REPLACE FUNCTION public.close_register_session(p_register_session_id uuid)\n" +
+    " RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n" +
+    " SET search_path TO 'public', 'pg_temp'\nAS $function$" +
+    rawBody(migration, CLOSE) +
+    "$function$\n"
+  );
+}
+
+const OWNERSHIP_SHAPE =
+  "from public.register_sessions r " +
+  "join public.paired_devices d on d.id = r.paired_device_id " +
+  "where r.id = p_register_session_id and d.auth_user_id = v_caller;";
+
+const occurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
+
+/** The SQL block's own logic, in the same order, returning what would raise. */
+function a8bViolations(functionDef: string): string[] {
+  const code = functionDef.replace(/--[^\n]*/g, "");
+  const norm = code.replace(/\s+/g, " ");
+  const out: string[] = [];
+
+  // 1. Ownership: exactly the two approved lookups, and nothing else that
+  //    names the caller or joins a device to a target.
+  if (occurrences(norm, OWNERSHIP_SHAPE) !== 2) out.push(`ownership lookups: ${occurrences(norm, OWNERSHIP_SHAPE)}`);
+  if (occurrences(norm, "auth_user_id") !== 2) out.push(`caller mentions: ${occurrences(norm, "auth_user_id")}`);
+  if (occurrences(norm, "d.id = r.paired_device_id") !== 2) {
+    out.push(`target joins: ${occurrences(norm, "d.id = r.paired_device_id")}`);
+  }
+  if (/from public\.paired_devices d where d\.auth_user_id/.test(norm)) out.push("caller-first device lookup");
+
+  // 2. The first ownership read is unfiltered and unlocked.
+  const lookup = /select r\.id, r\.opened_at[\s\S]*?d\.auth_user_id = v_caller;/.exec(norm)?.[0] ?? null;
+
+  if (lookup === null) out.push("no ownership read");
+  else if (/(revoked_at|unpaired_at|ended_at|\bactive\b|public\.employees|public\.employee_pos_sessions|for update|for share)/.test(lookup)) {
+    out.push("filtered or locked ownership read");
+  }
+
+  // 3. The stored answer precedes every operational requirement and lock.
+  //    0 means "absent", exactly as Postgres position() reports it.
+  const at = (needle: string) => code.indexOf(needle) + 1;
+  const replayAt = at("'alreadyClosed', true,");
+
+  for (const later of ["revoked_at is null", "employee_pos_sessions", "for update", "for share"]) {
+    if (replayAt > at(later)) out.push(`replay after ${later}`);
+  }
+
+  // 4. The failed gate re-reads the target before answering not_paired.
+  const fallback = /d\.unpaired_at is null\s*\n {2}for update;([\s\S]*?'not_paired')/.exec(code)?.[1] ?? null;
+
+  if (fallback === null) out.push("no fallback");
+  else if (
+    !fallback.includes("from public.register_sessions r") ||
+    !fallback.includes("join public.paired_devices d on d.id = r.paired_device_id") ||
+    !fallback.includes("d.auth_user_id = v_caller") ||
+    !fallback.includes("v_register.closed_at is not null") ||
+    !fallback.includes("'alreadyClosed', true,") ||
+    /(for update|for share|update public\.|insert into|delete from)/.test(fallback)
+  ) {
+    out.push("fallback does not re-read the owned target, or is not read-only");
+  }
+
+  // 5. The first-close path keeps its gate and its target-only update.
+  for (const required of ["where d.id = v_device_id", "and d.revoked_at is null", "and d.unpaired_at is null",
+    "where r.id = v_register.id", "and r.closed_at is null"]) {
+    if (!code.includes(required)) out.push(`first close lost ${required}`);
+  }
+
+  return out;
+}
+
+describe("A8b evaluates executable SQL, never comments", () => {
+  it("the shipped function passes, comments and all", () => {
+    const def = closeFunctionDef();
+
+    // The stand-in really does carry the prose that broke the previous version.
+    expect(occurrences(def, "auth_user_id")).toBeGreaterThan(2);
+    expect(a8bViolations(def)).toEqual([]);
+  });
+
+  it("documents the defect this correction fixes: the old global token count aborted a correct apply", () => {
+    const def = closeFunctionDef();
+
+    // The previous assertion compared these two counts across the RAW text.
+    expect(occurrences(def, "auth_user_id"))
+      .not.toBe(occurrences(def, "join public.paired_devices d on d.id = r.paired_device_id"));
+    // The corrected one counts executable occurrences, and they match.
+    expect(occurrences(def.replace(/--[^\n]*/g, ""), "auth_user_id")).toBe(2);
+  });
+
+  it("A. extra comments naming auth_user_id do not fail it", () => {
+    const def = closeFunctionDef();
+    const noisy = def.replace(
+      "begin\n",
+      "begin\n  -- auth_user_id auth_user_id, and d.auth_user_id = v_caller\n" +
+      "  -- from public.paired_devices d where d.auth_user_id = v_caller\n"
+    );
+
+    expect(noisy).not.toBe(def);
+    expect(a8bViolations(noisy)).toEqual([]);
+  });
+
+  it("B. a comment carrying the target-join text cannot satisfy it", () => {
+    const def = closeFunctionDef();
+    const faked = def.replace(
+      "  join public.paired_devices d on d.id = r.paired_device_id\n  where r.id = p_register_session_id\n    and d.auth_user_id = v_caller;",
+      "  where r.id = p_register_session_id;\n  -- join public.paired_devices d on d.id = r.paired_device_id and d.auth_user_id = v_caller"
+    );
+
+    expect(faked).not.toBe(def);
+    expect(a8bViolations(faked)).not.toEqual([]);
+  });
+
+  it("C. resolving a device from the caller first fails", () => {
+    const def = closeFunctionDef();
+    const broken = def.replace(
+      "  from public.register_sessions r\n  join public.paired_devices d on d.id = r.paired_device_id\n  where r.id = p_register_session_id\n    and d.auth_user_id = v_caller;",
+      "  from public.paired_devices d\n  where d.auth_user_id = v_caller;"
+    );
+
+    expect(broken).not.toBe(def);
+    expect(a8bViolations(broken)).toEqual(expect.arrayContaining(["caller-first device lookup"]));
+  });
+
+  it("D. dropping d.id = r.paired_device_id from either lookup fails", () => {
+    const def = closeFunctionDef();
+
+    for (const which of [0, 1]) {
+      let seen = -1;
+      const broken = def.replace(/join public\.paired_devices d on d\.id = r\.paired_device_id/g, (m) => {
+        seen += 1;
+        return seen === which ? "join public.paired_devices d on true" : m;
+      });
+
+      expect(broken).not.toBe(def);
+      expect(a8bViolations(broken)).not.toEqual([]);
+    }
+  });
+
+  it("E. dropping d.auth_user_id = v_caller from either lookup fails", () => {
+    const def = closeFunctionDef();
+
+    for (const which of [0, 1]) {
+      let seen = -1;
+      const broken = def.replace(/and d\.auth_user_id = v_caller;/g, (m) => {
+        seen += 1;
+        return seen === which ? "and true;" : m;
+      });
+
+      expect(broken).not.toBe(def);
+      expect(a8bViolations(broken)).not.toEqual([]);
+    }
+  });
+
+  it("removing the fallback, or locking inside it, fails", () => {
+    const def = closeFunctionDef();
+    const start = def.indexOf("  if not found then\n    -- =====");
+    const endMarker = "    return jsonb_build_object('ok', false, 'error', 'not_paired');\n  end if;";
+    const end = def.indexOf(endMarker, start) + endMarker.length;
+    const stripped =
+      def.slice(0, start) +
+      "  if not found then\n    return jsonb_build_object('ok', false, 'error', 'not_paired');\n  end if;" +
+      def.slice(end);
+
+    expect(a8bViolations(stripped)).toEqual(
+      expect.arrayContaining(["fallback does not re-read the owned target, or is not read-only"])
+    );
+
+    const locked = def.replace(
+      "    where r.id = p_register_session_id\n      and d.auth_user_id = v_caller;",
+      "    where r.id = p_register_session_id\n      and d.auth_user_id = v_caller\n    for update;"
+    );
+
+    expect(locked).not.toBe(def);
+    expect(a8bViolations(locked)).not.toEqual([]);
+  });
+
+  it("the migration's own A8b block reads the stripped text everywhere it checks a shape", () => {
+    // The raw file: this test is ABOUT the assertion's own comments and code.
+    const a8b = sql.slice(
+      sql.indexOf("  -- A8b. close_register_session"),
+      sql.indexOf("  -- A9. Live smoke calls")
+    );
+
+    expect(a8b).toContain("v_code := regexp_replace(v_def, '--[^\\n]*', '', 'g');");
+    expect(a8b).toContain("v_norm := regexp_replace(v_code, '\\s+', ' ', 'g');");
+    // v_def is read once, to produce v_code; every check reads v_code or v_norm.
+    expect(a8b.match(/v_def/g)).toHaveLength(2);
+  });
+});
+
 describe("apply-time verification", () => {
   it("baselines are captured before any DDL", () => {
     const firstDdl = executable.indexOf("create table public.register_sessions");
@@ -3213,7 +3417,7 @@ describe("apply-time verification", () => {
       "F1B: complete_sale_v5 must lock the device before the project",
       "F1B: a register RPC answered an anonymous caller",
       "F1B: a register RPC did not refuse a caller that is not a paired device",
-      "F1B: close_register_session must resolve ownership from the target register session, not from the caller''s current pairing",
+      "F1B: close_register_session must resolve ownership from the target register session, in exactly the two approved lookups, and never from the caller''s current pairing",
       "F1B: the close ownership lookup must be an unfiltered, unlocked read of the target",
       "public\\.employees|public\\.employee_pos_sessions|for update|for share)",
       "F1B: close_register_session must answer an already-closed target before any pairing, employee or lock",

@@ -2171,6 +2171,10 @@ grant execute on function public.complete_sale_v5(text, numeric, jsonb, uuid, ti
 do $do$
 declare
   v_def text;
+  -- A8b works on the executable text: v_code is v_def without line comments,
+  -- v_norm is v_code with whitespace collapsed.
+  v_code text;
+  v_norm text;
   v_text text;
   v_sig text;
   v_oid oid;
@@ -2699,24 +2703,47 @@ begin
   -- ==========================================================================
   v_def := pg_get_functiondef(to_regprocedure(v_public_sigs[3]));
 
-  -- Ownership is resolved FROM THE TARGET, through the register session's own
-  -- paired_device_id, and nowhere else. Every mention of the caller's identity
-  -- sits inside such a join -- the counts must match -- and no read resolves a
-  -- device from auth.uid() on its own.
-  if position('join public.paired_devices d on d.id = r.paired_device_id' in v_def) = 0
-     or position('join public.paired_devices d on d.id = r.paired_device_id' in v_def)
-        > position('d.auth_user_id = v_caller' in v_def)
-     or (length(v_def) - length(replace(v_def, 'auth_user_id', ''))) / length('auth_user_id')
-        is distinct from
-        (length(v_def) - length(replace(v_def, 'join public.paired_devices d on d.id = r.paired_device_id', '')))
-        / length('join public.paired_devices d on d.id = r.paired_device_id')
-     or v_def ~ 'from public\.paired_devices d\s*\n\s*where d\.auth_user_id' then
-    raise exception 'F1B: close_register_session must resolve ownership from the target register session, not from the caller''s current pairing';
+  -- ==========================================================================
+  -- COMMENTS ARE NOT CODE.
+  --
+  -- pg_get_functiondef returns the body WITH its comments, and this function's
+  -- comments explain the ownership rule in words -- they name auth_user_id and
+  -- the target join more than once. Every check below therefore runs on the
+  -- comment-stripped text, so a comment can neither satisfy an assertion nor
+  -- abort a correct migration.
+  --
+  -- v_code keeps the layout (the checks that reason about ORDER need it);
+  -- v_norm collapses whitespace, so a shape can be compared without depending
+  -- on how the statement happens to be wrapped.
+  --
+  -- Stripping '--' to end of line is safe HERE, and only because it is checked:
+  -- the assertion below requires the executable text to contain exactly the two
+  -- ownership lookups, and this function contains no string literal holding a
+  -- double dash (the literals are jsonb keys and the four error codes).
+  -- ==========================================================================
+  v_code := regexp_replace(v_def, '--[^\n]*', '', 'g');
+  v_norm := regexp_replace(v_code, '\s+', ' ', 'g');
+
+  -- THE ONLY SHAPE that may resolve ownership: from the target register
+  -- session, through its own paired_device_id, to that device's auth_user_id.
+  v_text := 'from public.register_sessions r '
+         || 'join public.paired_devices d on d.id = r.paired_device_id '
+         || 'where r.id = p_register_session_id and d.auth_user_id = v_caller;';
+
+  -- Exactly twice: the initial historical lookup and the failed-gate fallback.
+  -- And NO executable mention of the caller anywhere else, so authority cannot
+  -- be established by any other read.
+  if (length(v_norm) - length(replace(v_norm, v_text, ''))) / length(v_text) <> 2
+     or (length(v_norm) - length(replace(v_norm, 'auth_user_id', ''))) / length('auth_user_id') <> 2
+     or (length(v_norm) - length(replace(v_norm, 'd.id = r.paired_device_id', '')))
+        / length('d.id = r.paired_device_id') <> 2
+     or v_norm ~ 'from public\.paired_devices d where d\.auth_user_id' then
+    raise exception 'F1B: close_register_session must resolve ownership from the target register session, in exactly the two approved lookups, and never from the caller''s current pairing';
   end if;
 
   -- That ownership read carries no operational filter: a completed close must
   -- survive revocation and unpair.
-  v_text := substring(v_def from 'select r\.id, r\.opened_at.*?d\.auth_user_id = v_caller;');
+  v_text := substring(v_norm from 'select r\.id, r\.opened_at.*?d\.auth_user_id = v_caller;');
 
   -- NOTE the tokens: the SELECT list legitimately carries opened_by_employee_id
   -- and closed_by_employee_id, so this names tables and operational columns,
@@ -2728,10 +2755,10 @@ begin
 
   -- The stored-state answer precedes every operational requirement and every
   -- lock in the body.
-  if position('''alreadyClosed'', true,' in v_def) > position('revoked_at is null' in v_def)
-     or position('''alreadyClosed'', true,' in v_def) > position('employee_pos_sessions' in v_def)
-     or position('''alreadyClosed'', true,' in v_def) > position('for update' in v_def)
-     or position('''alreadyClosed'', true,' in v_def) > position('for share' in v_def) then
+  if position('''alreadyClosed'', true,' in v_code) > position('revoked_at is null' in v_code)
+     or position('''alreadyClosed'', true,' in v_code) > position('employee_pos_sessions' in v_code)
+     or position('''alreadyClosed'', true,' in v_code) > position('for update' in v_code)
+     or position('''alreadyClosed'', true,' in v_code) > position('for share' in v_code) then
     raise exception 'F1B: close_register_session must answer an already-closed target before any pairing, employee or lock';
   end if;
 
@@ -2741,7 +2768,7 @@ begin
   -- lock and writes nothing.
   -- Parenthesised, so the captured text starts AFTER the gate's own lock
   -- clause: what is checked below is the fallback, not the gate.
-  v_text := substring(v_def from 'd\.unpaired_at is null\s*\n  for update;(.*?''not_paired'')');
+  v_text := substring(v_code from 'd\.unpaired_at is null\s*\n  for update;(.*?''not_paired'')');
 
   if v_text is null
      or position('from public.register_sessions r' in v_text) = 0
@@ -2755,11 +2782,11 @@ begin
 
   -- A first close still needs the target's OWN device to be active, and the
   -- update still touches only the target and only while it is open.
-  if position('where d.id = v_device_id' in v_def) = 0
-     or position('and d.revoked_at is null' in v_def) = 0
-     or position('and d.unpaired_at is null' in v_def) = 0
-     or position('where r.id = v_register.id' in v_def) = 0
-     or position('and r.closed_at is null' in v_def) = 0 then
+  if position('where d.id = v_device_id' in v_code) = 0
+     or position('and d.revoked_at is null' in v_code) = 0
+     or position('and d.unpaired_at is null' in v_code) = 0
+     or position('where r.id = v_register.id' in v_code) = 0
+     or position('and r.closed_at is null' in v_code) = 0 then
     raise exception 'F1B: the first-close path lost the active-pairing rule or its target-only update';
   end if;
 
