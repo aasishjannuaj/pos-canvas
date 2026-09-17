@@ -2915,9 +2915,14 @@ begin
   where n.nspname = 'public' and p.prokind = 'f'
     and p.oid not in (select fn_oid from f1b_proc_baseline);
 
+  -- ORDER BY THE EXPRESSION, NOT THE ALIAS. An output alias is only in scope
+  -- for an ORDER BY item that is a BARE name; `sig collate "C"` is an
+  -- expression, so `sig` is looked up as an input column of unnest(...) s,
+  -- which has none (42703, "column \"sig\" does not exist"). That is how the
+  -- second staging apply of this migration failed.
   if v_names is distinct from array(
        select to_regprocedure(s)::regprocedure::text as sig from unnest(v_public_sigs) s
-       order by sig collate "C") then
+       order by to_regprocedure(s)::regprocedure::text collate "C") then
     raise exception 'F1B: new functions are %, expected exactly the four approved RPCs', v_names;
   end if;
 

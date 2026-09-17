@@ -3538,6 +3538,76 @@ describe("PL/pgSQL: no CASE at the top level of an IF condition", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// SQL hazard: an output alias used inside an ORDER BY EXPRESSION.
+//
+// An alias is in scope for an ORDER BY item only when that item is a BARE name.
+// `order by sig collate "C"` is an expression, so `sig` is resolved against the
+// input columns and the statement fails with 42703. That is how the second
+// staging apply failed, inside B1.
+// ---------------------------------------------------------------------------
+
+/** Every `order by <alias> <more>` where <alias> is an output alias of the same select. */
+function aliasInOrderByExpression(text: string): string[] {
+  const code = maskLiterals(text);
+  const hits: string[] = [];
+
+  for (const m of code.matchAll(/\bas\s+([a-z_][a-z0-9_]*)\b/gi)) {
+    const alias = m[1];
+    // The alias is only a hazard when ORDER BY names it AND keeps going, i.e.
+    // COLLATE, an operator or a cast follows it inside the same statement.
+    const after = code.slice(m.index ?? 0, (m.index ?? 0) + 600);
+    const re = new RegExp(`\\border by\\s+${alias}\\b\\s*(collate|::|[-+*/|])`, "i");
+
+    if (re.test(after)) hits.push(alias);
+  }
+
+  return hits;
+}
+
+describe("SQL: no output alias inside an ORDER BY expression", () => {
+  it("this migration has none", () => {
+    expect(aliasInOrderByExpression(sql)).toEqual([]);
+  });
+
+  it("B1 orders by the underlying expression, not by its alias", () => {
+    expect(sql).toContain(
+      "  if v_names is distinct from array(\n" +
+      "       select to_regprocedure(s)::regprocedure::text as sig from unnest(v_public_sigs) s\n" +
+      "       order by to_regprocedure(s)::regprocedure::text collate \"C\") then"
+    );
+    // Same values, same deterministic C ordering, same comparison.
+    expect(sql).toContain("raise exception 'F1B: new functions are %, expected exactly the four approved RPCs', v_names;");
+  });
+
+  it("NEGATIVE CONTROL: the exact form that failed the staging apply is detected", () => {
+    const broken = sql.replace(
+      "       order by to_regprocedure(s)::regprocedure::text collate \"C\") then",
+      "       order by sig collate \"C\") then"
+    );
+
+    expect(broken).not.toBe(sql);
+    expect(aliasInOrderByExpression(broken)).toEqual(["sig"]);
+  });
+
+  it("NEGATIVE CONTROL: the guard is not vacuous, and a bare alias is not flagged", () => {
+    expect(aliasInOrderByExpression("select a as x from t order by x collate \"C\"")).toEqual(["x"]);
+    expect(aliasInOrderByExpression("select a as x from t order by x::text")).toEqual(["x"]);
+    // A bare output alias IS legal in ORDER BY, so it must not be reported.
+    expect(aliasInOrderByExpression("select a as x from t order by x")).toEqual([]);
+    expect(aliasInOrderByExpression("select a as x from t order by a collate \"C\"")).toEqual([]);
+    // Commented-out or quoted text cannot trip it.
+    expect(aliasInOrderByExpression("-- select a as x from t order by x collate \"C\"")).toEqual([]);
+    expect(aliasInOrderByExpression("select 'as x from t order by x collate' as y from t")).toEqual([]);
+  });
+
+  it("no other migration carries the hazard either", () => {
+    for (const file of orderedFiles) {
+      expect(`${file}: ${aliasInOrderByExpression(read(file)).join(",")}`).toBe(`${file}: `);
+    }
+  });
+});
+
 describe("apply-time verification", () => {
   it("baselines are captured before any DDL", () => {
     const firstDdl = executable.indexOf("create table public.register_sessions");
