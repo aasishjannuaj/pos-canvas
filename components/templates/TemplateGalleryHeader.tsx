@@ -29,8 +29,8 @@ export default function TemplateGalleryHeader() {
       {/* Feature 22 Phase 4 — the one thing a first-time owner does not know:
           choosing a template is not a commitment, it is the start of editing. */}
       <p className="mx-auto max-w-xl text-sm text-neutral-500">
-        Choosing a template opens the editor with starter items, prices and a
-        layout you can change.
+        Choosing a template opens the editor with starter items and prices you
+        can change, laid out the way that template lays them out.
       </p>
     </div>
   );

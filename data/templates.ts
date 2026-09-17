@@ -51,7 +51,11 @@ const SHARED_FEATURES = [
   "Prices and taxes",
   "Inventory tracking",
   "Checkout and completed sales",
-  "Receipt settings and printing",
+  // Lane 3 Task 4.1 — "and printing" was an unqualified claim: the Android app
+  // shows a receipt on screen and cannot print it today. This list is public
+  // copy only (app/templates/[id]/page.tsx renders it through TemplateFeatures);
+  // it is not part of a published configuration and no runtime reads it.
+  "Receipt settings and on-screen receipts",
   "Sales and inventory reports",
 ];
 

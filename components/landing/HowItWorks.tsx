@@ -27,7 +27,7 @@ const DESCRIPTIONS: Record<string, string> = {
   "03": "Change items, categories, prices, taxes, add-ons and your business details until the screen matches the way you work.",
   "04": "Publish when it looks right. Your devices keep running the version you published until you publish another one.",
   "05": "Install POS Canvas on your Android or Windows device, then pair it with your published configuration. That is what turns the same application into your till.",
-  "06": "Take payments in cash or card, hand over a receipt, and look back over what you sold. Selling keeps working if the connection drops.",
+  "06": "Take payments in cash or card, hand over a receipt, and look back over what you sold. A paired till that has already been set up online keeps selling for a limited time if the connection drops.",
 };
 
 export default function HowItWorks() {

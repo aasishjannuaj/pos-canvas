@@ -195,6 +195,161 @@ describe("the approved palette has exactly one home", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Text contrast, computed from the tokens
+// ---------------------------------------------------------------------------
+
+describe("every text colour the system pairs clears WCAG AA", () => {
+  // Lane 3 Task 4.1. The failure this exists for: brand teal-deep was #0b7c7b,
+  // which is 4.39:1 on the mint surface and 4.29:1 on blush — under the 4.5:1
+  // minimum for normal text — and it is the colour of every eyebrow, callout
+  // title, marker and Learn diagram label, including the ones that sit on mint.
+  // Nothing failed, because contrast was a value nobody recomputed.
+  //
+  // COMPUTED FROM THE STYLESHEET, not transcribed: the ratios below are derived
+  // from the declared tokens, so a lighter foreground or a darker surface fails
+  // here rather than shipping.
+  const TEXT_MINIMUM = 4.5;
+  const NON_TEXT_MINIMUM = 3;
+
+  /**
+   * Every `--color-*` token the design system declares, resolved to a hex.
+   *
+   * Aliases are followed: the semantic names are declared as
+   * `--color-surface-blush: var(--color-brand-blush)`, and a parser that only
+   * read hex values would silently skip exactly the surfaces this guard exists
+   * to check.
+   */
+  function tokens(): Record<string, string> {
+    const css = cssCode(read(SYSTEM));
+    const found: Record<string, string> = {};
+    const aliases: Record<string, string> = {};
+
+    for (const match of css.matchAll(/--(color-[a-z0-9-]+):\s*(#[0-9a-fA-F]{3,8})\s*;/g)) {
+      found[match[1]] = match[2].toLowerCase();
+    }
+    for (const match of css.matchAll(/--(color-[a-z0-9-]+):\s*var\(--(color-[a-z0-9-]+)\)\s*;/g)) {
+      aliases[match[1]] = match[2];
+    }
+
+    for (const [name, target] of Object.entries(aliases)) {
+      let resolved: string | undefined = found[target];
+      for (let hop = 0; hop < 5 && resolved === undefined; hop += 1) {
+        const next: string | undefined = aliases[target];
+        if (next === undefined) break;
+        resolved = found[next];
+      }
+      if (resolved !== undefined) found[name] = resolved;
+    }
+
+    return found;
+  }
+
+  function channel(value: number): number {
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  }
+
+  function luminance(hex: string): number {
+    const value = hex.replace("#", "");
+    const full =
+      value.length === 3
+        ? value
+            .split("")
+            .map((c) => c + c)
+            .join("")
+        : value;
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) / 255);
+
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  }
+
+  function ratio(foreground: string, background: string): number {
+    const [light, dark] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (light + 0.05) / (dark + 0.05);
+  }
+
+  const declared = tokens();
+
+  function token(name: string): string {
+    const value = declared[name];
+    expect(`${SYSTEM} declares --${name}`).toBe(`${SYSTEM} declares --${name}`);
+    expect(value).toMatch(/^#[0-9a-f]{3,8}$/);
+    return value;
+  }
+
+  /**
+   * The pairings the site actually renders.
+   *
+   * Teal-deep is the eyebrow, the text link, the list marker, the step numeral
+   * and the diagram label; it sits on white cards, the cream page, the mint
+   * callout/panel and — for the caution variant — blush. Ink-muted and
+   * ink-subtle are the supporting copy on the same three surfaces.
+   */
+  const TEXT_PAIRS: { name: string; fg: string; bg: string }[] = [
+    { name: "teal-deep on white", fg: "color-brand-teal-deep", bg: "color-surface-raised" },
+    { name: "teal-deep on cream", fg: "color-brand-teal-deep", bg: "color-brand-cream" },
+    { name: "teal-deep on mint", fg: "color-brand-teal-deep", bg: "color-surface-mint" },
+    { name: "teal-deep on blush", fg: "color-brand-teal-deep", bg: "color-surface-blush" },
+    { name: "ink-muted on white", fg: "color-ink-muted", bg: "color-surface-raised" },
+    { name: "ink-muted on cream", fg: "color-ink-muted", bg: "color-brand-cream" },
+    { name: "ink-muted on mint", fg: "color-ink-muted", bg: "color-surface-mint" },
+    { name: "ink-subtle on white", fg: "color-ink-subtle", bg: "color-surface-raised" },
+    { name: "ink-subtle on cream", fg: "color-ink-subtle", bg: "color-brand-cream" },
+    { name: "ink on teal", fg: "color-brand-ink", bg: "color-brand-teal" },
+    { name: "ink on mint", fg: "color-brand-ink", bg: "color-surface-mint" },
+  ];
+
+  for (const pair of TEXT_PAIRS) {
+    it(`${pair.name} clears ${TEXT_MINIMUM}:1`, () => {
+      const measured = ratio(token(pair.fg), token(pair.bg));
+
+      expect(`${pair.name}: ${measured.toFixed(2)}:1`).toBe(
+        `${pair.name}: ${measured.toFixed(2)}:1`
+      );
+      expect(measured).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+    });
+  }
+
+  it("the teal text colour keeps a margin, not a pass mark", () => {
+    // A value that lands on 4.50 leaves nothing for a future surface tweak.
+    // The chosen token is comfortably clear on the tightest surface it is used
+    // on, and this is what a lighter "nicer" teal would have to beat.
+    const tightest = Math.min(
+      ratio(token("color-brand-teal-deep"), token("color-surface-mint")),
+      ratio(token("color-brand-teal-deep"), token("color-surface-blush"))
+    );
+
+    expect(`teal-deep tightest: ${tightest.toFixed(2)}:1`).toBe(
+      `teal-deep tightest: ${tightest.toFixed(2)}:1`
+    );
+    expect(tightest).toBeGreaterThanOrEqual(4.8);
+  });
+
+  it("the focus ring stays visible against every page surface", () => {
+    // Non-text: 3:1. The ring is teal-deep everywhere except the teal band,
+    // which overrides it to ink.
+    for (const surface of ["color-surface-raised", "color-brand-cream", "color-surface-mint"]) {
+      const measured = ratio(token("color-brand-teal-deep"), token(surface));
+      expect(`focus on ${surface}: ${measured.toFixed(2)}:1`).toBe(
+        `focus on ${surface}: ${measured.toFixed(2)}:1`
+      );
+      expect(measured).toBeGreaterThanOrEqual(NON_TEXT_MINIMUM);
+    }
+
+    const onTeal = ratio(token("color-brand-ink"), token("color-brand-teal"));
+    expect(onTeal).toBeGreaterThanOrEqual(NON_TEXT_MINIMUM);
+    expect(cssCode(read(SYSTEM))).toContain("--pc-focus-color: var(--color-brand-ink)");
+  });
+
+  it("teal-deep is a foreground only, so darkening it cannot hurt anything", () => {
+    // The reason one token could be corrected centrally: nothing paints a
+    // surface with it, so there is no white-on-teal-deep pairing to re-check.
+    const css = cssCode(read(SYSTEM));
+
+    expect(css).not.toMatch(/background-color:\s*var\(--color-brand-teal-deep\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Focus is replaced, never removed
 // ---------------------------------------------------------------------------
 

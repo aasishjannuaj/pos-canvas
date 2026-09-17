@@ -26,7 +26,8 @@ export default function TemplateActionPanel({
       </Link>
 
       <p className="text-xs leading-relaxed text-neutral-500">
-        You can customize items, pricing, and layout after you start building.
+        You can customize items, pricing and branding after you start building.
+        The layout comes with this template.
       </p>
     </div>
   );

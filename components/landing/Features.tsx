@@ -38,7 +38,7 @@ const features = [
     icon: "🧮",
     title: "Taxes and receipts",
     description:
-      "Set your tax rate and whether prices include it, then decide what your receipt says. Print it or hand it over on screen.",
+      "Set your tax rate and whether prices include it, then decide what your receipt says. Every till can show it on screen, and a Windows till or the browser can print it.",
   },
   {
     icon: "🎨",
@@ -60,9 +60,9 @@ const features = [
   },
   {
     icon: "🛰️",
-    title: "Selling when the network drops",
+    title: "If the connection drops at the till",
     description:
-      "Keep taking sales while the connection is out. They queue on the device and sync once it returns, and your sales history holds the record.",
+      "A paired Android or Windows till that has already been set up online can keep taking sales for a limited time. They queue on the device and sync once the connection returns.",
   },
 ];
 

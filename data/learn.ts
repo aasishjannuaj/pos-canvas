@@ -91,7 +91,7 @@ const ONE_APP: LearnArticle = {
     },
     {
       kind: "paragraph",
-      text: "A template is a starting point, not a separate product. The restaurant template and the liquor-store template run the identical point of sale; what differs is the catalogue that is already filled in and the layout the screen starts with. Choosing the closest one saves you typing, and everything in it is yours to change afterwards.",
+      text: "A template is a starting point, not a separate product. The restaurant template and the liquor-store template run the identical point of sale; what differs is the catalogue that is already filled in and the layout the screen uses. Choosing the closest one saves you typing, and its products, prices and branding are yours to change afterwards.",
     },
     {
       kind: "callout",
@@ -107,7 +107,7 @@ const ONE_APP: LearnArticle = {
     },
     {
       kind: "paragraph",
-      text: "A paired device holds the configuration it is running. If the connection goes out mid-service, the till keeps taking sales and queues them on the device; they sync when the connection returns, and your sales history holds the record either way. This is a property of pairing rather than a separate offline product: the device already has what it needs to sell.",
+      text: "A paired Android or Windows till holds the configuration it is running, so once it has been set up online it already has what it needs to sell. If the connection goes out mid-service, it keeps taking sales for up to seven days and queues them on the device; they sync when the connection returns, and your sales history holds the record either way. After that, or if the till is unpaired or its saved setup cannot be trusted, it asks for a connection before it sells again. The POS you open in a browser is not part of this — it needs a connection. This is a property of pairing rather than a separate offline product.",
     },
     {
       kind: "heading",

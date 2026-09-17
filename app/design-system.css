@@ -51,10 +51,20 @@
   /* The approved primary is too light to serve as a pressed state or as a
      focus ring on cream. These are the same hue darkened until they clear the
      thresholds: -pressed reaches 5.64:1 against ink (the primary button's own
-     label), -deep reaches 4.74:1 against cream, which covers both the 3:1 a
-     focus indicator needs and the 4.5:1 small teal text needs. */
+     label), and -deep clears the 3:1 a focus indicator needs and the 4.5:1
+     small teal text needs on every surface it appears on — see the note on
+     -deep below for the measured figures. */
   --color-brand-teal-pressed: #0e9594;
-  --color-brand-teal-deep: #0b7c7b;
+  /* Lane 3 Task 4.1 — darkened from #0b7c7b. That value carried teal text at
+     4.39:1 on the mint surface and 4.29:1 on blush, both under the 4.5:1
+     minimum for normal text, which is where the eyebrows, the callout titles
+     and the Learn diagram labels sit. This one token is the only change: every
+     teal-deep consumer gains contrast and none loses any, because teal-deep is
+     only ever a foreground (text, marker, rule, focus ring) and never a
+     background. Measured after: 5.98:1 on white, 5.64:1 on cream, 5.22:1 on
+     mint, 5.11:1 on blush. lib/websiteDesignSystem.guards.test.ts computes
+     these from the tokens, so a lighter value fails rather than ships. */
+  --color-brand-teal-deep: #0a6f6e;
 
   /* Lane 3 Task 2 — the same treatment for coral, and for the same reason.
      The approved coral is a FILL colour: #FF7F68 carries only 2.47:1 against
@@ -359,7 +369,7 @@
 
   .pc-eyebrow {
     display: inline-block;
-    color: var(--color-brand-teal-deep); /* 4.74:1 on cream */
+    color: var(--color-brand-teal-deep); /* 5.64:1 on cream, 5.22:1 on mint */
     font-size: var(--text-pc-eyebrow);
     line-height: var(--text-pc-eyebrow--line-height);
     letter-spacing: var(--text-pc-eyebrow--letter-spacing);

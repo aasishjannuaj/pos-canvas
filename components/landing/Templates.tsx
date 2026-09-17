@@ -38,7 +38,7 @@ export default function Templates() {
         <SectionHeading
           eyebrow="Templates"
           title="Start from something that already looks like your business"
-          subtitle="Every template is the same point of sale with different products, categories and layout already set up. Pick the closest one and change whatever you like."
+          subtitle="Every template is the same point of sale with different products, categories and layout already set up. Pick the closest one and change its products, prices and branding."
         />
 
         <div className="mt-12 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">

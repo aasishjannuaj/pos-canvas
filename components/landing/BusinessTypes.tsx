@@ -34,7 +34,7 @@ export default function BusinessTypes() {
         <SectionHeading
           eyebrow="One platform"
           title="One point of sale, set up differently for every business"
-          subtitle="POS Canvas is a single product. A template decides what your screen starts with — the products, the categories, the layout — and everything after that is yours to change. Checkout, receipts and reporting work the same way whichever one you start from."
+          subtitle="POS Canvas is a single product. A template sets the layout your screen uses. It also fills in a starting catalogue — the products and the categories — and that part is yours to change. Checkout, receipts and reporting work the same way whichever one you start from."
         />
 
         <ul className="mx-auto mt-10 flex max-w-3xl flex-wrap items-center justify-center gap-2.5">

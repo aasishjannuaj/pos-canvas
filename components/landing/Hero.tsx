@@ -50,7 +50,7 @@ export default function Hero() {
 
           <p className="max-w-pc-prose text-pc-lead text-pretty text-ink-muted">
             Start from a template built for your kind of business, customize the
-            items, pricing and layout, then publish it and pair the POS Canvas
+            items, pricing and branding, then publish it and pair the POS Canvas
             app on your device. No code anywhere.
           </p>
 
