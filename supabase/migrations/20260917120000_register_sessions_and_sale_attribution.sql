@@ -2598,8 +2598,14 @@ begin
       raise exception 'F1B: % must lock search_path to exactly public, pg_temp', v_sig;
     end if;
 
+    -- THE PARENTHESES AROUND THE CASE ARE LOAD-BEARING. PL/pgSQL reads an IF
+    -- condition up to the first THEN at paren depth 0, so an unparenthesised
+    -- CASE ends the condition at its OWN then and the statement is cut mid
+    -- expression -- 42601, "syntax error at end of input", which is exactly how
+    -- the first staging apply of this migration failed. Inside parentheses that
+    -- then sits at depth 1, and the condition ends at the right one.
     if (select p.provolatile::text from pg_proc p where p.oid = v_oid)
-       is distinct from case when v_sig = 'public.get_current_register_session()' then 's' else 'v' end then
+       is distinct from (case when v_sig = 'public.get_current_register_session()' then 's' else 'v' end) then
       raise exception 'F1B: % has the wrong volatility', v_sig;
     end if;
 

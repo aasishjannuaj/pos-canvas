@@ -3384,6 +3384,160 @@ describe("A8b evaluates executable SQL, never comments", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// PL/pgSQL parser hazard: CASE inside an IF condition.
+//
+// PL/pgSQL reads an IF/ELSIF condition up to the first THEN at paren depth 0.
+// An unparenthesised CASE therefore ends the condition at its OWN then, and the
+// statement is cut mid-expression — 42601, "syntax error at end of input". That
+// is exactly how this migration's first staging apply failed, and libpg-query
+// cannot see it: a dollar-quoted body is one opaque string to it.
+// ---------------------------------------------------------------------------
+
+/** Blank out comments and literals, keeping offsets, so tokens are executable. */
+function maskLiterals(text: string): string {
+  const out = text.split("");
+  let i = 0;
+
+  while (i < text.length) {
+    if (text[i] === "-" && text[i + 1] === "-") {
+      while (i < text.length && text[i] !== "\n") { out[i] = " "; i += 1; }
+      continue;
+    }
+
+    if (text[i] === "'") {
+      out[i] = " ";
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === "'" && text[i + 1] === "'") { out[i] = " "; out[i + 1] = " "; i += 2; continue; }
+        if (text[i] === "'") { out[i] = " "; i += 1; break; }
+        out[i] = " ";
+        i += 1;
+      }
+      continue;
+    }
+
+    i += 1;
+  }
+
+  return out.join("");
+}
+
+/** Lines holding an IF/ELSIF whose condition has a CASE at paren depth 0. */
+function caseInsideIfCondition(body: string): number[] {
+  const masked = maskLiterals(body);
+  const hits: number[] = [];
+
+  for (const m of masked.matchAll(/(^|\s)(if|elsif)\s/gi)) {
+    let depth = 0;
+    let caseAt: number | null = null;
+    let i = (m.index ?? 0) + m[0].length;
+
+    while (i < masked.length) {
+      const c = masked[i];
+
+      if (c === "(") depth += 1;
+      else if (c === ")") depth -= 1;
+      else if (c === ";") break;
+      else if (/[a-z_]/i.test(c)) {
+        const word = /^[a-z_]+/i.exec(masked.slice(i))![0].toLowerCase();
+
+        if (word === "then") {
+          if (caseAt !== null) hits.push(body.slice(0, m.index ?? 0).split("\n").length);
+          break;
+        }
+
+        if (word === "case" && depth === 0 && caseAt === null) caseAt = i;
+        i += word.length;
+        continue;
+      }
+
+      i += 1;
+    }
+  }
+
+  return hits;
+}
+
+/** Every dollar-quoted PL/pgSQL body in a migration. */
+function plpgsqlBodies(text: string): string[] {
+  const bodies: string[] = [];
+  const marks = [...text.matchAll(/\$(do|function)\$/g)];
+
+  for (let i = 0; i < marks.length; i += 2) {
+    const open = marks[i];
+    const close = marks[i + 1];
+    if (!close) throw new Error("unpaired dollar quote");
+    bodies.push(text.slice((open.index ?? 0) + open[0].length, close.index));
+  }
+
+  return bodies;
+}
+
+describe("PL/pgSQL: no CASE at the top level of an IF condition", () => {
+  it("this migration has none", () => {
+    for (const body of plpgsqlBodies(sql)) {
+      expect(caseInsideIfCondition(body)).toEqual([]);
+    }
+  });
+
+  it("the A7 volatility assertion keeps its CASE parenthesised", () => {
+    expect(sql).toContain(
+      "    if (select p.provolatile::text from pg_proc p where p.oid = v_oid)\n" +
+      "       is distinct from (case when v_sig = 'public.get_current_register_session()' then 's' else 'v' end) then"
+    );
+  });
+
+  it("NEGATIVE CONTROL: the unparenthesised form that failed the staging apply is detected", () => {
+    const unsafe = sql.replace(
+      "       is distinct from (case when v_sig = 'public.get_current_register_session()' then 's' else 'v' end) then",
+      "       is distinct from case when v_sig = 'public.get_current_register_session()' then 's' else 'v' end then"
+    );
+
+    expect(unsafe).not.toBe(sql);
+
+    const hits = plpgsqlBodies(unsafe).flatMap(caseInsideIfCondition);
+
+    expect(hits).toHaveLength(1);
+  });
+
+  it("NEGATIVE CONTROL: the guard is not vacuous — it finds a planted hazard, and comments cannot trip it", () => {
+    const planted = "begin\n  if v_x is distinct from case when v_y then 'a' else 'b' end then\n    return;\n  end if;\n";
+    const commented = "begin\n  -- if v_x is distinct from case when v_y then 'a' else 'b' end then\n  if v_x then\n    return;\n  end if;\n";
+    const parenthesised = "begin\n  if v_x is distinct from (case when v_y then 'a' else 'b' end) then\n    return;\n  end if;\n";
+    const quoted = "begin\n  if v_x = 'case when v_y then a end then' then\n    return;\n  end if;\n";
+
+    expect(caseInsideIfCondition(planted)).toHaveLength(1);
+    expect(caseInsideIfCondition(commented)).toEqual([]);
+    expect(caseInsideIfCondition(parenthesised)).toEqual([]);
+    expect(caseInsideIfCondition(quoted)).toEqual([]);
+  });
+
+  it("no other migration carries the hazard either", () => {
+    for (const file of orderedFiles) {
+      const hits = plpgsqlBodies(read(file)).flatMap(caseInsideIfCondition);
+      expect(`${file}: ${hits.join(",")}`).toBe(`${file}: `);
+    }
+  });
+
+  it("every dollar-quoted body in this migration is paired, and its blocks balance", () => {
+    const bodies = plpgsqlBodies(sql);
+
+    expect(bodies).toHaveLength(5);
+
+    for (const body of bodies) {
+      const masked = maskLiterals(body);
+      const count = (re: RegExp) => (masked.match(re) ?? []).length;
+
+      // Every `end` belongs to an if, a loop, a case expression or a block.
+      expect(count(/\bend\b/gi)).toBe(
+        count(/\bend if\b/gi) + count(/\bend loop\b/gi) + count(/\bcase\b/gi) + count(/\bbegin\b/gi)
+      );
+      expect(count(/(^|\s)loop\b/gi)).toBe(count(/\bend loop\b/gi) * 2);
+    }
+  });
+});
+
 describe("apply-time verification", () => {
   it("baselines are captured before any DDL", () => {
     const firstDdl = executable.indexOf("create table public.register_sessions");
