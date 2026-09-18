@@ -24,7 +24,7 @@
 // Guaranteeing it always runs needs a CI test job with a PostgreSQL service,
 // which is infrastructure to be authorized separately.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,13 @@ const MIGRATION = "20260919120000_employee_code_and_four_digit_pin.sql";
  * is developed on; none of them is treated as authoritative, and a miss is not
  * an error.
  */
+/** Every binary this harness actually invokes. A partial install is not usable. */
+export const REQUIRED_BINARIES = ["initdb", "pg_ctl", "psql"] as const;
+
+export function isCompletePostgresBin(dir: string): boolean {
+  return REQUIRED_BINARIES.every((tool) => existsSync(join(dir, tool)));
+}
+
 function findPostgresBin(): string | null {
   const candidates: string[] = [];
 
@@ -64,11 +71,10 @@ function findPostgresBin(): string | null {
     "/usr/lib/postgresql/16/bin"
   );
 
-  return (
-    candidates.find(
-      (dir) => existsSync(join(dir, "initdb")) && existsSync(join(dir, "psql"))
-    ) ?? null
-  );
+  // ALL THREE, not just initdb and psql: the cluster is started and stopped
+  // with pg_ctl, so a directory missing it would be accepted here and then fail
+  // in beforeAll with something far less obvious than "no PostgreSQL found".
+  return candidates.find(isCompletePostgresBin) ?? null;
 }
 
 const PG_BIN = findPostgresBin();
@@ -169,11 +175,39 @@ function sqlExpectingFailure(db: string, statement: string): string {
 }
 
 /**
- * A database with every accepted migration applied and NOT the new one.
+ * The ONLY predecessors this harness is allowed to skip, named exactly.
  *
- * Two migrations are skipped by the loop: they configure Supabase Storage
- * buckets, which a vanilla cluster has no schema for. Neither touches
- * employees, so their absence cannot affect anything asserted here.
+ * Both create Supabase Storage buckets and policies on `storage.objects`, a
+ * schema the Supabase platform provides and a vanilla cluster does not have.
+ * Neither touches employees, projects, devices, registers or orders, so their
+ * absence cannot affect anything asserted in this file.
+ *
+ * EXACT FILENAMES, NOT A SUBSTRING MATCH. "contains the word storage" would
+ * also match 20260803240000_order_counter_and_idempotency_scaffold.sql, which
+ * applies perfectly well and whose failure must never be ignored.
+ */
+export const STORAGE_ONLY_MIGRATIONS = new Set([
+  "20260729190422_build_artifact_storage.sql",
+  "20260813120000_project_logo_storage.sql",
+]);
+
+/**
+ * Applies one .sql file. THROWS on any failure, deliberately.
+ *
+ * There is no catch here and no catch at the call site. A predecessor that
+ * fails leaves an incomplete schema, and every behavioural assertion below
+ * would then be measuring the wrong database while reporting success -- which
+ * is worse than no coverage, because it looks like coverage.
+ */
+function runSqlFile(db: string, file: string): void {
+  pg("psql", [
+    "-h", "127.0.0.1", "-p", String(PORT), "-U", "postgres", "-d", db,
+    "-v", "ON_ERROR_STOP=1", "-q", "-f", file,
+  ]);
+}
+
+/**
+ * A database with every accepted migration applied and NOT the new one.
  */
 function freshDatabase(name: string, withMigration: boolean): void {
   sql("postgres", `drop database if exists ${name}`);
@@ -188,18 +222,14 @@ function freshDatabase(name: string, withMigration: boolean): void {
   for (const file of files) {
     if (file === MIGRATION && !withMigration) continue;
 
-    try {
-      pg("psql", [
-        "-h", "127.0.0.1", "-p", String(PORT), "-U", "postgres", "-d", name,
-        "-v", "ON_ERROR_STOP=1", "-q", "-f", join(migrationsDir, file),
-      ]);
-      sql(name,
-        `insert into supabase_migrations.schema_migrations(version, name)
-         values ('${file.split("_")[0]}', '${file}') on conflict do nothing`);
-    } catch (error) {
-      if (file === MIGRATION) throw error;
-      // Storage-bucket migrations only; see above.
-    }
+    // Skipped BEFORE it is attempted, by exact name. Anything else that fails
+    // propagates and fails the suite.
+    if (STORAGE_ONLY_MIGRATIONS.has(file)) continue;
+
+    runSqlFile(name, join(migrationsDir, file));
+    sql(name,
+      `insert into supabase_migrations.schema_migrations(version, name)
+       values ('${file.split("_")[0]}', '${file}') on conflict do nothing`);
   }
 }
 
@@ -273,6 +303,76 @@ afterAll(() => {
 
   rmSync(dataDir, { recursive: true, force: true });
 }, 60_000);
+
+// ===========================================================================
+// The harness itself
+// ===========================================================================
+
+describe("the harness cannot quietly test an incomplete schema", () => {
+  it("skips exactly two predecessors, both Storage-only, named in full", () => {
+    expect([...STORAGE_ONLY_MIGRATIONS].sort()).toEqual([
+      "20260729190422_build_artifact_storage.sql",
+      "20260813120000_project_logo_storage.sql",
+    ]);
+  });
+
+  it("both named files exist, so the allowlist cannot rot into a no-op", () => {
+    for (const file of STORAGE_ONLY_MIGRATIONS) {
+      expect(existsSync(join(migrationsDir, file))).toBe(true);
+    }
+  });
+
+  it("no migration carrying product behaviour is on the list", () => {
+    // Including the one a substring match on "storage" would have caught by
+    // mistake: it applies fine, and ignoring its failure would be a hole.
+    for (const file of [
+      "20260803240000_order_counter_and_idempotency_scaffold.sql",
+      "20260914120000_employee_identity_and_pos_sessions.sql",
+      "20260916120000_employee_selector_single_hash_login.sql",
+      "20260916130000_remove_active_employee_engineering_ceiling.sql",
+      "20260917120000_register_sessions_and_sale_attribution.sql",
+      MIGRATION,
+    ]) {
+      expect(`${file} skipped: ${STORAGE_ONLY_MIGRATIONS.has(file)}`).toBe(`${file} skipped: false`);
+    }
+  });
+
+  it("the loop has no catch, so nothing else can be swallowed", () => {
+    // Read from this file's own source: a future edit that reintroduces a
+    // try/catch around the predecessor loop fails here.
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf-8");
+    const loop = source.slice(
+      source.indexOf("function freshDatabase("),
+      source.indexOf("/** Applies ONLY the new migration")
+    );
+
+    expect(loop).not.toContain("catch");
+    expect(loop).toContain("STORAGE_ONLY_MIGRATIONS.has(file)");
+  });
+
+  it("a failing predecessor really does throw", () => {
+    if (PG_BIN === null) return;
+
+    // The proof, executed: a deliberately broken .sql run through the same
+    // helper the loop uses must raise, not return.
+    const broken = join(tmpdir(), `f1brt-broken-${process.pid}.sql`);
+
+    writeFileSync(broken, "select * from a_table_that_does_not_exist;\n");
+
+    try {
+      sql("postgres", "select 1");
+      expect(() => runSqlFile("postgres", broken)).toThrow();
+    } finally {
+      rmSync(broken, { force: true });
+    }
+  });
+
+  it("a complete PostgreSQL install needs all three binaries", () => {
+    expect([...REQUIRED_BINARIES]).toEqual(["initdb", "pg_ctl", "psql"]);
+    // A directory with none of them is never accepted.
+    expect(isCompletePostgresBin(tmpdir())).toBe(false);
+  });
+});
 
 // ===========================================================================
 // 1-6. The backfill, and the namespace it has to fit inside
