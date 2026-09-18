@@ -330,9 +330,13 @@ describe("the roster is requested, not assumed", () => {
     expect(guarded.length).toBeLessThan(200);
   });
 
-  it("the selector receives the lifecycle, not a bare array", () => {
+  it("the roster component still takes the lifecycle, not a bare array", () => {
+    // UPDATED BY v1.3 checkpoint 2. DeviceApp no longer renders the selector as
+    // the primary flow, so it no longer passes `roster={roster}`. The component
+    // and its RosterState contract are KEPT for the secondary/admin path, which
+    // is what this asserts.
     expect(gates).toContain("roster: RosterState");
-    expect(app).toContain("roster={roster}");
+    expect(gates).toContain("export function EmployeeSelector");
   });
 });
 

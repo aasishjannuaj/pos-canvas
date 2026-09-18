@@ -195,6 +195,41 @@ export async function employeeLogin(
   }
 }
 
+/**
+ * THE PRIMARY CASHIER LOGIN: an Employee ID and a PIN, both typed.
+ *
+ * WHAT IS DELIBERATELY NOT SENT. No project id, no employee UUID, no device id.
+ * The client is not the authority on any of them: the server reads auth.uid(),
+ * finds this device's pairing row, takes the project from it, and only then
+ * looks the code up INSIDE that project. `001` at one business and `001` at
+ * another are different people, and nothing the till says can cross that line.
+ *
+ * ONE FAILURE SURFACE. An unknown Employee ID and a wrong PIN both come back as
+ * `invalid_credentials`, by construction on the server — a three-digit code is
+ * 999 guesses, and an answer that distinguished them would turn "which IDs
+ * exist here" into a list. The wrapper does not try to be more helpful than
+ * that, because being more helpful is the bug.
+ */
+export async function employeeLoginByCode(
+  employeeCode: string,
+  pin: string
+): Promise<EmployeeLoginResult> {
+  try {
+    const { data, error, status } = await getDeviceSupabaseClient().rpc("employee_login_by_code", {
+      p_employee_code: employeeCode,
+      p_pin: pin,
+    });
+
+    if (error) {
+      return failure(unreachedFailure(withStatus(error, status)));
+    }
+
+    return parseEmployeeLoginResult(data);
+  } catch (thrown) {
+    return failure(unreachedFailure(thrown));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // get_current_employee_session
 // ---------------------------------------------------------------------------

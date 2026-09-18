@@ -67,7 +67,25 @@ export const EMPLOYEE_PIN_MAX_LENGTH = 6;
  * over ASCII, so accepting "١٢٣٤" here would only produce a puzzling round trip.
  */
 export function isValidEmployeePinShape(pin: unknown): pin is string {
-  return typeof pin === "string" && /^[0-9]{4,6}$/.test(pin);
+  // v1.3 checkpoint 1 tightened this to EXACTLY four digits, on the server and
+  // here. A range meant two tills in the same shop drawing a different number
+  // of boxes; 20260919120000 removed it everywhere with no legacy branch.
+  return typeof pin === "string" && /^[0-9]{4}$/.test(pin);
+}
+
+/**
+ * The Employee ID a cashier types: exactly three digits, `001`-`999`.
+ *
+ * `000` is refused because it reads as "no employee" on a keypad and is the
+ * single most likely accidental entry. The server refuses it too — this only
+ * lets the till say so before spending a round trip.
+ *
+ * SHAPE ONLY. It says nothing about whether the ID exists, and it must not:
+ * that answer is the server's, and it is deliberately indistinguishable from a
+ * wrong PIN.
+ */
+export function isValidEmployeeCodeShape(code: unknown): code is string {
+  return typeof code === "string" && /^[0-9]{3}$/.test(code) && code !== "000";
 }
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import type { EmployeeSession } from "@/lib/employeeSession";
 import type { LoginEmployee } from "@/lib/employeeSession";
 import type { RosterState } from "@/lib/employeeRoster";
 import { isRosterConfirmedEmpty, rosterEmployees } from "@/lib/employeeRoster";
-import { isValidEmployeePinShape } from "@/lib/employeeSession";
+import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employeeSession";
 import type { RegisterSession } from "@/lib/registerSession";
 import { getOpeningCashMessage, validateOpeningCash } from "@/lib/registerSession";
 
@@ -27,6 +27,113 @@ const PRIMARY =
   "w-full rounded-xl bg-neutral-900 px-4 py-3 text-base font-medium text-white " +
   "disabled:cursor-not-allowed disabled:bg-neutral-300";
 const SECONDARY = "w-full rounded-xl border border-neutral-300 px-4 py-3 text-base text-neutral-700";
+
+/**
+ * THE PRIMARY CASHIER LOGIN: unlock the till by typing who you are.
+ *
+ * It should feel like unlocking a till, not like browsing a staff directory.
+ * One compact card over a dimmed POS, two numeric fields, one button — because
+ * the cashier doing this has a queue in front of them and does it forty times a
+ * day.
+ *
+ * WHY THIS REPLACED THE ROSTER AS THE NORMAL PATH. A list of everyone who works
+ * here, shown on an unattended screen, is a staff directory anyone can read;
+ * and picking a name is not a credential. Typing an Employee ID is.
+ *
+ * SHAPE CHECKS ONLY GREY OUT THE BUTTON. Every SUBMITTED attempt goes to the
+ * server verbatim, because the per-device throttle is what makes a four-digit
+ * PIN survivable and it can only count attempts it actually sees. The
+ * length rules here just save a round trip on a half-typed entry.
+ *
+ * NOTHING HERE KNOWS WHETHER AN ID EXISTS. The server answers unknown-ID and
+ * wrong-PIN identically, and this card shows whatever it says without trying to
+ * be more specific.
+ */
+export function EmployeeLockCard({
+  busy,
+  error,
+  recovery,
+  onSubmit,
+}: {
+  busy: boolean;
+  error: string | null;
+  /** Set when a refused sale sent the operator back here. */
+  recovery: boolean;
+  onSubmit: (employeeCode: string, pin: string) => void;
+}) {
+  const [employeeCode, setEmployeeCode] = useState("");
+  const [pin, setPin] = useState("");
+
+  const ready = isValidEmployeeCodeShape(employeeCode) && isValidEmployeePinShape(pin);
+
+  return (
+    <div className={SCREEN}>
+      <form
+        className={PANEL}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!busy && ready) onSubmit(employeeCode, pin);
+        }}
+      >
+        <h1 className="text-lg font-semibold text-neutral-900">Employee Login</h1>
+
+        {/* The sale was refused because the signed-in employee is not who this
+            till thought. Somebody signs in again, deliberately: the till will
+            not adopt whoever the server happens to report. */}
+        {recovery && (
+          <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+            The signed-in employee changed. Sign in again to keep taking sales.
+          </p>
+        )}
+
+        <label className="text-sm text-neutral-600" htmlFor="employee-code">
+          Employee ID
+        </label>
+        <input
+          id="employee-code"
+          className="w-full rounded-xl border border-neutral-300 px-4 py-3 text-center text-2xl tracking-[0.4em]"
+          type="text"
+          // inputMode + pattern together are what raise a NUMERIC keypad on
+          // Android rather than a full keyboard. type="number" would do it too
+          // and would also bring spinners, allow `-` and `e`, and strip a
+          // leading zero — which is the whole contract here.
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={3}
+          autoFocus
+          placeholder="000"
+          value={employeeCode}
+          disabled={busy}
+          onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        <label className="text-sm text-neutral-600" htmlFor="employee-pin">
+          PIN
+        </label>
+        <input
+          id="employee-pin"
+          className="w-full rounded-xl border border-neutral-300 px-4 py-3 text-center text-2xl tracking-[0.5em]"
+          type="password"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={4}
+          placeholder="••••"
+          value={pin}
+          disabled={busy}
+          onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        {error !== null && <p className="text-sm text-red-600">{error}</p>}
+
+        <button type="submit" className={PRIMARY} disabled={busy || !ready}>
+          {busy ? "Signing in…" : "Sign In"}
+        </button>
+      </form>
+    </div>
+  );
+}
 
 /**
  * The roster, as the server offers it. Names and ids only — never PIN material.

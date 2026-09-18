@@ -53,14 +53,18 @@ describe("roles are a closed set", () => {
 // ---------------------------------------------------------------------------
 
 describe("PIN shape", () => {
-  it("accepts 4, 5 and 6 ASCII digits", () => {
-    for (const pin of ["0000", "1234", "12345", "123456", "999999"]) {
+  it("accepts exactly 4 ASCII digits", () => {
+    // TIGHTENED BY v1.3 checkpoint 1 (migration 20260919120000): the PIN is
+    // exactly four digits on every credential path, server and client, with no
+    // legacy 4-6 branch. A range meant two tills in the same shop drawing a
+    // different number of boxes.
+    for (const pin of ["0000", "1234", "9999"]) {
       expect(isValidEmployeePinShape(pin)).toBe(true);
     }
   });
 
   it("rejects anything shorter or longer", () => {
-    for (const pin of ["", "1", "123", "1234567"]) {
+    for (const pin of ["", "1", "123", "12345", "123456", "1234567"]) {
       expect(isValidEmployeePinShape(pin)).toBe(false);
     }
   });

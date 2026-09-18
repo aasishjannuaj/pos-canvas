@@ -266,6 +266,79 @@ export function applyServerDerivation(input: {
 }
 
 /**
+ * Startup and reload: the till comes up LOCKED, whoever the server reports.
+ *
+ * THIS IS THE CHECKPOINT-2 RULE, AND IT IS THE POINT OF THE WHOLE FEATURE.
+ * get_current_employee_session answering "Ada is signed in" is an observation
+ * about the server, not a statement that Ada is standing at this till. A
+ * session outlives a reload, an app switch, a battery swap and a shift change;
+ * unlocking on it would mean the till reopens under whoever was last
+ * authenticated, for anyone who picks it up.
+ *
+ * So nothing observed populates `employee`. A person types an Employee ID and
+ * a PIN, or the POS stays locked.
+ *
+ * The register is not derived here either: it is derived after login, which is
+ * also when it can be reused or found missing.
+ */
+export function applyStartupLock(): PosGateState {
+  return EMPTY_POS_GATE_STATE;
+}
+
+/**
+ * The operator authenticated HERE, in this app run, with ID and PIN.
+ *
+ * The one way `employee` is ever populated. `register` is whatever the server
+ * reports at that moment: an open one is REUSED as-is, and null sends the
+ * operator to the register gate. Employee sessions and drawer periods are
+ * independent lifecycles, so signing in never rotates a register.
+ */
+export function applyEmployeeAuthenticated(input: {
+  employee: EmployeeSession;
+  register: RegisterSession | null;
+}): PosGateState {
+  return {
+    employee: input.employee,
+    register: input.register,
+    establishedOnline: input.register !== null,
+    recovery: null,
+  };
+}
+
+/**
+ * A reconnect, for a till whose operator already authenticated here.
+ *
+ * It must not log them out — a flapping connection is not a shift change — and
+ * it must not unlock a till nobody signed into. So: locked stays locked, and an
+ * authenticated operator is kept ONLY while the server still reports the very
+ * same POS session. Anything else locks the till, because the person the
+ * cashier believes is signed in is no longer the person the server would
+ * attribute a sale to.
+ */
+export function applyReconnectDerivation(
+  state: PosGateState,
+  observed: { employee: EmployeeSession | null; register: RegisterSession | null }
+): PosGateState {
+  if (state.employee === null) {
+    return applyStartupLock();
+  }
+
+  if (
+    observed.employee === null ||
+    observed.employee.employeeSessionId !== state.employee.employeeSessionId
+  ) {
+    return applyStartupLock();
+  }
+
+  return {
+    employee: state.employee,
+    register: observed.register,
+    establishedOnline: observed.register !== null,
+    recovery: state.recovery,
+  };
+}
+
+/**
  * The re-read that follows a stale-expectation refusal. AUTHORITATIVE
  * OBSERVATION, NOT ESTABLISHED AUTHORITY.
  *

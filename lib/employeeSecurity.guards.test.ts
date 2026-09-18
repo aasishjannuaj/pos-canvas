@@ -179,11 +179,15 @@ describe("the device RPC surface is exactly four calls", () => {
   const source = code(read(RPC_FILE));
   const called = [...source.matchAll(/\.rpc\(\s*"([^"]+)"/g)].map((m) => m[1]);
 
-  it("calls only the four employee session RPCs", () => {
+  it("calls only the employee session RPCs", () => {
+    // UPDATED BY v1.3 checkpoint 2: employee_login_by_code is the primary
+    // cashier login. employee_login and list_login_employees are kept as the
+    // secondary/admin path and are still allowed here.
     expect(new Set(called)).toEqual(
       new Set([
         "list_login_employees",
         "employee_login",
+        "employee_login_by_code",
         "get_current_employee_session",
         "employee_logout",
       ])

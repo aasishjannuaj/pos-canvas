@@ -27,8 +27,7 @@ import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import DeviceSyncStatus from "@/components/device/DeviceSyncStatus";
 import {
-  EmployeePinEntry,
-  EmployeeSelector,
+  EmployeeLockCard,
   RegisterOpenPanel,
   RegisterStatus,
 } from "@/components/device/PosGates";
@@ -125,7 +124,7 @@ import {
 } from "@/lib/uncertainSaleSession";
 import type { UncertainSale } from "@/lib/saleSubmission";
 import {
-  employeeLogin,
+  employeeLoginByCode,
   employeeLogout,
   fetchCurrentEmployeeSession,
   fetchLoginEmployees,
@@ -157,9 +156,10 @@ import {
 import {
   EMPTY_POS_GATE_STATE,
   applyExplicitRegisterEstablished,
+  applyEmployeeAuthenticated,
+  applyReconnectDerivation,
   applyRecoveryObservation,
   applySaleAttributionFailure,
-  applyServerDerivation,
   buildOfflineClaims,
   canCheckoutOffline,
   describePosGateBlock,
@@ -192,8 +192,19 @@ const EMPTY_SALE_STATUS: OfflineSaleStatus = {
   uncertainOnlineSale: false,
 };
 
-/** Which kind of server read a gate derivation is. See deriveGateState. */
-type GateDerivationMode = "establish" | "observe";
+/**
+ * Which kind of server read a gate derivation is.
+ *
+ * "reconnect" re-verifies a till whose operator ALREADY authenticated here: it
+ * keeps them only while the server still reports the same POS session, and
+ * locks otherwise. It cannot unlock a locked till.
+ *
+ * "observe" follows a stale-expectation refusal and adopts nothing at all.
+ *
+ * Note what is absent: there is no mode that turns a server observation into an
+ * unlocked POS. Only an Employee ID and a PIN do that.
+ */
+type GateDerivationMode = "reconnect" | "observe";
 
 export default function DeviceApp() {
   const [state, setState] = useState<DeviceState>({ status: "checking" });
@@ -422,18 +433,15 @@ export default function DeviceApp() {
    * same questions and adopts NOTHING — see applyRecoveryObservation.
    */
   const deriveGateState = useCallback(
-    async (mode: GateDerivationMode = "establish"): Promise<PosGateState> => {
-      // A recovery-mode read never establishes anything. It asks the same two
-      // questions and applies the answer through applyRecoveryObservation,
-      // which keeps the recovery pending whatever comes back.
-      const observe = (observed: {
+    async (mode: GateDerivationMode = "reconnect"): Promise<PosGateState> => {
+      const apply = (observed: {
         employee: EmployeeSession | null;
         register: RegisterSession | null;
       }): PosGateState => {
         const next =
           mode === "observe"
             ? applyRecoveryObservation(gateRef.current, observed)
-            : applyServerDerivation(observed);
+            : applyReconnectDerivation(gateRef.current, observed);
 
         setGate(next);
         return next;
@@ -445,16 +453,16 @@ export default function DeviceApp() {
         // The read itself failed. Nothing is established either way, and a
         // pending recovery must survive a failed read rather than be forgotten
         // by it — so this goes through the same function.
-        return observe({ employee: null, register: null });
+        return apply({ employee: null, register: null });
       }
 
       if (employee.session === null) {
-        return observe({ employee: null, register: null });
+        return apply({ employee: null, register: null });
       }
 
       const register = await fetchCurrentRegisterSession();
 
-      return observe({
+      return apply({
         employee: employee.session,
         register: register.ok ? register.session : null,
       });
@@ -522,29 +530,46 @@ export default function DeviceApp() {
     return () => clearTimeout(clear);
   }, [state.status]);
 
-  /** Signs the selected employee in, or switches the till to them. */
-  const handleEmployeeLogin = useCallback(
-    async (employeeId: string, pin: string) => {
+  /**
+   * THE PRIMARY CASHIER LOGIN: Employee ID + PIN.
+   *
+   * On success the register is read from the server and REUSED as it stands.
+   * Signing in never opens, closes or rotates a drawer period — an open
+   * register spans many operators, and the two lifecycles are independent. No
+   * open register simply leaves the operator at the register gate.
+   */
+  const handleEmployeeCodeLogin = useCallback(
+    async (employeeCode: string, pin: string) => {
       setGateBusy(true);
       setGateError(null);
 
       // EVERY submitted attempt reaches the server, malformed or not: the
-      // per-device throttle can only count what it sees.
-      const result = await employeeLogin(employeeId, pin);
+      // per-device throttle can only count what it sees, and the shape checks
+      // in the card only grey out the button.
+      const result = await employeeLoginByCode(employeeCode, pin);
 
       if (!result.ok) {
         setGateBusy(false);
+        // Whatever the server said, unchanged. An unknown Employee ID and a
+        // wrong PIN are one answer there, and making them two here would undo
+        // the reason they are one.
         setGateError(getEmployeeLoginErrorMessage(result.error, result.retryAfterSeconds ?? null));
         return;
       }
 
-      // Re-derived rather than assumed from the login reply: signing in also
-      // decides whether a register is already open on this till.
-      await deriveGateState();
+      const register = await fetchCurrentRegisterSession();
+
+      setGate(
+        applyEmployeeAuthenticated({
+          employee: result.session,
+          register: register.ok ? register.session : null,
+        })
+      );
+
       setGateBusy(false);
       setSelectedEmployee(null);
     },
-    [deriveGateState]
+    []
   );
 
   /** One employee read, in the shape the pure recovery rules consume. */
@@ -2542,30 +2567,16 @@ export default function DeviceApp() {
 
       const gateOverlay =
         offlineMode || posGate === "pos" ? null : posGate === "employee" ? (
-          selectedEmployee === null ? (
-            <EmployeeSelector
-              roster={roster}
-              busy={gateBusy}
-              error={gateError}
-              recovery={gate.recovery === "employee"}
-              onSelect={(employee) => {
-                setGateError(null);
-                setSelectedEmployee(employee);
-              }}
-              onRetry={() => void loadRoster()}
-            />
-          ) : (
-            <EmployeePinEntry
-              employee={selectedEmployee}
-              busy={gateBusy}
-              error={gateError}
-              onSubmit={(pin) => void handleEmployeeLogin(selectedEmployee.employeeId, pin)}
-              onCancel={() => {
-                setGateError(null);
-                setSelectedEmployee(null);
-              }}
-            />
-          )
+          // THE PRIMARY CASHIER LOGIN. One card, an Employee ID and a PIN — no
+          // roster fetch, no staff directory on an unattended screen, and no
+          // name to pick before a credential is asked for. The roster RPC and
+          // its wrapper are untouched and remain available to admin surfaces.
+          <EmployeeLockCard
+            busy={gateBusy}
+            error={gateError}
+            recovery={gate.recovery === "employee"}
+            onSubmit={(employeeCode, pin) => void handleEmployeeCodeLogin(employeeCode, pin)}
+          />
         ) : gate.employee !== null ? (
           <RegisterOpenPanel
             employee={gate.employee}

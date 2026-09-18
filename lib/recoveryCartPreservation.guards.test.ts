@@ -116,8 +116,11 @@ describe("1 + 2. a refusal cannot unmount the runtime", () => {
   it("BOTH recovery kinds go through it — employee and register", () => {
     const gateOverlay = app.slice(app.indexOf("const gateOverlay ="), app.indexOf("const activeOverlay"));
 
-    expect(gateOverlay).toContain("<EmployeeSelector");
-    expect(gateOverlay).toContain("<EmployeePinEntry");
+    // UPDATED BY v1.3 checkpoint 2: the primary cashier login is the
+    // Employee ID + PIN lock card, not a roster selector. The property this
+    // guard protects is unchanged — both recovery kinds render through the one
+    // overlay slot, over a still-mounted PosRuntime.
+    expect(gateOverlay).toContain("<EmployeeLockCard");
     expect(gateOverlay).toContain("<RegisterOpenPanel");
     expect(gateOverlay).toContain('recovery={gate.recovery === "employee"}');
     expect(gateOverlay).toContain('recovery={gate.recovery === "register"}');
@@ -252,8 +255,7 @@ describe("5 + 6 + 7 + 8. every covering screen stays usable", () => {
   const inertSubtree = tree.slice(wrapperAt, wrapperClose);
 
   for (const screen of [
-    "EmployeeSelector",
-    "EmployeePinEntry",
+    "EmployeeLockCard",
     "RegisterOpenPanel",
     "DeviceSettingsScreen",
     "SalesHistoryScreen",
