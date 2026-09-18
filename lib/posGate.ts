@@ -292,80 +292,148 @@ export function applyRecoveryObservation(
 }
 
 /**
- * What the server reported when a register recovery was resolved.
+ * One server read: it either happened or it did not, and if it did it either
+ * found a session or it did not.
  *
- * `ok: false` means a read failed. It is a distinct case rather than a pair of
- * nulls, because "the server says nobody is signed in" and "we could not ask"
- * must not collapse into the same transition — the first is information, the
- * second is the absence of it.
+ * A FAILED READ IS NOT AN ABSENT SESSION. "The server says nobody is signed in"
+ * and "we could not ask" must never collapse into the same transition — the
+ * first is information, the second is the absence of it, and they call for
+ * different gates.
  */
-export type RegisterRecoveryObservation =
-  | { ok: false }
-  | { ok: true; employee: EmployeeSession | null; register: RegisterSession | null };
+export type SessionRead<T> = { ok: false } | { ok: true; session: T | null };
 
 /**
- * Resolves a register recovery from a FRESH READ OF BOTH SESSIONS.
+ * The three reads that surround a register-recovery operation.
  *
- * WHY BOTH. The recovery deliberately keeps the employee — they were not what
- * the server disproved — and the operator's press authorizes taking the
- * REGISTER. It is not authorization to switch EMPLOYEE. Reading only the
- * register would let the till pair a locally-held Ada with a freshly-read
- * register B and call the pair established, although the server had moved to Bo
- * in between. Nothing would have proven Ada was still signed in.
+ * THE EMPLOYEE SESSION MUST SPAN THE REGISTER OBSERVATION. Reading the employee
+ * once and then the register left a window: the server could switch from Ada to
+ * Bo in between, and the till would pair a confirmed-a-moment-ago Ada with a
+ * register read after she was gone. The second employee read closes exactly
+ * that window by requiring the same POS session on both sides of the register
+ * operation.
  *
- * That pair is worse than useless: an online v5 sale would refuse the stale
- * employee expectation, but if connectivity dropped first, Policy 1 would see
- * `establishedOnline` and let a NEW OFFLINE SALE be taken under an employee the
- * server had already replaced.
+ * This is not atomicity, and it is not claimed to be. A switch AFTER the final
+ * read is ordinary runtime staleness, which complete_sale_v5's online
+ * expectations already refuse. What it removes is the case where the client
+ * ITSELF observed the register under one employee and established under
+ * another — the only version of this race that can reach the offline queue.
+ */
+export type RegisterRecoveryReads = {
+  /** Before the register operation. */
+  employeeBefore: SessionRead<EmployeeSession>;
+  /** The register that was read, opened, or found already open. */
+  register: SessionRead<RegisterSession>;
+  /** After the register operation. Must be the same session as `employeeBefore`. */
+  employeeAfter: SessionRead<EmployeeSession>;
+};
+
+/**
+ * Whether the employee the recovery retained is still the one signed in.
  *
- * SO THE EMPLOYEE IS COMPARED BY POS SESSION IDENTITY, not by employee id and
- * certainly not by display name. A new session for the same person is still a
- * different session, and complete_sale_v5 compares session ids too — matching
- * anything weaker here would just move the refusal later.
+ * Used twice per adoption and once more as the PRE-CHECK that decides whether
+ * open_register_session may be called at all. Every identity comparison in the
+ * register-recovery flow goes through here, so there is one rule and one place
+ * to read it.
  *
- * FAILS CLOSED IN EVERY DIRECTION. A mismatch, a missing employee or a failed
- * read all end with `establishedOnline: false` and a recovery still pending.
- * The only outcome that establishes is the one where the server confirms the
- * very same employee session AND an open register.
+ * COMPARED BY POS SESSION IDENTITY. Not by employee id, and certainly not by
+ * display name: Ada signing out and back in is a NEW session, and
+ * complete_sale_v5 compares session ids too, so accepting anything weaker here
+ * would only move the refusal later.
+ */
+export type RetainedEmployeeCheck =
+  | { ok: true; employee: EmployeeSession }
+  /** The read failed. Nothing was learned, so nothing changes but the gate. */
+  | { ok: false; state: PosGateState; reason: "unavailable" }
+  /** The server answered, and it is somebody else (or nobody). */
+  | { ok: false; state: PosGateState; reason: "employee_changed" };
+
+export function checkRetainedEmployee(
+  state: PosGateState,
+  read: SessionRead<EmployeeSession>
+): RetainedEmployeeCheck {
+  // Nothing retained to revalidate against: there is no safe way forward.
+  if (state.employee === null) {
+    return {
+      ok: false,
+      reason: "employee_changed",
+      state: { employee: null, register: null, establishedOnline: false, recovery: "employee" },
+    };
+  }
+
+  if (!read.ok) {
+    // The operator stays where they are and can retry. The retained employee is
+    // NOT signed out — a failed read is not evidence that they left.
+    return {
+      ok: false,
+      reason: "unavailable",
+      state: { ...state, register: null, establishedOnline: false, recovery: "register" },
+    };
+  }
+
+  if (
+    read.session === null ||
+    read.session.employeeSessionId !== state.employee.employeeSessionId
+  ) {
+    // Gone, or somebody else. EITHER WAY THIS IS AN EMPLOYEE RECOVERY: the
+    // observed employee is not adopted, not stored and not claimable. Somebody
+    // signs in, with a PIN, before this till sells again.
+    return {
+      ok: false,
+      reason: "employee_changed",
+      state: { employee: null, register: null, establishedOnline: false, recovery: "employee" },
+    };
+  }
+
+  return { ok: true, employee: read.session };
+}
+
+/**
+ * Resolves a register recovery from a sandwich of reads.
+ *
+ * The operator's press authorizes taking the REGISTER. It is not authorization
+ * to switch EMPLOYEE, so the retained employee must be confirmed on BOTH sides
+ * of the register operation before anything is established.
+ *
+ * WHY THE SECOND READ EARNS ITS ROUND TRIP. Without it the client could
+ * establish a pair it had never seen coexist: employee confirmed, employee
+ * switched, register read, pair established. An online sale would refuse that
+ * pair — but `establishedOnline` is what Policy 1 reads, so a connection drop
+ * straight afterwards would let a NEW OFFLINE SALE be taken under an employee
+ * the server had already replaced, and no later refusal can un-take it.
+ *
+ * FAILS CLOSED IN EVERY DIRECTION. The only outcome that establishes is: same
+ * POS session before, an open register, same POS session after.
  */
 export function applyExplicitRegisterEstablished(
   state: PosGateState,
-  observed: RegisterRecoveryObservation
+  reads: RegisterRecoveryReads
 ): PosGateState {
-  // No retained employee to revalidate against: there is nothing this function
-  // could safely establish, so it sends the operator all the way back.
-  if (state.employee === null) {
-    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  const before = checkRetainedEmployee(state, reads.employeeBefore);
+
+  if (!before.ok) {
+    return before.state;
   }
 
-  // A read failed. Change nothing except the certainty that nothing is
-  // established; the operator stays on the recovery surface and can retry.
-  if (!observed.ok) {
+  if (!reads.register.ok) {
     return { ...state, register: null, establishedOnline: false, recovery: "register" };
   }
 
-  // The employee is gone, or is somebody else. EITHER WAY THIS IS NOW AN
-  // EMPLOYEE RECOVERY: the observed employee is not adopted, not stored, and
-  // not claimable — somebody must sign in, with a PIN, before this till sells.
-  if (
-    observed.employee === null ||
-    observed.employee.employeeSessionId !== state.employee.employeeSessionId
-  ) {
-    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  // THE SPANNING CHECK. Same retained session, read after the register.
+  const after = checkRetainedEmployee(state, reads.employeeAfter);
+
+  if (!after.ok) {
+    return after.state;
   }
 
-  // The employee holds, but there is no register to take. The recovery stands
-  // and the operator can open one.
-  if (observed.register === null) {
-    return { employee: state.employee, register: null, establishedOnline: false, recovery: "register" };
+  // The employee held throughout, but there is no register to take.
+  if (reads.register.session === null) {
+    return { employee: after.employee, register: null, establishedOnline: false, recovery: "register" };
   }
 
-  // Both confirmed, by the server, at the same moment, with the employee
-  // proven to be the one the operator established earlier. THE ONLY
-  // ESTABLISHING OUTCOME.
+  // Confirmed, spanned, and open. THE ONLY ESTABLISHING OUTCOME.
   return {
-    employee: observed.employee,
-    register: observed.register,
+    employee: after.employee,
+    register: reads.register.session,
     establishedOnline: true,
     recovery: null,
   };

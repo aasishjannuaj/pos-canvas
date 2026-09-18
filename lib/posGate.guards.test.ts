@@ -369,18 +369,41 @@ describe("recovery is an explicit act", () => {
     );
   });
 
-  it("that helper reads BOTH sessions before establishing anything", () => {
-    // The defect: adopting the register while revalidating only the register
-    // could pair a locally-held employee with a freshly-read register.
+  it("that helper SANDWICHES the register operation between two employee reads", () => {
     const helper = app.slice(
       app.indexOf("const establishRegisterAfterRecovery"),
       app.indexOf("/** Opens the register on this till. */")
     );
 
-    expect(helper).toContain("fetchCurrentEmployeeSession()");
-    expect(helper).toContain("fetchCurrentRegisterSession()");
-    // A failed read establishes nothing, and says so explicitly.
-    expect(helper.match(/\{ ok: false \}/g)?.length).toBe(2);
+    // before → operation → after. Two reads, not one: a single read leaves the
+    // window where the server switches employee before the register is read.
+    expect(helper.match(/await readEmployeeSession\(\)/g)).toHaveLength(2);
+    expect(helper).toContain("const employeeBefore = await readEmployeeSession();");
+    expect(helper).toContain("const employeeAfter = await readEmployeeSession();");
+
+    // The order is the property. The operation must sit between them.
+    const before = helper.indexOf("const employeeBefore");
+    const operation = helper.indexOf("await operation()");
+    const after = helper.indexOf("const employeeAfter");
+
+    expect(before).toBeGreaterThan(-1);
+    expect(operation).toBeGreaterThan(before);
+    expect(after).toBeGreaterThan(operation);
+  });
+
+  it("the PRE-CHECK gates the operation — it does not merely report on it", () => {
+    const helper = app.slice(
+      app.indexOf("const establishRegisterAfterRecovery"),
+      app.indexOf("/** Opens the register on this till. */")
+    );
+
+    const precheck = helper.indexOf("checkRetainedEmployee(gateRef.current, employeeBefore)");
+    const operation = helper.indexOf("await operation()");
+
+    expect(precheck).toBeGreaterThan(-1);
+    expect(precheck).toBeLessThan(operation);
+    // And it returns without running the operation when it refuses.
+    expect(helper.slice(precheck, operation)).toContain("return;");
   });
 
   it("the Open register path routes its RECOVERY case through the same helper", () => {
@@ -389,12 +412,44 @@ describe("recovery is an explicit act", () => {
     // whoever that is.
     const handler = app.slice(
       app.indexOf("const handleOpenRegister"),
-      app.indexOf("const handleAdoptCurrentRegister")
+      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
     );
 
     expect(handler).toContain('gateRef.current.recovery === "register"');
-    // Both exits — a fresh open and an already_open adoption — are covered.
-    expect(handler.match(/establishRegisterAfterRecovery\(\)/g)).toHaveLength(2);
+    expect(handler).toContain("establishRegisterAfterRecovery(async () => {");
+  });
+
+  it("the open RPC is issued INSIDE the sandwich, never before it", () => {
+    const handler = app.slice(
+      app.indexOf("const handleOpenRegister"),
+      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
+    );
+
+    const recovery = handler.indexOf('gateRef.current.recovery === "register"');
+    const sandwich = handler.indexOf("establishRegisterAfterRecovery(async () => {");
+    const openInside = handler.indexOf("await openRegisterSession(", sandwich);
+
+    // The recovery branch comes first, and its open call sits within the
+    // callback the helper invokes only after the pre-check passes.
+    expect(recovery).toBeLessThan(sandwich);
+    expect(openInside).toBeGreaterThan(sandwich);
+
+    // Nothing calls the RPC between the recovery test and the sandwich.
+    expect(handler.slice(recovery, sandwich)).not.toContain("openRegisterSession(");
+  });
+
+  it("already_open is returned through the same operation slot", () => {
+    const handler = app.slice(
+      app.indexOf("const handleOpenRegister"),
+      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
+    );
+
+    const sandwich = handler.indexOf("establishRegisterAfterRecovery(async () => {");
+    const inside = handler.slice(sandwich);
+
+    expect(inside).toContain('result.code === "already_open"');
+    // It yields a session to the transition rather than establishing directly.
+    expect(inside.slice(0, inside.indexOf("});"))).not.toContain("setGate(");
   });
 });
 

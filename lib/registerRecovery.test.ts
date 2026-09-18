@@ -1,31 +1,40 @@
-// v1.3 Feature 1B-RUNTIME correction 3 — explicit register adoption
-// revalidates the EMPLOYEE as well as the register.
+// v1.3 Feature 1B-RUNTIME — explicit register recovery, and the read race.
 //
-// THE DEFECT. A register recovery deliberately keeps the employee: they were
-// not what the server disproved. The adopt path then read only the register, so
-// it could pair a LOCALLY-HELD Ada with a FRESHLY-READ register B and mark the
-// pair established — although the server may have moved to Bo in the window
-// between the observe pass and the operator's press. Nothing proved Ada was
-// still signed in.
+// THE RULE. The operator's press authorizes taking the REGISTER. It is not
+// authorization to switch EMPLOYEE. So the retained employee POS session must
+// be confirmed on BOTH sides of the register operation:
 //
-// WHY THAT PAIR IS DANGEROUS RATHER THAN MERELY WRONG. An online v5 sale would
-// refuse the stale employee expectation, so the money is safe while the network
-// is up. But `establishedOnline` is exactly what Policy 1 reads: if the
-// connection dropped after such an adoption, the till would take a NEW OFFLINE
-// SALE under an employee the server had already replaced — a sale that goes to
-// disk, and whose claim can never be proven at sync time.
+//     read employee → [read / open register] → read employee again
 //
-// THE RULE. The press authorizes taking the REGISTER. It is not authorization
-// to switch EMPLOYEE.
+// WHY THE SECOND READ EARNS ITS ROUND TRIP. Reading the employee once and then
+// the register left a window. The server could switch Ada → Bo in between, and
+// the client would establish a pair it had never seen coexist:
+//
+//     employee = Ada (confirmed a moment ago, already stale)
+//     register = Register B (read after she was gone)
+//     establishedOnline = true
+//
+// An online v5 sale refuses that pair, so the money is safe while the network
+// is up. But `establishedOnline` is exactly what Policy 1 reads: a connection
+// drop straight afterwards would let a NEW OFFLINE SALE be taken under an
+// employee the server had already replaced — written to disk, with a claim that
+// can never be proven at sync time. A later online refusal cannot un-take a
+// sale that has already been accepted locally.
+//
+// This is not atomicity and is not claimed to be. A switch AFTER the final read
+// is ordinary runtime staleness, which the v5 online expectations refuse. What
+// it removes is the case where the client ITSELF observed the register under
+// one employee and established under another.
 import { describe, expect, it } from "vitest";
 import {
   applyExplicitRegisterEstablished,
   applySaleAttributionFailure,
   buildOfflineClaims,
   canCheckoutOffline,
+  checkRetainedEmployee,
   resolvePosGate,
 } from "@/lib/posGate";
-import type { PosGateState } from "@/lib/posGate";
+import type { PosGateState, RegisterRecoveryReads } from "@/lib/posGate";
 import type { EmployeeSession } from "@/lib/employeeSession";
 import type { RegisterSession } from "@/lib/registerSession";
 
@@ -48,9 +57,9 @@ const BO: EmployeeSession = {
 /**
  * THE SAME PERSON, A NEW SESSION — Ada signed out and back in.
  *
- * The case that a weaker comparison would wave through: same employee id, same
- * display name, different POS session. complete_sale_v5 compares session ids,
- * so accepting this here would only move the refusal later.
+ * What a weaker comparison would wave through: same employee id, same display
+ * name, different POS session. complete_sale_v5 compares session ids, so
+ * accepting this would only move the refusal later.
  */
 const ADA_AGAIN: EmployeeSession = {
   ...ADA,
@@ -84,21 +93,33 @@ const established: PosGateState = {
 /** Ada retained, register cleared, recovery pending — awaiting the press. */
 const registerRecovery = applySaleAttributionFailure(established, "register_changed");
 
-describe("1. same employee session + open register", () => {
-  const adopted = applyExplicitRegisterEstablished(registerRecovery, {
-    ok: true,
-    employee: ADA,
-    register: REGISTER_B,
-  });
+/** The three reads, written the way they happen: before, operation, after. */
+function reads(
+  employeeBefore: EmployeeSession | null | "failed",
+  register: RegisterSession | null | "failed",
+  employeeAfter: EmployeeSession | null | "failed"
+): RegisterRecoveryReads {
+  return {
+    employeeBefore: employeeBefore === "failed" ? { ok: false } : { ok: true, session: employeeBefore },
+    register: register === "failed" ? { ok: false } : { ok: true, session: register },
+    employeeAfter: employeeAfter === "failed" ? { ok: false } : { ok: true, session: employeeAfter },
+  };
+}
 
-  it("the adoption succeeds", () => {
+const adopt = (r: RegisterRecoveryReads) => applyExplicitRegisterEstablished(registerRecovery, r);
+
+// ---------------------------------------------------------------------------
+// REGISTER ADOPTION — the nine required cases
+// ---------------------------------------------------------------------------
+
+describe("1. employee same before AND after, register open", () => {
+  const adopted = adopt(reads(ADA, REGISTER_B, ADA));
+
+  it("establishes", () => {
+    expect(adopted.establishedOnline).toBe(true);
+    expect(adopted.recovery).toBeNull();
     expect(adopted.register).toEqual(REGISTER_B);
     expect(adopted.employee).toEqual(ADA);
-  });
-
-  it("the recovery is cleared and the POS may reopen", () => {
-    expect(adopted.recovery).toBeNull();
-    expect(adopted.establishedOnline).toBe(true);
     expect(resolvePosGate(adopted)).toBe("pos");
   });
 
@@ -109,225 +130,270 @@ describe("1. same employee session + open register", () => {
       registerSessionId: "reg-b",
     });
   });
+});
 
-  it("the employee stored is the SERVER's, which has just been proven identical", () => {
-    expect(adopted.employee?.employeeSessionId).toBe(ADA.employeeSessionId);
+describe("2. the employee changes BEFORE the register read", () => {
+  // The server had already moved on when the press landed.
+  const result = adopt(reads(BO, REGISTER_B, BO));
+
+  it("does not establish", () => {
+    expect(result.establishedOnline).toBe(false);
+  });
+
+  it("escalates to the employee gate, adopting neither Bo nor the register", () => {
+    expect(result.recovery).toBe("employee");
+    expect(result.employee).toBeNull();
+    expect(result.register).toBeNull();
+    expect(resolvePosGate(result)).toBe("employee");
   });
 });
 
-describe("2. different employee session + open register", () => {
-  // The failure scenario from the review, exactly: the server moved to Bo
-  // between the observe pass and the press.
-  const result = applyExplicitRegisterEstablished(registerRecovery, {
-    ok: true,
-    employee: BO,
-    register: REGISTER_B,
+describe("3. the employee changes BETWEEN the register read and the final read", () => {
+  // THE RACE THIS CORRECTION EXISTS FOR. The first read said Ada, so the old
+  // two-read version would have established Ada + Register B — a pair that
+  // never coexisted on the server.
+  const result = adopt(reads(ADA, REGISTER_B, BO));
+
+  it("does not establish", () => {
+    expect(result.establishedOnline).toBe(false);
   });
 
-  it("escalates to an EMPLOYEE recovery", () => {
+  it("escalates to the employee gate", () => {
     expect(result.recovery).toBe("employee");
     expect(resolvePosGate(result)).toBe("employee");
   });
 
-  it("does NOT adopt the register", () => {
+  it("does not adopt the register it just read", () => {
     expect(result.register).toBeNull();
   });
 
-  it("does NOT establish", () => {
-    expect(result.establishedOnline).toBe(false);
-  });
-
-  it("does NOT adopt Bo either — pressing a register button is not a login", () => {
+  it("does not adopt the employee it just observed", () => {
     expect(result.employee).toBeNull();
   });
 
-  it("A NEW SESSION FOR THE SAME PERSON IS STILL A DIFFERENT SESSION", () => {
-    // Compared by POS session identity, not by employee id or display name.
-    const sameNameNewSession = applyExplicitRegisterEstablished(registerRecovery, {
-      ok: true,
-      employee: ADA_AGAIN,
-      register: REGISTER_B,
-    });
+  it("the employee VANISHING between the reads is treated the same way", () => {
+    const vanished = adopt(reads(ADA, REGISTER_B, null));
 
-    expect(sameNameNewSession.recovery).toBe("employee");
-    expect(sameNameNewSession.establishedOnline).toBe(false);
-    expect(sameNameNewSession.employee).toBeNull();
+    expect(vanished.establishedOnline).toBe(false);
+    expect(vanished.recovery).toBe("employee");
   });
 });
 
-describe("3. employee missing", () => {
-  const result = applyExplicitRegisterEstablished(registerRecovery, {
-    ok: true,
-    employee: null,
-    register: REGISTER_B,
+describe("4. same employee id, NEW POS session id", () => {
+  it("does not establish, on either side of the sandwich", () => {
+    for (const r of [
+      reads(ADA_AGAIN, REGISTER_B, ADA_AGAIN),
+      reads(ADA, REGISTER_B, ADA_AGAIN),
+      reads(ADA_AGAIN, REGISTER_B, ADA),
+    ]) {
+      const result = adopt(r);
+
+      expect(result.establishedOnline).toBe(false);
+      expect(result.recovery).toBe("employee");
+      expect(result.employee).toBeNull();
+    }
   });
+});
+
+describe("5. the employee disappears", () => {
+  const result = adopt(reads(null, REGISTER_B, null));
 
   it("escalates to an employee recovery", () => {
     expect(result.recovery).toBe("employee");
     expect(result.employee).toBeNull();
-    expect(resolvePosGate(result)).toBe("employee");
-  });
-
-  it("establishes nothing, and takes no register", () => {
-    expect(result.establishedOnline).toBe(false);
     expect(result.register).toBeNull();
+    expect(result.establishedOnline).toBe(false);
   });
 });
 
-describe("4. register missing", () => {
-  const result = applyExplicitRegisterEstablished(registerRecovery, {
-    ok: true,
-    employee: ADA,
-    register: null,
-  });
-
-  it("stays at the register recovery — there is nothing to take", () => {
-    expect(result.recovery).toBe("register");
-    expect(resolvePosGate(result)).toBe("register");
-  });
-
-  it("keeps the confirmed employee signed in", () => {
-    expect(result.employee).toEqual(ADA);
-  });
+describe("6. the FIRST employee read fails", () => {
+  const result = adopt(reads("failed", REGISTER_B, ADA));
 
   it("establishes nothing", () => {
     expect(result.establishedOnline).toBe(false);
   });
-});
 
-describe("5 + 6. a failed read establishes nothing", () => {
-  // Both reads collapse to one case on purpose: "the server says nobody is
-  // signed in" and "we could not ask" must never become the same transition.
-  const result = applyExplicitRegisterEstablished(registerRecovery, { ok: false });
-
-  it("leaves the till safely gated", () => {
-    expect(result.establishedOnline).toBe(false);
+  it("stays at the register recovery — a failed read is not evidence", () => {
     expect(result.recovery).toBe("register");
-    expect(resolvePosGate(result)).toBe("register");
-  });
-
-  it("does not invent a register", () => {
+    expect(result.employee).toEqual(ADA);
     expect(result.register).toBeNull();
   });
+});
 
-  it("does not sign the retained employee out either — nothing was learned", () => {
+describe("7. the register read fails", () => {
+  const result = adopt(reads(ADA, "failed", ADA));
+
+  it("establishes nothing and stays gated", () => {
+    expect(result.establishedOnline).toBe(false);
+    expect(result.recovery).toBe("register");
+    expect(result.register).toBeNull();
+  });
+});
+
+describe("8. the FINAL employee read fails", () => {
+  const result = adopt(reads(ADA, REGISTER_B, "failed"));
+
+  it("establishes nothing — an unverified span is not a verified one", () => {
+    expect(result.establishedOnline).toBe(false);
+  });
+
+  it("stays at the register recovery, and does not sign Ada out", () => {
+    expect(result.recovery).toBe("register");
     expect(result.employee).toEqual(ADA);
   });
 
-  it("a retry after the connection returns still works normally", () => {
-    const retried = applyExplicitRegisterEstablished(result, {
-      ok: true,
-      employee: ADA,
-      register: REGISTER_B,
-    });
-
-    expect(retried.establishedOnline).toBe(true);
-    expect(retried.recovery).toBeNull();
+  it("does not adopt the register it read", () => {
+    expect(result.register).toBeNull();
   });
 });
 
-describe("7. offline checkout stays blocked through every escalation", () => {
-  for (const [name, observation] of [
-    ["different employee", { ok: true, employee: BO, register: REGISTER_B }],
-    ["same person, new session", { ok: true, employee: ADA_AGAIN, register: REGISTER_B }],
-    ["employee missing", { ok: true, employee: null, register: REGISTER_B }],
-    ["register missing", { ok: true, employee: ADA, register: null }],
-    ["read failure", { ok: false }],
-  ] as const) {
-    it(`${name}: canCheckoutOffline is false`, () => {
-      const result = applyExplicitRegisterEstablished(registerRecovery, observation);
+describe("9. offline checkout is false for every failure and mismatch", () => {
+  const CASES = [
+    ["employee changed before", reads(BO, REGISTER_B, BO)],
+    ["employee changed after", reads(ADA, REGISTER_B, BO)],
+    ["new session for the same person", reads(ADA_AGAIN, REGISTER_B, ADA_AGAIN)],
+    ["employee missing", reads(null, REGISTER_B, null)],
+    ["employee vanished mid-operation", reads(ADA, REGISTER_B, null)],
+    ["register missing", reads(ADA, null, ADA)],
+    ["first employee read failed", reads("failed", REGISTER_B, ADA)],
+    ["register read failed", reads(ADA, "failed", ADA)],
+    ["final employee read failed", reads(ADA, REGISTER_B, "failed")],
+    ["every read failed", reads("failed", "failed", "failed")],
+  ] as const;
 
-      expect(canCheckoutOffline(result).ok).toBe(false);
+  for (const [name, r] of CASES) {
+    it(`${name}: canCheckoutOffline is false`, () => {
+      expect(canCheckoutOffline(adopt(r)).ok).toBe(false);
     });
   }
 
-  it("the recovery state itself blocks it before any press", () => {
+  it("the recovery state blocks it before any press, too", () => {
     expect(canCheckoutOffline(registerRecovery).ok).toBe(false);
   });
+
+  it("and exactly one shape establishes", () => {
+    const establishing = CASES.filter(([, r]) => adopt(r).establishedOnline);
+
+    expect(establishing).toHaveLength(0);
+    expect(adopt(reads(ADA, REGISTER_B, ADA)).establishedOnline).toBe(true);
+  });
 });
 
-describe("8. no observed employee becomes an offline claim", () => {
-  for (const [name, observation] of [
-    ["different employee", { ok: true, employee: BO, register: REGISTER_B }],
-    ["same person, new session", { ok: true, employee: ADA_AGAIN, register: REGISTER_B }],
-    ["employee missing", { ok: true, employee: null, register: REGISTER_B }],
+describe("14. no different employee session ever becomes an offline claim", () => {
+  for (const [name, r] of [
+    ["changed before", reads(BO, REGISTER_B, BO)],
+    ["changed after", reads(ADA, REGISTER_B, BO)],
+    ["new session, same person", reads(ADA_AGAIN, REGISTER_B, ADA_AGAIN)],
+    ["missing", reads(null, REGISTER_B, null)],
   ] as const) {
     it(`${name}: claims nothing`, () => {
-      const claims = buildOfflineClaims(
-        applyExplicitRegisterEstablished(registerRecovery, observation)
-      );
+      const result = adopt(r);
 
-      expect(claims.employeePosSessionId).toBeNull();
-      expect(claims.registerSessionId).toBeNull();
+      expect(buildOfflineClaims(result)).toEqual({
+        employeePosSessionId: null,
+        registerSessionId: null,
+      });
+      // Never stored at all, so no future code path can reach them.
+      expect(JSON.stringify(result)).not.toContain("sess-bo");
+      expect(JSON.stringify(result)).not.toContain("sess-ada-2");
+      expect(JSON.stringify(result)).not.toContain("reg-b");
     });
   }
+});
 
-  it("a register that was never adopted can never be claimed", () => {
-    const result = applyExplicitRegisterEstablished(registerRecovery, {
-      ok: true,
-      employee: BO,
-      register: REGISTER_B,
-    });
+// ---------------------------------------------------------------------------
+// REGISTER OPEN DURING RECOVERY — the pre-check is a gate
+// ---------------------------------------------------------------------------
 
-    expect(JSON.stringify(result)).not.toContain("reg-b");
-    expect(JSON.stringify(result)).not.toContain("sess-bo");
+describe("10. a stale retained employee is detected BEFORE the open", () => {
+  // The host calls checkRetainedEmployee first and only calls
+  // open_register_session when it returns ok. These are the answers that stop
+  // the RPC from ever being issued, so no register is opened under somebody the
+  // local operator was not recovering.
+  it("a different employee refuses the operation", () => {
+    const check = checkRetainedEmployee(registerRecovery, { ok: true, session: BO });
+
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe("employee_changed");
+    expect(check.ok === false && check.state.recovery).toBe("employee");
+    expect(check.ok === false && check.state.establishedOnline).toBe(false);
+  });
+
+  it("a new session for the same person refuses it too", () => {
+    expect(checkRetainedEmployee(registerRecovery, { ok: true, session: ADA_AGAIN }).ok).toBe(false);
+  });
+
+  it("a missing employee refuses it", () => {
+    const check = checkRetainedEmployee(registerRecovery, { ok: true, session: null });
+
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.state.recovery).toBe("employee");
+  });
+
+  it("a FAILED read refuses it without signing anybody out", () => {
+    const check = checkRetainedEmployee(registerRecovery, { ok: false });
+
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe("unavailable");
+    expect(check.ok === false && check.state.employee).toEqual(ADA);
+    expect(check.ok === false && check.state.recovery).toBe("register");
+  });
+
+  it("a state with nothing retained refuses it", () => {
+    const orphaned: PosGateState = {
+      employee: null,
+      register: null,
+      establishedOnline: false,
+      recovery: "register",
+    };
+
+    expect(checkRetainedEmployee(orphaned, { ok: true, session: ADA }).ok).toBe(false);
   });
 });
 
-describe("9. establishing out of a register recovery has exactly one shape", () => {
-  it("the ONLY establishing outcome is same-session plus an open register", () => {
-    // The whole truth table, asserted as a table. Exactly one row establishes.
-    const rows = [
-      { employee: ADA, register: REGISTER_B, establishes: true },
-      { employee: ADA, register: REGISTER_A, establishes: true },
-      { employee: BO, register: REGISTER_B, establishes: false },
-      { employee: ADA_AGAIN, register: REGISTER_B, establishes: false },
-      { employee: null, register: REGISTER_B, establishes: false },
-      { employee: ADA, register: null, establishes: false },
-      { employee: BO, register: null, establishes: false },
-      { employee: null, register: null, establishes: false },
-    ] as const;
+describe("11. the correct retained employee lets the open proceed", () => {
+  it("the pre-check passes and returns the confirmed session", () => {
+    const check = checkRetainedEmployee(registerRecovery, { ok: true, session: ADA });
 
-    for (const row of rows) {
-      const result = applyExplicitRegisterEstablished(registerRecovery, {
-        ok: true,
-        employee: row.employee,
-        register: row.register,
-      });
-
-      expect({
-        employee: row.employee?.employeeSessionId ?? null,
-        register: row.register?.registerSessionId ?? null,
-        establishes: result.establishedOnline,
-      }).toEqual({
-        employee: row.employee?.employeeSessionId ?? null,
-        register: row.register?.registerSessionId ?? null,
-        establishes: row.establishes,
-      });
-    }
+    expect(check.ok).toBe(true);
+    expect(check.ok === true && check.employee.employeeSessionId).toBe("sess-ada");
   });
 
-  it("a state with no retained employee cannot establish at all", () => {
-    // Fail closed: there is nothing to revalidate against.
-    const orphaned = applyExplicitRegisterEstablished(
-      { employee: null, register: null, establishedOnline: false, recovery: "register" },
-      { ok: true, employee: ADA, register: REGISTER_B }
-    );
+  it("and the completed operation establishes", () => {
+    const afterOpen = adopt(reads(ADA, REGISTER_A, ADA));
 
-    expect(orphaned.establishedOnline).toBe(false);
-    expect(orphaned.recovery).toBe("employee");
-    expect(orphaned.employee).toBeNull();
+    expect(afterOpen.establishedOnline).toBe(true);
+    expect(afterOpen.recovery).toBeNull();
+    expect(resolvePosGate(afterOpen)).toBe("pos");
+  });
+});
+
+describe("12. the employee changes while the open RPC is in flight", () => {
+  // The unavoidable residue: the pre-check passed, so the RPC was issued, and
+  // open_register_session opens under the SERVER's own current employee
+  // session. A register may therefore exist server-side, belonging to Bo. The
+  // CLIENT must still refuse to establish on it.
+  const result = adopt(reads(ADA, REGISTER_B, BO));
+
+  it("the client does NOT establish the register that was opened", () => {
+    expect(result.establishedOnline).toBe(false);
+    expect(result.register).toBeNull();
   });
 
-  it("repeated presses never accumulate into an establishment", () => {
-    let state = registerRecovery;
+  it("the operator is sent to the employee gate", () => {
+    expect(result.recovery).toBe("employee");
+    expect(resolvePosGate(result)).toBe("employee");
+  });
+
+  it("and offline checkout stays blocked", () => {
+    expect(canCheckoutOffline(result).ok).toBe(false);
+  });
+
+  it("pressing again does not accumulate into an establishment", () => {
+    let state = result;
 
     for (let press = 0; press < 5; press += 1) {
-      state = applyExplicitRegisterEstablished(state, {
-        ok: true,
-        employee: BO,
-        register: REGISTER_B,
-      });
+      state = applyExplicitRegisterEstablished(state, reads(BO, REGISTER_B, BO));
     }
 
     expect(state.establishedOnline).toBe(false);
@@ -335,56 +401,56 @@ describe("9. establishing out of a register recovery has exactly one shape", () 
   });
 });
 
-// ---------------------------------------------------------------------------
-// The register-OPEN recovery path, which is the same class
-// ---------------------------------------------------------------------------
-
-describe("the Open register path during a recovery is the same class", () => {
-  // open_register_session opens under the SERVER's own current employee
-  // session — never one the client names (the migration inserts
-  // v_employee_session.employee_id). So a register opened during a recovery
-  // while the server holds Bo belongs to Bo, and an establishing derivation
-  // would then adopt Bo: a register recovery silently becoming an employee
-  // switch. The host routes the recovery case through this same transition.
-  it("an open performed while the server holds a different employee cannot establish", () => {
-    const afterOpen = applyExplicitRegisterEstablished(registerRecovery, {
-      ok: true,
-      employee: BO,
-      register: REGISTER_B,
-    });
-
-    expect(afterOpen.establishedOnline).toBe(false);
-    expect(afterOpen.recovery).toBe("employee");
-    expect(resolvePosGate(afterOpen)).toBe("employee");
+describe("13. already_open takes the same pre- and post-checks", () => {
+  // The host returns the carried session from the already_open branch through
+  // the same operation slot, so it lands in exactly the same transition.
+  it("establishes only when the employee spans the operation", () => {
+    expect(adopt(reads(ADA, REGISTER_A, ADA)).establishedOnline).toBe(true);
   });
 
-  it("an open performed by the retained employee establishes normally", () => {
-    const afterOpen = applyExplicitRegisterEstablished(registerRecovery, {
-      ok: true,
-      employee: ADA,
-      register: REGISTER_A,
-    });
-
-    expect(afterOpen.establishedOnline).toBe(true);
-    expect(afterOpen.recovery).toBeNull();
-    expect(resolvePosGate(afterOpen)).toBe("pos");
+  it("refuses when the employee changed during it", () => {
+    expect(adopt(reads(ADA, REGISTER_A, BO)).establishedOnline).toBe(false);
+    expect(adopt(reads(BO, REGISTER_A, BO)).establishedOnline).toBe(false);
   });
 
-  it("the escalation still requires a PIN, not another press", () => {
-    const escalated = applyExplicitRegisterEstablished(registerRecovery, {
-      ok: true,
-      employee: BO,
-      register: REGISTER_B,
-    });
+  it("refuses when the final read could not be made", () => {
+    expect(adopt(reads(ADA, REGISTER_A, "failed")).establishedOnline).toBe(false);
+  });
+});
 
-    // Pressing again changes nothing: only an explicit login clears an
-    // employee recovery, and that path runs applyServerDerivation.
-    expect(
-      applyExplicitRegisterEstablished(escalated, {
-        ok: true,
-        employee: BO,
-        register: REGISTER_B,
-      }).establishedOnline
-    ).toBe(false);
+// ---------------------------------------------------------------------------
+// The full truth table
+// ---------------------------------------------------------------------------
+
+describe("the whole space, as a table", () => {
+  it("establishes on exactly one shape: same session, open register, same session", () => {
+    const employees = [ADA, BO, ADA_AGAIN, null, "failed"] as const;
+    const registers = [REGISTER_A, REGISTER_B, null, "failed"] as const;
+    const established: string[] = [];
+
+    for (const before of employees) {
+      for (const register of registers) {
+        for (const after of employees) {
+          const result = adopt(reads(before, register, after));
+
+          if (result.establishedOnline) {
+            established.push(
+              `${before === "failed" ? "failed" : before?.employeeSessionId ?? "none"}/` +
+                `${register === "failed" ? "failed" : register?.registerSessionId ?? "none"}/` +
+                `${after === "failed" ? "failed" : after?.employeeSessionId ?? "none"}`
+            );
+          }
+        }
+      }
+    }
+
+    expect(established.sort()).toEqual([
+      "sess-ada/reg-a/sess-ada",
+      "sess-ada/reg-b/sess-ada",
+    ]);
+  });
+
+  it("nothing that establishes ever carries an employee other than the retained one", () => {
+    expect(adopt(reads(ADA, REGISTER_B, ADA)).employee?.employeeSessionId).toBe("sess-ada");
   });
 });

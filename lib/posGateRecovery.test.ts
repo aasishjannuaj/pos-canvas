@@ -202,11 +202,7 @@ describe("register_changed: the employee survives, the register must be re-taken
     // offers a button. THE PRESS is the explicit act; the till never performs
     // it on the operator's behalf — and the adoption revalidates BOTH sessions,
     // which is why the employee is passed here too.
-    const adopted = applyExplicitRegisterEstablished(observed, {
-      ok: true,
-      employee: ADA,
-      register: REGISTER_B,
-    });
+    const adopted = applyExplicitRegisterEstablished(observed, { employeeBefore: { ok: true, session: ADA }, register: { ok: true, session: REGISTER_B }, employeeAfter: { ok: true, session: ADA } });
 
     expect(adopted.recovery).toBeNull();
     expect(adopted.register).toEqual(REGISTER_B);
@@ -237,11 +233,7 @@ describe("register_changed: the employee survives, the register must be re-taken
 
   it("an explicit adoption with nobody signed in establishes nothing", () => {
     expect(
-      applyExplicitRegisterEstablished(EMPTY_POS_GATE_STATE, {
-        ok: true,
-        employee: ADA,
-        register: REGISTER_B,
-      })
+      applyExplicitRegisterEstablished(EMPTY_POS_GATE_STATE, { employeeBefore: { ok: true, session: ADA }, register: { ok: true, session: REGISTER_B }, employeeAfter: { ok: true, session: ADA } })
     ).toEqual({ employee: null, register: null, establishedOnline: false, recovery: "employee" });
   });
 });

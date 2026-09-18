@@ -163,9 +163,11 @@ import {
   buildOfflineClaims,
   canCheckoutOffline,
   beginEmployeeSwitch,
+  checkRetainedEmployee,
   classifySaleAttributionFailure,
   resolvePosGate,
   type PosGateState,
+  type SessionRead,
 } from "@/lib/posGate";
 import type {
   PosRuntimeArmOnlineSale,
@@ -544,49 +546,87 @@ export default function DeviceApp() {
     [deriveGateState]
   );
 
-  const establishRegisterAfterRecovery = useCallback(async () => {
-    // BOTH SESSIONS, FRESHLY READ. Reading only the register would let the till
-    // pair a locally-held employee with a newly-read register and call that
-    // established — although the server may have moved to a different employee
-    // in the meantime. The press authorizes taking the REGISTER; it is not
-    // authorization to switch EMPLOYEE.
-    const employee = await fetchCurrentEmployeeSession();
+  /** One employee read, in the shape the pure recovery rules consume. */
+  const readEmployeeSession = useCallback(async (): Promise<SessionRead<EmployeeSession>> => {
+    const result = await fetchCurrentEmployeeSession();
 
-    if (!employee.ok) {
-      setGate(applyExplicitRegisterEstablished(gateRef.current, { ok: false }));
-      setGateError("Could not check who is signed in. Check the connection and try again.");
-      return;
-    }
-
-    const register = await fetchCurrentRegisterSession();
-
-    if (!register.ok) {
-      setGate(applyExplicitRegisterEstablished(gateRef.current, { ok: false }));
-      setGateError("Could not check the register. Check the connection and try again.");
-      return;
-    }
-
-    const next = applyExplicitRegisterEstablished(gateRef.current, {
-      ok: true,
-      employee: employee.session,
-      register: register.session,
-    });
-
-    setGate(next);
-
-    // The pure transition has already decided; these only explain it. An
-    // escalation to the employee gate is the one an operator most needs told,
-    // because the screen changes under them.
-    if (next.recovery === "employee") {
-      setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
-      setSelectedEmployee(null);
-      return;
-    }
-
-    setGateError(
-      next.recovery === "register" ? "No register is open on this till. Open one to continue." : null
-    );
+    return result.ok ? { ok: true, session: result.session } : { ok: false };
   }, []);
+
+  /**
+   * Resolves a register recovery around ONE register operation, with the
+   * retained employee checked on both sides of it.
+   *
+   *   read employee → [operation] → read employee again
+   *
+   * THE PRE-CHECK IS A GATE, NOT A FORMALITY. `operation` is not called at all
+   * unless the retained employee is still the one signed in — which is what
+   * keeps open_register_session from opening a register under somebody the
+   * local operator was not recovering.
+   *
+   * THE POST-CHECK CLOSES THE READ WINDOW. Without it the client could
+   * establish a pair it never saw coexist: employee confirmed, employee
+   * switched, register observed, pair established. That pair would be refused
+   * by an online sale — but Policy 1 reads `establishedOnline`, so a connection
+   * drop straight afterwards would let a NEW OFFLINE SALE be taken under an
+   * employee the server had already replaced, and nothing later can un-take it.
+   *
+   * Every identity comparison belongs to lib/posGate.ts. This function performs
+   * reads and renders the outcome; it decides nothing.
+   */
+  const establishRegisterAfterRecovery = useCallback(
+    async (operation: () => Promise<SessionRead<RegisterSession>>) => {
+      const employeeBefore = await readEmployeeSession();
+      const precheck = checkRetainedEmployee(gateRef.current, employeeBefore);
+
+      if (!precheck.ok) {
+        // FAIL CLOSED BEFORE THE OPERATION RUNS. Nothing is attempted, so there
+        // is no server-side side effect to explain afterwards.
+        setGate(precheck.state);
+
+        if (precheck.reason === "employee_changed") {
+          setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+          setSelectedEmployee(null);
+        } else {
+          setGateError("Could not check who is signed in. Check the connection and try again.");
+        }
+
+        return;
+      }
+
+      const register = await operation();
+      const employeeAfter = await readEmployeeSession();
+
+      const next = applyExplicitRegisterEstablished(gateRef.current, {
+        employeeBefore,
+        register,
+        employeeAfter,
+      });
+
+      setGate(next);
+
+      // The pure transition has already decided; these only explain it. An
+      // escalation to the employee gate is the one an operator most needs told,
+      // because the screen changes under them.
+      if (next.recovery === "employee") {
+        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+        setSelectedEmployee(null);
+        return;
+      }
+
+      if (next.recovery === "register") {
+        setGateError(
+          register.ok
+            ? "No register is open on this till. Open one to continue."
+            : "Could not check the register. Check the connection and try again."
+        );
+        return;
+      }
+
+      setGateError(null);
+    },
+    [readEmployeeSession]
+  );
 
   /** Opens the register on this till. */
   const handleOpenRegister = useCallback(
@@ -594,37 +634,44 @@ export default function DeviceApp() {
       setGateBusy(true);
       setGateError(null);
 
+      // DURING A RECOVERY THE OPEN IS SANDWICHED TOO, and the pre-check comes
+      // first for a reason beyond correctness: open_register_session opens
+      // under the SERVER's own current employee session, never one the client
+      // names. Calling it while the server had already moved to somebody else
+      // would open a real register belonging to THEM — a side effect the local
+      // operator never asked for. Checking before the call avoids creating it
+      // at all, rather than discovering it afterwards.
+      if (gateRef.current.recovery === "register") {
+        await establishRegisterAfterRecovery(async () => {
+          const result = await openRegisterSession(crypto.randomUUID(), openingCash);
+
+          if (result.ok) {
+            return { ok: true, session: result.session };
+          }
+
+          // already_open carries the session that IS open, so the till adopts
+          // it instead of asking the cashier to resolve a race they did not
+          // cause. It receives the same pre- and post-checks as a fresh open.
+          if (result.code === "already_open" && result.session !== null) {
+            return { ok: true, session: result.session };
+          }
+
+          setGateError(getRegisterOpenMessage(result.code));
+          return { ok: false };
+        });
+
+        setGateBusy(false);
+        return;
+      }
+
       // One request id per attempt, reused by nothing else: a retry of a lost
       // response is the caller's to make with the same id, and a different
       // amount under the same id is a conflict rather than an overwrite.
       const result = await openRegisterSession(crypto.randomUUID(), openingCash);
 
-      // SAME CLASS AS THE ADOPT BUTTON, AND CORRECTED THE SAME WAY. During a
-      // register recovery the till is holding an employee it has not
-      // revalidated, and open_register_session opens under the server's OWN
-      // current employee session — never one the client names. So if the server
-      // had moved to Bo, this call opens a register belonging to Bo and an
-      // establishing derivation would then adopt Bo, turning a register
-      // recovery into an employee switch nobody performed.
-      //
-      // Routing the recovery case through the revalidating path closes it: the
-      // employee is compared by POS session identity, and a mismatch escalates
-      // to the employee gate instead of establishing. The register the server
-      // opened is real and stays open — it is recorded against whoever the
-      // server says opened it, which is the truth — and it is adopted only once
-      // somebody signs in and proves who they are.
-      const recovering = gateRef.current.recovery === "register";
-
       if (!result.ok) {
-        // already_open carries the session that IS open, so the till adopts it
-        // instead of asking the cashier to resolve a race they did not cause.
         if (result.code === "already_open" && result.session !== null) {
-          if (recovering) {
-            await establishRegisterAfterRecovery();
-          } else {
-            await deriveGateState();
-          }
-
+          await deriveGateState();
           setGateBusy(false);
           return;
         }
@@ -634,29 +681,12 @@ export default function DeviceApp() {
         return;
       }
 
-      if (recovering) {
-        await establishRegisterAfterRecovery();
-      } else {
-        await deriveGateState();
-      }
-
+      await deriveGateState();
       setGateBusy(false);
     },
     [deriveGateState, establishRegisterAfterRecovery]
   );
 
-  /**
-   * The operator explicitly takes the register the server currently reports.
-   *
-   * THE ONLY WAY OUT OF A REGISTER RECOVERY THAT DOES NOT OPEN A NEW SESSION,
-   * and it exists because the alternative was worse: without it, a till whose
-   * register changed underneath it could only proceed by pressing "Open
-   * register" and typing an amount that `already_open` would then discard.
-   *
-   * IT IS STILL EXPLICIT. A person read what happened and pressed the button.
-   * The runtime never calls this on their behalf, which is the whole difference
-   * between this and the silent adoption being corrected.
-   */
   /**
    * The operator pressed "Use the register that is open".
    *
@@ -665,7 +695,13 @@ export default function DeviceApp() {
    */
   const handleAdoptCurrentRegister = useCallback(async () => {
     setGateBusy(true);
-    await establishRegisterAfterRecovery();
+
+    await establishRegisterAfterRecovery(async () => {
+      const current = await fetchCurrentRegisterSession();
+
+      return current.ok ? { ok: true, session: current.session } : { ok: false };
+    });
+
     setGateBusy(false);
   }, [establishRegisterAfterRecovery]);
 
