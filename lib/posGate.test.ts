@@ -16,6 +16,7 @@ import {
   canCheckoutOffline,
   classifySaleAttributionFailure,
   clearPosGateState,
+  describePosGateBlock,
   resolvePosGate,
 } from "@/lib/posGate";
 import type { PosGateState } from "@/lib/posGate";
@@ -60,6 +61,45 @@ describe("which gate the till stands at", () => {
     expect(resolvePosGate({ employee: null, register: REGISTER, establishedOnline: false, recovery: null })).toBe(
       "employee"
     );
+  });
+});
+
+describe("what a pending gate tells the runtime's checkout fence", () => {
+  // Fed to PosRuntime's checkoutBlockedReason, which is the FIRST statement in
+  // completeSale. The overlay stops a person reaching the button; this stops
+  // the sale whatever else happens.
+  it("names the gate that is pending", () => {
+    expect(describePosGateBlock(EMPTY_POS_GATE_STATE)).toBe(
+      "Sign in an employee before taking a sale."
+    );
+    expect(
+      describePosGateBlock({ employee: ADA, register: null, establishedOnline: false, recovery: null })
+    ).toBe("Open the register before taking a sale.");
+  });
+
+  it("blocks while EITHER recovery is pending, however complete the state looks", () => {
+    expect(describePosGateBlock({ ...established, recovery: "employee" })).toBe(
+      "Sign in an employee before taking a sale."
+    );
+    expect(describePosGateBlock({ ...established, recovery: "register" })).toBe(
+      "Open the register before taking a sale."
+    );
+  });
+
+  it("blocks after every kind of refusal", () => {
+    for (const failure of [
+      "employee_changed",
+      "employee_missing",
+      "register_changed",
+      "register_closed",
+      "expectations_missing",
+    ] as const) {
+      expect(describePosGateBlock(applySaleAttributionFailure(established, failure))).not.toBeNull();
+    }
+  });
+
+  it("and blocks nothing once both are established", () => {
+    expect(describePosGateBlock(established)).toBeNull();
   });
 });
 

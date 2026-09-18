@@ -70,8 +70,17 @@ describe("opening a till screen must not destroy the cart", () => {
 
     // The cart is useState INSIDE PosRuntime, so returning a different tree
     // unmounts it and throws away whatever was rung up.
+    //
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. The rendered slot is now
+    // `activeOverlay`, because the employee/register recovery gates join the
+    // very same layer — they had regressed this exact lesson, replacing the
+    // tree and losing the cart on a refused sale. `overlay` still holds the
+    // 25.3 screens and is still asserted; only the name of the value that
+    // reaches the DOM changed, and the property this guard protects is
+    // strictly stronger than before.
     expect(r).toContain("const overlay =");
-    expect(r).toContain("{overlay !== null && (");
+    expect(r).toContain("const activeOverlay = gateOverlay ?? overlay;");
+    expect(r).toContain("{activeOverlay !== null && (");
     expect(r).toContain("<PosRuntime");
   });
 

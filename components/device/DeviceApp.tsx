@@ -162,6 +162,7 @@ import {
   applyServerDerivation,
   buildOfflineClaims,
   canCheckoutOffline,
+  describePosGateBlock,
   beginEmployeeSwitch,
   checkRetainedEmployee,
   classifySaleAttributionFailure,
@@ -2516,22 +2517,32 @@ export default function DeviceApp() {
       const offlineSaleAllowed =
         offlineMode && offlineCheckout?.ok === true && offlineAttribution.ok;
 
-      // v1.3 Feature 1B-RUNTIME — the gates.
+      // v1.3 Feature 1B-RUNTIME — the gates, AS AN OVERLAY.
       //
       // ORDER IS THE CONTRACT: employee, then register, then the POS. A
       // register cannot be opened without a signed-in employee, so offering it
-      // first would be offering a dead end. Both gates are device-HOST screens:
-      // PosRuntime is not mounted until they are satisfied, so no template ever
-      // sees employee or register logic.
+      // first would be offering a dead end. Both gates are device-HOST
+      // screens, so no template ever sees employee or register logic.
+      //
+      // THEY DO NOT REPLACE THE POS, AND THAT IS THE WHOLE POINT. These used
+      // to `return` a different tree, which unmounted PosRuntime — and the
+      // cart is useState INSIDE PosRuntime, so a sale the server refused on
+      // attribution grounds threw away the cart the operator was told to
+      // retry. Staging found it: Loaded Fries x1, refused, recovered, cart
+      // empty. Feature 25.3 had already learned this for Sales history and
+      // settings; the gates are folded into that same `overlay` slot rather
+      // than reinventing it, and `inert` below makes the covered POS truly
+      // non-interactive instead of merely hidden.
       //
       // OFFLINE, THE GATES ARE NOT RENDERED AS A WAY IN. Neither can be
-      // satisfied without a server, so an offline till with nothing established
-      // shows the ordinary offline runtime and simply cannot check out.
+      // satisfied without a server, so an offline till with nothing
+      // established shows the ordinary offline runtime and simply cannot
+      // check out — canCheckoutOffline is unchanged and still decides that.
       const posGate = resolvePosGate(gate);
 
-      if (!offlineMode && posGate !== "pos") {
-        if (posGate === "employee") {
-          return selectedEmployee === null ? (
+      const gateOverlay =
+        offlineMode || posGate === "pos" ? null : posGate === "employee" ? (
+          selectedEmployee === null ? (
             <EmployeeSelector
               roster={roster}
               busy={gateBusy}
@@ -2554,28 +2565,32 @@ export default function DeviceApp() {
                 setSelectedEmployee(null);
               }}
             />
-          );
-        }
+          )
+        ) : gate.employee !== null ? (
+          <RegisterOpenPanel
+            employee={gate.employee}
+            busy={gateBusy}
+            error={gateError}
+            recovery={gate.recovery === "register"}
+            onOpen={(openingCash) => void handleOpenRegister(openingCash)}
+            onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}
+            onSwitchEmployee={() => {
+              setGateError(null);
+              void loadRoster();
+              setSelectedEmployee(null);
+              setGate(beginEmployeeSwitch(gateRef.current));
+            }}
+          />
+        ) : null;
 
-        if (gate.employee !== null) {
-          return (
-            <RegisterOpenPanel
-              employee={gate.employee}
-              busy={gateBusy}
-              error={gateError}
-              recovery={gate.recovery === "register"}
-              onOpen={(openingCash) => void handleOpenRegister(openingCash)}
-              onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}
-              onSwitchEmployee={() => {
-                setGateError(null);
-                void loadRoster();
-                setSelectedEmployee(null);
-                setGate(beginEmployeeSwitch(gateRef.current));
-              }}
-            />
-          );
-        }
-      }
+      /**
+       * ONE covering layer, and one interaction boundary.
+       *
+       * The gates outrank the Feature 25.3 screens: a till with nobody signed
+       * in has no business showing sales history, and this is the behaviour the
+       * gates already had when they replaced the tree.
+       */
+      const activeOverlay = gateOverlay ?? overlay;
 
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
@@ -2643,7 +2658,16 @@ export default function DeviceApp() {
             onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : null}
           />
 
-          <div className="min-h-0 flex-1">
+          {/* `inert` IS THE INTERACTION BOUNDARY, not the covering div.
+              An opaque overlay stops a mouse; it does not stop Tab reaching the
+              buttons underneath, a focused control keeping its focus, or a
+              keyboard/wedge event landing on it. `inert` removes the whole
+              subtree from focus, from pointer events and from the
+              accessibility tree, so the covered POS cannot be operated by any
+              route while a gate or a device screen is up. React 19 takes it as
+              a boolean prop. The cart is untouched — this blocks interaction,
+              not state. */}
+          <div className="min-h-0 flex-1" inert={activeOverlay !== null}>
         <PosRuntime
           // Stock tracking is stripped for display: the pinned snapshot's
           // stockQuantity is frozen at build time and is NOT live inventory.
@@ -2685,14 +2709,32 @@ export default function DeviceApp() {
           // would NOT be safe. Online is unaffected (null, as always). Offline
           // and eligible passes null too, and supplies the durable handler
           // below instead. Offline and ineligible states the reason.
+          // v1.3 Feature 1B-RUNTIME — AND a pending gate closes it too.
+          //
+          // The overlay above already stops a person reaching the pay button
+          // and `inert` stops every other route to it. This is the third,
+          // innermost fence, and it is the one that does not depend on the UI
+          // at all: checkoutBlockedReason is the FIRST statement in
+          // PosRuntime's completeSale, ahead of planSaleSubmission, submitSale
+          // and the durable enqueue. No sale RPC is called, no request id is
+          // minted and no record is written while a gate is pending.
+          //
+          // Offline, the attribution reason is reported as itself. It used to
+          // fall through to "storage_unavailable", which told an operator the
+          // disk had failed when what had actually happened was that Policy 1
+          // had nothing established to sell under.
           checkoutBlockedReason={
-            offlineMode && !offlineSaleAllowed
-              ? offlineCheckout === null
-                ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
-                : describeOfflineCheckoutBlock(
-                    offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
-                  )
-              : null
+            !offlineMode
+              ? describePosGateBlock(gate)
+              : !offlineSaleAllowed
+                ? !offlineAttribution.ok
+                  ? offlineAttribution.message
+                  : offlineCheckout === null
+                    ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
+                    : describeOfflineCheckoutBlock(
+                        offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
+                      )
+                : null
           }
           // Non-null ONLY for a validated offline session. The owner runtime
           // and the Builder Preview never pass this at all.
@@ -2714,8 +2756,8 @@ export default function DeviceApp() {
 
           {/* Above the POS, never instead of it — see the note on `overlay`.
               PosRuntime stays mounted, so the cart survives. */}
-          {overlay !== null && (
-            <div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{overlay}</div>
+          {activeOverlay !== null && (
+            <div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{activeOverlay}</div>
           )}
         </div>
       );

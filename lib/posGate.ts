@@ -93,6 +93,26 @@ export function resolvePosGate(state: PosGateState): PosGate {
   return "pos";
 }
 
+/**
+ * Why checkout is refused while a gate is pending.
+ *
+ * Fed to PosRuntime's `checkoutBlockedReason`, which is the runtime's own
+ * pre-existing boundary: it is the FIRST statement in completeSale, ahead of
+ * planSaleSubmission, submitSale and the durable enqueue. A covering overlay
+ * stops a person reaching the button; this stops the sale even if something
+ * else does.
+ */
+const GATE_BLOCKED_MESSAGES: Record<Exclude<PosGate, "pos">, string> = {
+  employee: "Sign in an employee before taking a sale.",
+  register: "Open the register before taking a sale.",
+};
+
+export function describePosGateBlock(state: PosGateState): string | null {
+  const gate = resolvePosGate(state);
+
+  return gate === "pos" ? null : GATE_BLOCKED_MESSAGES[gate];
+}
+
 export type OfflineCheckoutGate =
   | { ok: true }
   | { ok: false; reason: "not_established"; message: string };

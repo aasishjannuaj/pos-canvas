@@ -67,9 +67,15 @@ describe("a working till can reach its own settings", () => {
     // pressed by accident. Since 25.3 the screen is a full-bleed overlay rather
     // than a replacement tree, so PosRuntime keeps the cart alive underneath —
     // but nothing of checkout may remain reachable through it.
+    //
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the slot that reaches the DOM is now
+    // `activeOverlay`, shared with the employee/register recovery gates, and
+    // the POS underneath is additionally `inert` — so "nothing of checkout may
+    // remain reachable through it" is now enforced rather than merely visual.
     expect(ready).toContain("<DeviceSettingsScreen");
     expect(ready).toContain("const overlay =");
-    expect(ready).toContain('<div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{overlay}</div>');
+    expect(ready).toContain('<div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{activeOverlay}</div>');
+    expect(ready).toContain("inert={activeOverlay !== null}");
   });
 
   it("the settings screen offers unpair behind a confirmation", () => {
