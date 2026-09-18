@@ -141,21 +141,49 @@ function rawBody(file: string, key: string): string {
   return def.body;
 }
 
+// The signature THIS migration defines. Historical, and still correct: the
+// byte-for-byte comparisons below read files, not the live schema.
 const CREATE = "create_employee(uuid,text,text,text)";
+
+// ADDED BY v1.3 Feature 1B-RUNTIME checkpoint 1. 20260919120000 drops the
+// four-argument form and replaces it with one that requires an Employee ID,
+// because an active employee without a code cannot satisfy the new
+// employees_active_requires_code_check. The "did the ceiling come back?"
+// assertions must follow the EFFECTIVE definition, so they use this key; every
+// assertion about what 20260916130000 itself wrote still uses CREATE.
+const CREATE_EFFECTIVE = "create_employee(uuid,text,text,text,text)";
 const ACTIVE = "set_employee_active(uuid,boolean)";
 
 // ---------------------------------------------------------------------------
 // The structural "no roster rule" guard — mirrors assertion A3 in the SQL
 // ---------------------------------------------------------------------------
 
+// UPDATED BY v1.3 Feature 1B-RUNTIME checkpoint 1. The expectations follow the
+// EFFECTIVE bodies, which 20260919120000 now owns. The rule being protected is
+// unchanged -- no roster-size ceiling may reappear -- but both functions now
+// carry Employee ID error codes, and those are enumerated here so that an
+// unexpected NEW code still fails the guard.
 const GUARD = {
-  [CREATE]: {
+  [CREATE_EFFECTIVE]: {
     employeeReads: 0,
-    codes: ["invalid_display_name", "invalid_pin", "invalid_role", "not_authenticated", "not_found"],
+    codes: [
+      "employee_code_taken",
+      "invalid_display_name",
+      "invalid_employee_code",
+      "invalid_pin",
+      "invalid_role",
+      "not_authenticated",
+      "not_found",
+    ],
   },
   [ACTIVE]: {
     employeeReads: 1,
-    codes: ["not_authenticated", "not_found"],
+    codes: [
+      "employee_code_required",
+      "employee_code_taken",
+      "not_authenticated",
+      "not_found",
+    ],
   },
 } as const;
 
@@ -237,10 +265,19 @@ describe("ordering and immutability", () => {
     expect(F1A < FILENAME).toBe(true);
     expect(F1A1 < FILENAME).toBe(true);
 
-    // NARROWED BY v1.3 Feature 1B. This pinned "is the newest file", which any
-    // later migration breaks by existing. The property that matters is that no
-    // later file takes over either function this migration defines.
-    const later = orderedFiles.filter((file) => file > FILENAME);
+    // NARROWED BY v1.3 Feature 1B, then again by Feature 1B-RUNTIME
+    // checkpoint 1.
+    //
+    // 20260919120000 deliberately supersedes BOTH functions this file defines:
+    // create_employee, because an active employee now needs an Employee ID, and
+    // set_employee_active, because reactivation onto a reissued code must fail
+    // cleanly. Asserting "nothing later redefines them" would therefore be
+    // asserting that the approved checkpoint was never written.
+    //
+    // What still matters, and is checked here, is that the ONLY file allowed to
+    // supersede them is that one. Anything else taking them over is a surprise.
+    const SUPERSEDED_BY = "20260919120000_employee_code_and_four_digit_pin.sql";
+    const later = orderedFiles.filter((file) => file > FILENAME && file !== SUPERSEDED_BY);
 
     for (const file of later) {
       const defined = definitionsIn(stripComments(read(file)), file).map((d) => `${d.name}(${d.types})`);
@@ -322,11 +359,22 @@ describe("grammar and scope", () => {
 // ===========================================================================
 
 describe("the effective functions are this migration's", () => {
-  for (const key of [CREATE, ACTIVE]) {
-    it(`${key} is defined by ${FILENAME}`, () => {
-      expect(effective(key).file).toBe(FILENAME);
-    });
-  }
+  it(`${ACTIVE} is now defined by the checkpoint-1 migration`, () => {
+    // Superseded so that reactivating onto a reissued Employee ID refuses
+    // instead of renumbering somebody. The ceiling rules below still apply to
+    // whatever the effective body is.
+    expect(effective(ACTIVE).file).toBe(
+      "20260919120000_employee_code_and_four_digit_pin.sql"
+    );
+  });
+
+  it(`${CREATE_EFFECTIVE} is now defined by the checkpoint-1 migration`, () => {
+    // 20260919120000 supersedes it deliberately. What matters for THIS file is
+    // that the ceiling did not come back with it, which the rules below check.
+    expect(effective(CREATE_EFFECTIVE).file).toBe(
+      "20260919120000_employee_code_and_four_digit_pin.sql"
+    );
+  });
 });
 
 describe("create_employee: its predecessor minus the safeguard, byte for byte", () => {
@@ -387,13 +435,13 @@ describe("set_employee_active: its predecessor minus the safeguard, byte for byt
 });
 
 describe("no replacement roster rule exists", () => {
-  for (const key of [CREATE, ACTIVE] as const) {
+  for (const key of [CREATE_EFFECTIVE, ACTIVE] as const) {
     it(`${key}: the effective body passes every structural rule`, () => {
       expect(rosterRuleViolations(key, effective(key).body)).toEqual([]);
     });
 
     it(`${key}: the predecessor FAILED the same rules (the guard is not vacuous)`, () => {
-      const predecessor = key === CREATE ? rawBody(F1A1, CREATE) : rawBody(F1A, ACTIVE);
+      const predecessor = key === CREATE_EFFECTIVE ? rawBody(F1A1, CREATE) : rawBody(F1A, ACTIVE);
 
       expect(rosterRuleViolations(key, predecessor)).toEqual(
         expect.arrayContaining(["employee_limit_reached", "count(", "numeric comparison"])
@@ -414,32 +462,36 @@ describe("no replacement roster rule exists", () => {
     }
   });
 
-  const INSERTION = "  insert into public.employees (project_id, display_name, role, pin_hash)";
-  const create = () => effective(CREATE).body;
+  // The effective insert now carries employee_code and sits inside the
+  // exception block that turns a lost unique race into employee_code_taken,
+  // hence the deeper indentation.
+  const INSERTION =
+    "    insert into public.employees (project_id, display_name, role, employee_code, pin_hash)";
+  const create = () => effective(CREATE_EFFECTIVE).body;
   const active = () => effective(ACTIVE).body;
   const ACTIVE_ANCHOR = "  update public.employees e\n";
 
   for (const [label, key, mutate] of [
-    ["restored >= 50", CREATE, () => create().replace(INSERTION,
+    ["restored >= 50", CREATE_EFFECTIVE, () => create().replace(INSERTION,
       "  if (select count(*) from public.employees e where e.project_id = p_project_id and e.active) >= 50 then\n    return jsonb_build_object('ok', false, 'error', 'employee_limit_reached');\n  end if;\n" + INSERTION)],
-    ["renumbered >= 20", CREATE, () => create().replace(INSERTION,
+    ["renumbered >= 20", CREATE_EFFECTIVE, () => create().replace(INSERTION,
       "  if v_n >= 20 then\n    return jsonb_build_object('ok', false, 'error', 'invalid_role');\n  end if;\n" + INSERTION)],
     ["renumbered > 100", ACTIVE, () => active().replace(ACTIVE_ANCHOR,
       "  if v_total > 100 then\n    return jsonb_build_object('ok', false, 'error', 'not_found');\n  end if;\n" + ACTIVE_ANCHOR)],
     ["restored employee_limit_reached alone", ACTIVE, () => active().replace(ACTIVE_ANCHOR,
       "  if p_active then\n    return jsonb_build_object('ok', false, 'error', 'employee_limit_reached');\n  end if;\n" + ACTIVE_ANCHOR)],
-    ["new error name, no number", CREATE, () => create().replace(INSERTION,
+    ["new error name, no number", CREATE_EFFECTIVE, () => create().replace(INSERTION,
       "  if v_full then\n    return jsonb_build_object('ok', false, 'error', 'roster_full');\n  end if;\n" + INSERTION)],
     ["count hidden in a subquery", ACTIVE, () => active().replace(ACTIVE_ANCHOR,
       "  perform (select count(*) from public.employees e2 where e2.active);\n" + ACTIVE_ANCHOR)],
-    ["extra employee read without count", CREATE, () => create().replace(INSERTION,
+    ["extra employee read without count", CREATE_EFFECTIVE, () => create().replace(INSERTION,
       "  if exists (select 1 from public.employees e where e.project_id = p_project_id offset v_cap) then\n    return jsonb_build_object('ok', false, 'error', 'not_found');\n  end if;\n" + INSERTION)],
     ["renamed ceiling variable", ACTIVE, () => active().replace("  v_updated record;\n", "  v_updated record;\n  v_max_employees integer;\n")],
   ] as const) {
     it(`NEGATIVE CONTROL: ${label} is detected`, () => {
       const mutated = mutate();
 
-      expect(mutated).not.toBe(key === CREATE ? create() : active());
+      expect(mutated).not.toBe(key === CREATE_EFFECTIVE ? create() : active());
       expect(rosterRuleViolations(key, mutated)).not.toEqual([]);
     });
   }
@@ -450,7 +502,7 @@ describe("no replacement roster rule exists", () => {
 // ===========================================================================
 
 describe("create_employee keeps everything else", () => {
-  const body = effective(CREATE).body;
+  const body = effective(CREATE_EFFECTIVE).body;
 
   for (const kept of [
     "v_caller := auth.uid();",
@@ -458,8 +510,14 @@ describe("create_employee keeps everything else", () => {
     "if not found or v_project_owner is distinct from v_caller then",
     "if p_display_name is null or btrim(p_display_name) = '' then",
     "if p_role is null or p_role not in ('owner', 'manager', 'cashier') then",
-    "if p_pin is null or p_pin !~ '^[0-9]{4,6}$' then",
-    "values (p_project_id, btrim(p_display_name), p_role, public.employee_pin_hash(p_pin))",
+    // 4-6 became exactly 4 in 20260919120000; the rule is still checked here,
+    // just at its current value.
+    "if p_pin is null or p_pin !~ '^[0-9]{4}$' then",
+    // The insert is multi-line now that it carries employee_code, so the
+    // property is asserted rather than the formatting: what reaches the column
+    // is a hash, and the display name is still trimmed.
+    "public.employee_pin_hash(p_pin)",
+    "btrim(p_display_name)",
   ]) {
     it(`keeps: ${kept.slice(0, 70)}`, () => {
       expect(body).toContain(kept);
@@ -470,7 +528,12 @@ describe("create_employee keeps everything else", () => {
     const success = body.slice(body.lastIndexOf("return jsonb_build_object("));
     const keys = [...success.matchAll(/'(\w+)'\s*,/g)].map((m) => m[1]);
 
-    expect(keys).toEqual(["ok", "employeeId", "displayName", "role", "active", "createdAt"]);
+    // employeeCode joins the safe fields in 20260919120000: an owner creating
+    // an employee must be told the Employee ID that was accepted. Still no PIN
+    // material of any kind, which is the property this test exists for.
+    expect(keys).toEqual([
+      "ok", "employeeId", "displayName", "role", "employeeCode", "active", "createdAt",
+    ]);
     expect(success).not.toContain("pin");
   });
 
@@ -511,12 +574,16 @@ describe("set_employee_active keeps everything else", () => {
     const success = body.slice(body.lastIndexOf("return jsonb_build_object("));
     const keys = [...success.matchAll(/'(\w+)'\s*,/g)].map((m) => m[1]);
 
-    expect(keys).toEqual(["ok", "employeeId", "displayName", "role", "active", "deactivatedAt"]);
+    // Same addition, same reason: the caller is told which Employee ID the
+    // employee holds after the change.
+    expect(keys).toEqual([
+      "ok", "employeeId", "displayName", "role", "employeeCode", "active", "deactivatedAt",
+    ]);
   });
 });
 
 describe("duplicate PINs remain legal", () => {
-  for (const key of [CREATE, "set_employee_pin(uuid,text)"]) {
+  for (const key of [CREATE_EFFECTIVE, "set_employee_pin(uuid,text)"]) {
     it(`${key}: no duplicate scan, helper, error or loop; still hashes`, () => {
       const body = effective(key).body;
 
@@ -534,8 +601,8 @@ describe("duplicate PINs remain legal", () => {
   });
 
   it("NEGATIVE CONTROL: restoring the helper call is detected", () => {
-    const mutated = effective(CREATE).body.replace(
-      "  insert into public.employees",
+    const mutated = effective(CREATE_EFFECTIVE).body.replace(
+      "insert into public.employees",
       "  if public.employee_project_pin_taken(p_project_id, p_pin, null) then\n    return null;\n  end if;\n  insert into public.employees"
     );
 
@@ -553,10 +620,13 @@ describe("selector and single-hash login are untouched", () => {
     expect([...schema.keys()].filter((k) => k.startsWith("employee_login("))).toEqual(["employee_login(uuid,text)"]);
   });
 
-  it("employee_login is still 1A.1's, verifying exactly one hash with no iteration", () => {
+  it("employee_login still verifies exactly one hash, with no iteration", () => {
     const login = effective("employee_login(uuid,text)");
 
-    expect(login.file).toBe(F1A1);
+    // UPDATED: 20260919120000 re-creates it to tighten the PIN to exactly four
+    // digits. The single-hash property this test protects is untouched, so it
+    // is asserted against the effective body rather than pinned to 1A.1.
+    expect(login.file).toBe("20260919120000_employee_code_and_four_digit_pin.sql");
     expect(login.body.split("employee_pin_verify(").length - 1).toBe(1);
     expect(login.body).not.toMatch(/\b(loop|foreach|while)\b/i);
   });
@@ -566,7 +636,13 @@ describe("selector and single-hash login are untouched", () => {
       .filter(([key, def]) => key !== "employee_pin_verify(text,text)" && def.body.includes("employee_pin_verify("))
       .map(([key]) => key);
 
-    expect(verifiers).toEqual(["employee_login(uuid,text)"]);
+    // employee_login_by_code is the new primary path and verifies one real
+    // hash; its two extra calls are the fixed-dummy verification that stops an
+    // unknown Employee ID answering measurably faster than a wrong PIN.
+    expect(verifiers.sort()).toEqual([
+      "employee_login(uuid,text)",
+      "employee_login_by_code(text,text)",
+    ]);
   });
 
   it("the selector is still 1A.1's, returning only employeeId and displayName", () => {

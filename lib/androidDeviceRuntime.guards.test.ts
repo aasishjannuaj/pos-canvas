@@ -259,8 +259,13 @@ describe("the packaged bundle contains a POS and no server", () => {
       "sale-queue", // the durable queue's object store
       "uncertain-online-sale", // 24.5F's evidence record
       "OFFLINE RECEIPT", // the approved provisional receipt wording
-      "complete_sale_v3", // online checkout
-      "complete_sale_v4", // queued sync
+      // UPDATED BY v1.3 Feature 1B-RUNTIME. Both paired-device sale paths
+      // converged on complete_sale_v5 at the approved cutover; v3 and v4 are
+      // no longer compiled into the device bundle at all. This guard only runs
+      // when a built bundle is present, and the bundle is a gitignored
+      // artifact, so it stayed dormant through that change and was still
+      // naming the retired RPCs.
+      "complete_sale_v5", // online checkout AND queued sync
     ]) {
       expect(`bundle is missing ${marker}`).toBe(`bundle is missing ${marker}`);
       expect(bundle).toContain(marker);

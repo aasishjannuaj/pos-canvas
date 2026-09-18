@@ -410,8 +410,9 @@ describe("the installer carries the runtime and nothing customer-specific", () =
       "sale-queue",
       "uncertain-online-sale",
       "OFFLINE RECEIPT",
-      "complete_sale_v3",
-      "complete_sale_v4",
+      // UPDATED BY v1.3 Feature 1B-RUNTIME, for the same reason as the
+      // Android guard: the device bundle now speaks only complete_sale_v5.
+      "complete_sale_v5",
     ]) {
       expect(`runtime missing ${marker}`).toBe(`runtime missing ${marker}`);
       expect(bundle).toContain(marker);

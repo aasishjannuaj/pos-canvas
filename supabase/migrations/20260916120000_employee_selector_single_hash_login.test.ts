@@ -276,15 +276,27 @@ describe("migration ordering and immutability", () => {
     }
   });
 
-  it("no later migration redefines the login or the selector", () => {
-    // Later forward migrations may exist; the single-hash contract established
-    // here must remain the effective one.
+  it("only the checkpoint-1 migration redefines the login, and nothing redefines the selector", () => {
+    // NARROWED BY v1.3 Feature 1B-RUNTIME checkpoint 1.
+    //
+    // 20260919120000 re-creates employee_login(uuid,text) for ONE reason: the
+    // PIN contract tightened from 4-6 digits to exactly 4, and every credential
+    // path had to converge. The single-hash, no-iteration property this file
+    // exists to protect is asserted against the effective body further down,
+    // and still holds.
+    //
+    // list_login_employees is still off limits to every later migration, and
+    // checkpoint 1 deliberately leaves it alone.
+    const SUPERSEDED_BY = "20260919120000_employee_code_and_four_digit_pin.sql";
     const later = allMigrations.filter((m) => m.file > FILENAME);
 
     for (const { file, text } of later) {
       const redefined = definitionsIn(text, file).map((d) => `${d.name}(${d.types})`);
 
-      expect(redefined).not.toContain("employee_login(uuid,text)");
+      if (file !== SUPERSEDED_BY) {
+        expect(redefined).not.toContain("employee_login(uuid,text)");
+      }
+
       expect(redefined).not.toContain("list_login_employees()");
     }
   });
@@ -380,8 +392,12 @@ describe("employee_login(text) is retired, with no compatibility wrapper", () =>
 describe("employee_login verifies exactly one hash", () => {
   const login = effective("employee_login(uuid,text)");
 
-  it("the effective login is the one defined here", () => {
-    expect(login.file).toBe(FILENAME);
+  it("the effective login is checkpoint 1's, which changed only the PIN rule", () => {
+    // Re-created by 20260919120000 to tighten 4-6 digits to exactly 4. Every
+    // structural property this describe block checks — one verification, no
+    // iteration, no roster scan — is asserted against that effective body
+    // below, so the guard follows the code rather than pinning to a file.
+    expect(login.file).toBe("20260919120000_employee_code_and_four_digit_pin.sql");
   });
 
   it("calls the verifier exactly once", () => {
@@ -406,7 +422,13 @@ describe("employee_login verifies exactly one hash", () => {
       .filter(([key, def]) => key !== "employee_pin_verify(text,text)" && def.body.includes("employee_pin_verify("))
       .map(([key]) => key);
 
-    expect(verifiers).toEqual(["employee_login(uuid,text)"]);
+    // employee_login_by_code joins it as the new primary path. Its extra calls
+    // are the fixed-dummy verification that keeps an unknown Employee ID from
+    // answering measurably faster than a wrong PIN.
+    expect(verifiers.sort()).toEqual([
+      "employee_login(uuid,text)",
+      "employee_login_by_code(text,text)",
+    ]);
   });
 
   it("asserts the single verification at apply time", () => {
@@ -454,12 +476,19 @@ describe("employee_login verifies exactly one hash", () => {
 // ===========================================================================
 
 describe("duplicate-PIN scanning is gone", () => {
-  const OWNER_WRITERS = ["create_employee(uuid,text,text,text)", "set_employee_pin(uuid,text)"];
+  // UPDATED BY checkpoint 1. Two keys are needed now, because the signature
+  // this file WROTE and the signature that is EFFECTIVE are no longer the same:
+  // 20260919120000 replaced create_employee with a form that requires an
+  // Employee ID. bodyHere reads this file; effective reads the live schema.
+  const OWNER_WRITERS = [
+    { here: "create_employee(uuid,text,text,text)", now: "create_employee(uuid,text,text,text,text)" },
+    { here: "set_employee_pin(uuid,text)", now: "set_employee_pin(uuid,text)" },
+  ];
 
-  for (const key of OWNER_WRITERS) {
+  for (const { here, now: key } of OWNER_WRITERS) {
     it(`${key} no longer verifies, scans, or reports a duplicate`, () => {
       // Both the definition written here and whatever is effective now.
-      for (const body of [bodyHere(key), effective(key).body]) {
+      for (const body of [bodyHere(here), effective(key).body]) {
         expect(body).not.toContain("employee_pin_verify");
         expect(body).not.toContain("employee_project_pin_taken");
         expect(body).not.toContain("duplicate_pin");
@@ -504,7 +533,7 @@ describe("duplicate-PIN scanning is gone", () => {
   });
 
   it("NEGATIVE CONTROL: restoring the scan in create_employee is detected", () => {
-    const body = effective("create_employee(uuid,text,text,text)").body.replace(
+    const body = effective("create_employee(uuid,text,text,text,text)").body.replace(
       "  insert into public.employees",
       "  if public.employee_project_pin_taken(p_project_id, p_pin, null) then\n" +
         "    return jsonb_build_object('ok', false, 'error', 'duplicate_pin');\n  end if;\n\n" +
@@ -997,7 +1026,12 @@ describe("lock order", () => {
       .map(([key]) => key)
       .filter((key) => !key.startsWith("employee_login_record_"));
 
-    expect(callers).toEqual(["employee_login(uuid,text)"]);
+    // Both login paths write the limiters, and nothing else does. That is the
+    // property: the failure counters stay private to authentication.
+    expect(callers.sort()).toEqual([
+      "employee_login(uuid,text)",
+      "employee_login_by_code(text,text)",
+    ]);
   });
 
   it("asserts the lock order at apply time", () => {

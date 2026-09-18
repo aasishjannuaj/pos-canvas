@@ -696,7 +696,12 @@ const LOCKING_FUNCTIONS = [
   "employee_logout()",
   "set_employee_active(uuid,boolean)",
   "set_employee_pin(uuid,text)",
-  "create_employee(uuid,text,text,text)",
+  // UPDATED BY v1.3 Feature 1B-RUNTIME checkpoint 1: create_employee now takes
+  // an Employee ID, and the four-argument form is dropped. The new primary
+  // login is added here too — it takes the same paired_devices FOR UPDATE that
+  // employee_login does, so it belongs in the global lock-order analysis.
+  "create_employee(uuid,text,text,text,text)",
+  "employee_login_by_code(text,text)",
   "revoke_paired_device(uuid)",
   "unpair_own_device()",
   "offer_device_config_update(uuid,uuid)",
