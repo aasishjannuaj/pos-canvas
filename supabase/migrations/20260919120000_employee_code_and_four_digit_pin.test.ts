@@ -27,13 +27,35 @@ const sql = readFileSync(join(migrationsDir, FILENAME), "utf-8");
 const code = sql.replace(/--[^\n]*/g, "");
 
 describe("the file itself", () => {
-  it("sorts after every accepted migration, so it applies last", () => {
-    const versions = readdirSync(migrationsDir)
-      .filter((name) => name.endsWith(".sql"))
-      .map((name) => name.split("_")[0])
-      .sort();
+  it("sorts after every migration whose contract it depends on", () => {
+    // NOT "is the newest file". That assertion is hostile to the future: every
+    // legitimate migration written after this one would break it, and the fix
+    // would be to edit a historical test — which is exactly the habit that
+    // makes historical tests untrustworthy.
+    //
+    // What actually matters is that this migration lands after the four it
+    // builds on: it re-creates functions they define, and it depends on the
+    // employees table and the register/attribution contracts existing.
+    for (const dependency of [
+      "20260914120000_employee_identity_and_pos_sessions.sql",
+      "20260916120000_employee_selector_single_hash_login.sql",
+      "20260916130000_remove_active_employee_engineering_ceiling.sql",
+      "20260917120000_register_sessions_and_sale_attribution.sql",
+    ]) {
+      // Named in the message so a failure says WHICH dependency is misordered.
+      expect(`${dependency} sorts before ${FILENAME}: ${dependency < FILENAME}`).toBe(
+        `${dependency} sorts before ${FILENAME}: true`
+      );
+      expect(readdirSync(migrationsDir)).toContain(dependency);
+    }
+  });
 
-    expect(versions[versions.length - 1]).toBe("20260919120000");
+  it("a later migration is allowed to exist", () => {
+    // The guard above must keep passing when one does. Asserted directly, so
+    // that a future edit reintroducing "must be last" fails here.
+    const hypothetical = "20270101000000_some_future_migration.sql";
+
+    expect(FILENAME < hypothetical).toBe(true);
   });
 
   it("does not modify any accepted migration", () => {

@@ -896,20 +896,75 @@ begin
     end if;
   end loop;
 
-  -- A3. The uniqueness is a PARTIAL unique index on (project_id, employee_code).
-  -- A plain unique index would have made a leaver's retained code block the
-  -- next hire, which is exactly the behaviour this feature must not have.
-  select pg_get_indexdef(i.indexrelid) into v_text
-  from pg_index i
-  where i.indrelid = 'public.employees'::regclass
-    and i.indexrelid = 'public.employees_active_project_code_key'::regclass;
-
-  if v_text is null then
+  -- A3. The uniqueness is a PARTIAL unique index KEYED ON EXACTLY
+  -- (project_id, employee_code), IN THAT ORDER, over active rows only.
+  --
+  -- READ FROM pg_index, NOT FROM pg_get_indexdef's TEXT. The definition string
+  -- would satisfy a loose match while the actual keys were wrong -- and the
+  -- statement that created it says `if not exists`, so an index of the same
+  -- name created by something else would be silently adopted. This resolves the
+  -- real column numbers and compares them, which is the only way to tell the
+  -- intended index from one that merely shares its name.
+  --
+  -- Every failure below is fatal: a wrong index here is a live till letting two
+  -- people share an Employee ID.
+  if to_regclass('public.employees_active_project_code_key') is null then
     raise exception 'Missing index employees_active_project_code_key.';
   end if;
 
-  if v_text !~ 'UNIQUE' or v_text !~ 'WHERE active' then
-    raise exception 'employees_active_project_code_key must be UNIQUE ... WHERE active, found %.', v_text;
+  select i.indisunique,
+         i.indpred is not null as is_partial,
+         i.indnatts,
+         i.indnkeyatts,
+         array(
+           select a.attname::text
+           from unnest(i.indkey::smallint[]) with ordinality as k(attnum, ord)
+           join pg_attribute a
+             on a.attrelid = i.indrelid and a.attnum = k.attnum
+           order by k.ord
+         ) as key_columns,
+         pg_get_expr(i.indpred, i.indrelid) as predicate
+  into v_row
+  from pg_index i
+  where i.indexrelid = 'public.employees_active_project_code_key'::regclass;
+
+  if not v_row.indisunique then
+    raise exception 'employees_active_project_code_key is not UNIQUE.';
+  end if;
+
+  if not v_row.is_partial then
+    raise exception
+      'employees_active_project_code_key is not partial; a leaver''s retained code would block the next hire.';
+  end if;
+
+  -- Exactly two key columns, in this order. More, fewer, or swapped is a
+  -- different invariant wearing the right name.
+  if v_row.key_columns <> array['project_id', 'employee_code'] then
+    raise exception
+      'employees_active_project_code_key must be keyed on (project_id, employee_code), found (%).',
+      array_to_string(v_row.key_columns, ', ');
+  end if;
+
+  if v_row.indnatts <> 2 or v_row.indnkeyatts <> 2 then
+    raise exception
+      'employees_active_project_code_key must have exactly two columns and no INCLUDE, found % (% key).',
+      v_row.indnatts, v_row.indnkeyatts;
+  end if;
+
+  -- The predicate must be exactly "active", not merely mention it. `active or
+  -- true` would contain the word and index everything.
+  if btrim(coalesce(v_row.predicate, ''), '()') <> 'active' then
+    raise exception
+      'employees_active_project_code_key must be WHERE active, found WHERE %.',
+      coalesce(v_row.predicate, '<none>');
+  end if;
+
+  -- And it must really be on employees, not a same-named index elsewhere that
+  -- happened to be adopted by `if not exists`.
+  if (select i.indrelid from pg_index i
+      where i.indexrelid = 'public.employees_active_project_code_key'::regclass)
+     <> 'public.employees'::regclass then
+    raise exception 'employees_active_project_code_key is not an index on public.employees.';
   end if;
 
   -- A4. Every ACTIVE employee has a valid code, and no project has duplicates.
