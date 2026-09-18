@@ -125,6 +125,21 @@ describe("the device host owns the gates", () => {
 
     expect(callback.match(/completeDeviceSaleV5\(/g)).toHaveLength(1);
   });
+
+  it("the refusal re-read OBSERVES — it must never establish", () => {
+    // The correction, pinned at the call site. `deriveGateState()` with no
+    // argument establishes, and establishing here is what silently adopted a
+    // different employee or register after the server refused the sale.
+    const callback = app.slice(app.indexOf("const completeSale"), app.indexOf("const handleSaleRejected"));
+
+    expect(callback).toContain('deriveGateState("observe")');
+    expect(callback).not.toMatch(/deriveGateState\(\s*\)/);
+  });
+
+  it("only observe mode reaches applyRecoveryObservation, and it is the only user", () => {
+    expect(app).toContain("applyRecoveryObservation");
+    expect(app).toContain('mode === "observe"');
+  });
 });
 
 describe("the online device sale is v5, with expectations", () => {
@@ -263,6 +278,90 @@ describe("Android and Windows consume the same runtime", () => {
         expect(source).not.toContain(banned);
       }
     }
+  });
+});
+
+describe("the roster is requested, not assumed", () => {
+  const app = code(read(DEVICE_APP));
+  const gates = code(read("components/device/PosGates.tsx"));
+
+  it("the host asks for the roster automatically", () => {
+    // The defect: nothing called loadRoster on the way in, so a normal startup
+    // sat at the employee gate holding a list it had never requested.
+    expect(app).toContain("shouldLoadRoster");
+    expect(app).toContain("void loadRoster()");
+  });
+
+  it("the load conditions live in the pure module, not inline in the component", () => {
+    expect(app).toContain('from "@/lib/employeeRoster"');
+    expect(app).toContain("beginRosterLoad");
+    expect(app).toContain("applyRosterLoaded");
+    expect(app).toContain("applyRosterFailed");
+  });
+
+  it("a failed load is NOT turned into an empty roster", () => {
+    // The old code did `setRoster([])` on failure, which the selector then
+    // rendered as "this project has nobody".
+    const loader = app.slice(app.indexOf("const loadRoster"), app.indexOf("const refreshSaleStatus"));
+
+    expect(loader).toContain("applyRosterFailed()");
+    expect(loader).not.toContain("setRoster([])");
+  });
+
+  it("concurrent loads are refused", () => {
+    const loader = app.slice(app.indexOf("const loadRoster"), app.indexOf("const refreshSaleStatus"));
+
+    expect(loader).toContain("rosterInFlightRef.current");
+  });
+
+  it("only a confirmed empty response may say nobody can sign in", () => {
+    const claim = "No one can sign in on this till yet";
+
+    expect(gates).toContain(claim);
+    expect(gates).toContain("isRosterConfirmedEmpty(roster)");
+
+    // The claim must be guarded by that function and nothing weaker. Reading
+    // the rendered block proves the guard sits on the claim itself.
+    const guarded = gates.slice(
+      gates.indexOf("isRosterConfirmedEmpty(roster)"),
+      gates.indexOf(claim)
+    );
+
+    expect(guarded.length).toBeLessThan(200);
+  });
+
+  it("the selector receives the lifecycle, not a bare array", () => {
+    expect(gates).toContain("roster: RosterState");
+    expect(app).toContain("roster={roster}");
+  });
+});
+
+describe("recovery is an explicit act", () => {
+  const app = code(read(DEVICE_APP));
+  const gates = code(read("components/device/PosGates.tsx"));
+
+  it("both gates are told when they are a recovery surface", () => {
+    expect(app).toContain('recovery={gate.recovery === "employee"}');
+    expect(app).toContain('recovery={gate.recovery === "register"}');
+  });
+
+  it("adopting the open register is a button, never automatic", () => {
+    expect(gates).toContain("onAdoptCurrentRegister");
+    expect(app).toContain("handleAdoptCurrentRegister");
+
+    // The host's handler is reachable only from that callback prop.
+    expect(app).toContain("onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}");
+  });
+
+  it("the explicit adoption is the only caller of applyExplicitRegisterEstablished", () => {
+    expect(app.match(/applyExplicitRegisterEstablished\(/g)).toHaveLength(1);
+
+    const handler = app.slice(
+      app.indexOf("const handleAdoptCurrentRegister"),
+      app.indexOf("const handleCloseRegister")
+    );
+
+    expect(handler).toContain("applyExplicitRegisterEstablished(gateRef.current");
   });
 });
 

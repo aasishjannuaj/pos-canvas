@@ -25,6 +25,24 @@ import type { RegisterSession } from "@/lib/registerSession";
 /** Which screen the device host owes the operator. */
 export type PosGate = "employee" | "register" | "pos";
 
+/**
+ * What the operator must EXPLICITLY re-establish before another sale.
+ *
+ * Set only when the server has specifically proven that the till's displayed
+ * sale context was stale — complete_sale_v5 refused the expectations it was
+ * sent. It is deliberately NOT set by ordinary startup or reconnect: there,
+ * nothing has been disproved and a plain derivation is correct.
+ *
+ * WHY A SEPARATE FIELD RATHER THAN `establishedOnline: false`. Clearing that
+ * flag stops OFFLINE checkout, but it does not stop the POS from reopening: a
+ * re-derivation that finds a different employee and an open register would set
+ * it straight back to true and `resolvePosGate` would return "pos". The
+ * operator would then be selling under someone the server had just told the
+ * till was not who it thought. This field survives the re-derivation and forces
+ * the gate regardless of what the server reports.
+ */
+export type PosGateRecovery = "employee" | "register";
+
 export type PosGateState = {
   /** The employee POS session, as the server last reported it. */
   employee: EmployeeSession | null;
@@ -39,12 +57,20 @@ export type PosGateState = {
    * trusting what it holds.
    */
   establishedOnline: boolean;
+  /**
+   * Set after a stale-expectation refusal; cleared only by an explicit act.
+   *
+   * "The server says this is current, but a person must re-establish it before
+   * this till sells again."
+   */
+  recovery: PosGateRecovery | null;
 };
 
 export const EMPTY_POS_GATE_STATE: PosGateState = {
   employee: null,
   register: null,
   establishedOnline: false,
+  recovery: null,
 };
 
 /**
@@ -56,8 +82,13 @@ export const EMPTY_POS_GATE_STATE: PosGateState = {
  * offering a dead end.
  */
 export function resolvePosGate(state: PosGateState): PosGate {
-  if (state.employee === null) return "employee";
-  if (state.register === null) return "register";
+  // RECOVERY OUTRANKS WHAT THE TILL HOLDS. A pending recovery keeps the
+  // operator at the gate that re-establishes it even when the server has since
+  // reported a perfectly good employee and a perfectly good open register —
+  // because "the server has A" and "this operator chose A" are different
+  // claims, and only the second one may reopen the POS.
+  if (state.recovery === "employee" || state.employee === null) return "employee";
+  if (state.recovery === "register" || state.register === null) return "register";
 
   return "pos";
 }
@@ -83,7 +114,12 @@ const NOT_ESTABLISHED =
  * proven, and stores NULL when it cannot.
  */
 export function canCheckoutOffline(state: PosGateState): OfflineCheckoutGate {
-  if (!state.establishedOnline || state.employee === null || state.register === null) {
+  if (
+    state.recovery !== null ||
+    !state.establishedOnline ||
+    state.employee === null ||
+    state.register === null
+  ) {
     return { ok: false, reason: "not_established", message: NOT_ESTABLISHED };
   }
 
@@ -175,14 +211,17 @@ export function applySaleAttributionFailure(
   switch (failure) {
     case "employee_changed":
     case "employee_missing":
-      // The register may still be open, but it is re-derived anyway: the till
-      // has just been proven wrong about server state, so it re-asks for both.
-      return { employee: null, register: null, establishedOnline: false };
+    case "expectations_missing":
+      // The register may still be open, but it is re-established anyway: the
+      // till has just been proven wrong about server state, so it re-asks for
+      // both, and `recovery` makes the employee gate mandatory on the way back.
+      return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
     case "register_changed":
     case "register_closed":
-      return { ...state, register: null, establishedOnline: false };
-    case "expectations_missing":
-      return { employee: null, register: null, establishedOnline: false };
+      // The employee was NOT disproved, so they stay signed in — but the
+      // register must be re-established by a person, not by whatever the next
+      // derivation happens to find open.
+      return { ...state, register: null, establishedOnline: false, recovery: "register" };
   }
 }
 
@@ -202,7 +241,81 @@ export function applyServerDerivation(input: {
     employee: input.employee,
     register: input.register,
     establishedOnline: input.employee !== null && input.register !== null,
+    recovery: null,
   };
+}
+
+/**
+ * The re-read that follows a stale-expectation refusal. AUTHORITATIVE
+ * OBSERVATION, NOT ESTABLISHED AUTHORITY.
+ *
+ * The server has just proven this till wrong about its own sale context, so the
+ * runtime asks again — but what comes back may not reopen the POS. Two
+ * different claims are being kept apart here:
+ *
+ *   "the server currently reports Bo and register B"   — an observation
+ *   "this operator signed in as Bo and took register B" — authority
+ *
+ * Only the second may sell. So nothing observed is adopted: `establishedOnline`
+ * stays false, `recovery` survives, and `resolvePosGate` keeps the operator at
+ * the gate. The read is still worth making — it is what detects that the
+ * employee ALSO changed during a register recovery, which escalates.
+ *
+ * NOTHING OBSERVED IS EVEN STORED in the fields a sale reads. That is
+ * deliberate: an observed register that never lands in `state.register` cannot
+ * be claimed by `buildOfflineClaims`, cannot become an expectation, and cannot
+ * be reached by any future code path that forgets why this existed.
+ */
+export function applyRecoveryObservation(
+  state: PosGateState,
+  observed: { employee: EmployeeSession | null; register: RegisterSession | null }
+): PosGateState {
+  // Anything other than a register-only recovery sends the operator all the way
+  // back to the employee gate. A state with no recovery pending reaching this
+  // function is a caller bug, and the safe direction is the strict one.
+  if (state.recovery !== "register" || state.employee === null) {
+    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  }
+
+  // The register was the only thing disproved, so the signed-in employee may be
+  // carried — but ONLY while the server still reports the very same session. A
+  // different session id means the employee changed too, and that is an
+  // employee recovery, not a register one.
+  if (
+    observed.employee === null ||
+    observed.employee.employeeSessionId !== state.employee.employeeSessionId
+  ) {
+    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  }
+
+  return { employee: state.employee, register: null, establishedOnline: false, recovery: "register" };
+}
+
+/**
+ * The operator explicitly took the register that is open (register recovery).
+ *
+ * The one sanctioned way out of a register recovery without opening a new
+ * session: a person is shown which register the server reports and presses the
+ * button that adopts it. That press is the explicit act the contract requires —
+ * the till never performs it on their behalf.
+ */
+export function applyExplicitRegisterEstablished(
+  state: PosGateState,
+  register: RegisterSession
+): PosGateState {
+  if (state.employee === null) {
+    return EMPTY_POS_GATE_STATE;
+  }
+
+  return { employee: state.employee, register, establishedOnline: true, recovery: null };
+}
+
+/**
+ * The operator chose to switch employee. An explicit act, so no recovery is
+ * raised — but the POS closes until somebody signs in.
+ */
+export function beginEmployeeSwitch(state: PosGateState): PosGateState {
+  return { ...state, employee: null, establishedOnline: false };
 }
 
 /** The till lost its authority entirely: revoked, unpaired, signed out. */

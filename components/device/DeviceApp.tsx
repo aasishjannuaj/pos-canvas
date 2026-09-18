@@ -132,6 +132,7 @@ import {
 } from "@/lib/employee.rpc";
 import {
   getEmployeeLoginErrorMessage,
+  type EmployeeSession,
   type LoginEmployee,
 } from "@/lib/employeeSession";
 import {
@@ -140,15 +141,28 @@ import {
   openRegisterSession,
 } from "@/lib/register.rpc";
 import {
+  UNLOADED_ROSTER,
+  applyRosterFailed,
+  applyRosterLoaded,
+  beginRosterLoad,
+  resetRoster,
+  shouldLoadRoster,
+} from "@/lib/employeeRoster";
+import type { RosterState } from "@/lib/employeeRoster";
+import type { RegisterSession } from "@/lib/registerSession";
+import {
   getRegisterCloseMessage,
   getRegisterOpenMessage,
 } from "@/lib/registerSession";
 import {
   EMPTY_POS_GATE_STATE,
+  applyExplicitRegisterEstablished,
+  applyRecoveryObservation,
   applySaleAttributionFailure,
   applyServerDerivation,
   buildOfflineClaims,
   canCheckoutOffline,
+  beginEmployeeSwitch,
   classifySaleAttributionFailure,
   resolvePosGate,
   type PosGateState,
@@ -174,6 +188,9 @@ const EMPTY_SALE_STATUS: OfflineSaleStatus = {
   nextRetryAt: null,
   uncertainOnlineSale: false,
 };
+
+/** Which kind of server read a gate derivation is. See deriveGateState. */
+type GateDerivationMode = "establish" | "observe";
 
 export default function DeviceApp() {
   const [state, setState] = useState<DeviceState>({ status: "checking" });
@@ -361,7 +378,21 @@ export default function DeviceApp() {
    */
   const [gate, setGate] = useState<PosGateState>(EMPTY_POS_GATE_STATE);
   const gateRef = useRef<PosGateState>(EMPTY_POS_GATE_STATE);
-  const [roster, setRoster] = useState<readonly LoginEmployee[]>([]);
+  /**
+   * The login roster, as a LIFECYCLE rather than an array.
+   *
+   * An empty array could not tell "nobody has asked yet" apart from "this
+   * project genuinely has no one", so a normal startup announced the second
+   * while the truth was the first. lib/employeeRoster.ts keeps them apart.
+   */
+  const [roster, setRoster] = useState<RosterState>(UNLOADED_ROSTER);
+  /**
+   * Closes the window between "a fetch has been started" and "React has
+   * committed the loading state". `shouldLoadRoster` refuses to start a second
+   * load once the state says `loading`, but the state is not visible to the
+   * next effect run until the render lands; this ref is.
+   */
+  const rosterInFlightRef = useRef(false);
   const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
@@ -380,30 +411,53 @@ export default function DeviceApp() {
    * the till never promotes what it already holds, because the refusal is proof
    * it was wrong about server state.
    */
-  const deriveGateState = useCallback(async (): Promise<PosGateState> => {
-    const employee = await fetchCurrentEmployeeSession();
+  /**
+   * "establish" is the ordinary startup/reconnect read: whatever the server
+   * reports becomes this till's state, and the POS opens if both exist.
+   *
+   * "observe" is the read that follows a stale-expectation refusal. It asks the
+   * same questions and adopts NOTHING — see applyRecoveryObservation.
+   */
+  const deriveGateState = useCallback(
+    async (mode: GateDerivationMode = "establish"): Promise<PosGateState> => {
+      // A recovery-mode read never establishes anything. It asks the same two
+      // questions and applies the answer through applyRecoveryObservation,
+      // which keeps the recovery pending whatever comes back.
+      const observe = (observed: {
+        employee: EmployeeSession | null;
+        register: RegisterSession | null;
+      }): PosGateState => {
+        const next =
+          mode === "observe"
+            ? applyRecoveryObservation(gateRef.current, observed)
+            : applyServerDerivation(observed);
 
-    if (!employee.ok) {
-      const cleared = EMPTY_POS_GATE_STATE;
-      setGate(cleared);
-      return cleared;
-    }
+        setGate(next);
+        return next;
+      };
 
-    if (employee.session === null) {
-      const cleared = applyServerDerivation({ employee: null, register: null });
-      setGate(cleared);
-      return cleared;
-    }
+      const employee = await fetchCurrentEmployeeSession();
 
-    const register = await fetchCurrentRegisterSession();
-    const derived = applyServerDerivation({
-      employee: employee.session,
-      register: register.ok ? register.session : null,
-    });
+      if (!employee.ok) {
+        // The read itself failed. Nothing is established either way, and a
+        // pending recovery must survive a failed read rather than be forgotten
+        // by it — so this goes through the same function.
+        return observe({ employee: null, register: null });
+      }
 
-    setGate(derived);
-    return derived;
-  }, []);
+      if (employee.session === null) {
+        return observe({ employee: null, register: null });
+      }
+
+      const register = await fetchCurrentRegisterSession();
+
+      return observe({
+        employee: employee.session,
+        register: register.ok ? register.session : null,
+      });
+    },
+    []
+  );
 
   /**
    * True only while this till is ready AND online.
@@ -458,7 +512,7 @@ export default function DeviceApp() {
     const clear = setTimeout(() => {
       setGate(EMPTY_POS_GATE_STATE);
       setSelectedEmployee(null);
-      setRoster([]);
+      setRoster(resetRoster());
       setGateError(null);
     }, 0);
 
@@ -520,6 +574,39 @@ export default function DeviceApp() {
     [deriveGateState]
   );
 
+  /**
+   * The operator explicitly takes the register the server currently reports.
+   *
+   * THE ONLY WAY OUT OF A REGISTER RECOVERY THAT DOES NOT OPEN A NEW SESSION,
+   * and it exists because the alternative was worse: without it, a till whose
+   * register changed underneath it could only proceed by pressing "Open
+   * register" and typing an amount that `already_open` would then discard.
+   *
+   * IT IS STILL EXPLICIT. A person read what happened and pressed the button.
+   * The runtime never calls this on their behalf, which is the whole difference
+   * between this and the silent adoption being corrected.
+   */
+  const handleAdoptCurrentRegister = useCallback(async () => {
+    setGateBusy(true);
+    setGateError(null);
+
+    const current = await fetchCurrentRegisterSession();
+
+    setGateBusy(false);
+
+    if (!current.ok) {
+      setGateError("Could not check the register. Check the connection and try again.");
+      return;
+    }
+
+    if (current.session === null) {
+      setGateError("No register is open on this till. Open one to continue.");
+      return;
+    }
+
+    setGate(applyExplicitRegisterEstablished(gateRef.current, current.session));
+  }, []);
+
   /** Primitive close: lifecycle only, no cash reconciliation of any kind. */
   const handleCloseRegister = useCallback(async () => {
     const current = gateRef.current.register;
@@ -562,21 +649,60 @@ export default function DeviceApp() {
    * the project off this device's own pairing row.
    */
   const loadRoster = useCallback(async () => {
-    setGateBusy(true);
-    setGateError(null);
-
-    const result = await fetchLoginEmployees();
-
-    setGateBusy(false);
-
-    if (!result.ok) {
-      setRoster([]);
-      setGateError("Could not load the employee list. Check the connection and try again.");
+    // ONE REQUEST AT A TIME. The ref closes the window before React commits
+    // `loading`; `beginRosterLoad` closes it afterwards. Both are needed
+    // because the auto-load effect and the Refresh button can fire together.
+    if (rosterInFlightRef.current) {
       return;
     }
 
-    setRoster(result.employees);
+    rosterInFlightRef.current = true;
+    setRoster((current) => beginRosterLoad(current));
+
+    try {
+      const result = await fetchLoginEmployees();
+
+      // A FAILURE IS A STATE, NOT AN EMPTY LIST. It used to become `[]`, which
+      // the selector then read as "this project has nobody" — an outage
+      // rendered as a setup problem.
+      setRoster(result.ok ? applyRosterLoaded(result.employees) : applyRosterFailed());
+    } finally {
+      rosterInFlightRef.current = false;
+    }
   }, []);
+
+  /**
+   * The roster's automatic first load.
+   *
+   * WHY THIS EXISTS. Nothing used to request the roster on the way in: the only
+   * callers were the Refresh button and Switch employee, so a normal startup
+   * reached the employee gate holding an empty list and told the operator that
+   * nobody could sign in on this till. The list was never asked for.
+   *
+   * NARROW BY CONSTRUCTION. Every condition lives in `shouldLoadRoster`, which
+   * is pure and tested: ready, online, at the employee gate, nobody selected,
+   * and the roster never requested. A FAILED load is not retried here — that is
+   * the loop guard, and Refresh is how a person retries.
+   */
+  useEffect(() => {
+    if (
+      !shouldLoadRoster({
+        ready: state.status === "ready",
+        online: gateDerivationAllowed,
+        gate: resolvePosGate(gate),
+        employeeSelected: selectedEmployee !== null,
+        roster,
+      })
+    ) {
+      return;
+    }
+
+    const start = setTimeout(() => {
+      void loadRoster();
+    }, 0);
+
+    return () => clearTimeout(start);
+  }, [state.status, gateDerivationAllowed, gate, selectedEmployee, roster, loadRoster]);
 
   const refreshSaleStatus = useCallback(async () => {
     const status = await readOfflineSaleStatus();
@@ -1766,16 +1892,30 @@ export default function DeviceApp() {
       // STALE STATE IS NOT RETRIED. The server has just proven this till wrong
       // about who is signed in or which register is open; resubmitting would
       // put the sale under whatever is true now, which is precisely the silent
-      // misattribution the expectations exist to prevent. Forget what the
-      // server disagreed about, re-derive both, and make a person re-establish
-      // the gate. The cart is untouched, so the same sale can be rung again
-      // deliberately.
+      // misattribution the expectations exist to prevent. The cart is
+      // untouched, so the same sale can be rung again deliberately once the
+      // right context has been re-established BY A PERSON.
+      //
+      // THE RE-READ IS "observe", NOT "establish". This is the correction: an
+      // establishing derivation would find the server's current employee and
+      // current open register, mark them established, and reopen the POS on its
+      // own — adopting a context the operator never chose, one step after the
+      // refusal that was supposed to prevent exactly that. In observe mode the
+      // read still happens (it is what detects that the employee changed too),
+      // but nothing it returns can open a gate.
       const attribution = classifySaleAttributionFailure(result.error);
 
       if (attribution !== null) {
-        setGate(applySaleAttributionFailure(gateRef.current, attribution));
+        const recovering = applySaleAttributionFailure(gateRef.current, attribution);
+
+        // Written through the ref as well as through state: the observe pass
+        // below reads gateRef to decide how strict to be, and it must see the
+        // recovery this refusal just raised, not the state React has yet to
+        // commit.
+        gateRef.current = recovering;
+        setGate(recovering);
         setGateError(result.error);
-        void deriveGateState();
+        void deriveGateState("observe");
       }
 
       return result;
@@ -2295,9 +2435,10 @@ export default function DeviceApp() {
         if (posGate === "employee") {
           return selectedEmployee === null ? (
             <EmployeeSelector
-              employees={roster}
+              roster={roster}
               busy={gateBusy}
               error={gateError}
+              recovery={gate.recovery === "employee"}
               onSelect={(employee) => {
                 setGateError(null);
                 setSelectedEmployee(employee);
@@ -2324,12 +2465,14 @@ export default function DeviceApp() {
               employee={gate.employee}
               busy={gateBusy}
               error={gateError}
+              recovery={gate.recovery === "register"}
               onOpen={(openingCash) => void handleOpenRegister(openingCash)}
+              onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}
               onSwitchEmployee={() => {
                 setGateError(null);
                 void loadRoster();
                 setSelectedEmployee(null);
-                setGate({ ...gateRef.current, employee: null, establishedOnline: false });
+                setGate(beginEmployeeSwitch(gateRef.current));
               }}
             />
           );
@@ -2388,7 +2531,7 @@ export default function DeviceApp() {
                 setGateError(null);
                 void loadRoster();
                 setSelectedEmployee(null);
-                setGate({ ...gateRef.current, employee: null, establishedOnline: false });
+                setGate(beginEmployeeSwitch(gateRef.current));
               }}
               onLogout={() => void handleEmployeeLogout()}
               onCloseRegister={() => void handleCloseRegister()}

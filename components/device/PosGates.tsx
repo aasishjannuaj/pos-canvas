@@ -15,6 +15,8 @@
 import { useState } from "react";
 import type { EmployeeSession } from "@/lib/employeeSession";
 import type { LoginEmployee } from "@/lib/employeeSession";
+import type { RosterState } from "@/lib/employeeRoster";
+import { isRosterConfirmedEmpty, rosterEmployees } from "@/lib/employeeRoster";
 import { isValidEmployeePinShape } from "@/lib/employeeSession";
 import type { RegisterSession } from "@/lib/registerSession";
 import { getOpeningCashMessage, validateOpeningCash } from "@/lib/registerSession";
@@ -26,28 +28,55 @@ const PRIMARY =
   "disabled:cursor-not-allowed disabled:bg-neutral-300";
 const SECONDARY = "w-full rounded-xl border border-neutral-300 px-4 py-3 text-base text-neutral-700";
 
-/** The roster, as the server offers it. Names and ids only — never PIN material. */
+/**
+ * The roster, as the server offers it. Names and ids only — never PIN material.
+ *
+ * THE FOUR STATES ARE RENDERED AS FOUR STATES. This screen used to receive a
+ * bare array, so "we have not asked yet", "the request failed" and "this
+ * project has nobody" all arrived as `[]` and all rendered as the last one —
+ * telling an operator on a perfectly good till to go add an employee. Only a
+ * SUCCESSFUL, EMPTY response may say that now.
+ */
 export function EmployeeSelector({
-  employees,
+  roster,
   busy,
   error,
+  recovery,
   onSelect,
   onRetry,
 }: {
-  employees: readonly LoginEmployee[];
+  roster: RosterState;
   busy: boolean;
   error: string | null;
+  /** Set when a refused sale sent the operator back here. */
+  recovery: boolean;
   onSelect: (employee: LoginEmployee) => void;
   onRetry: () => void;
 }) {
+  const employees = rosterEmployees(roster);
+  const loading = roster.status === "loading" || roster.status === "unloaded";
+
   return (
     <div className={SCREEN}>
       <div className={PANEL}>
         <h1 className="text-lg font-semibold text-neutral-900">Who is on the till?</h1>
 
+        {/* The sale was refused because the signed-in employee is not who this
+            till thought. Someone must sign in again, deliberately — the till
+            will not adopt whoever the server reports. */}
+        {recovery && (
+          <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+            The signed-in employee changed. Sign in again to keep taking sales.
+          </p>
+        )}
+
         {error !== null && <p className="text-sm text-red-600">{error}</p>}
 
-        {employees.length === 0 && !busy && error === null && (
+        {roster.status === "failed" && <p className="text-sm text-red-600">{roster.message}</p>}
+
+        {loading && <p className="text-sm text-neutral-600">Loading employees…</p>}
+
+        {isRosterConfirmedEmpty(roster) && (
           <p className="text-sm text-neutral-600">
             No one can sign in on this till yet. Add an employee from the dashboard.
           </p>
@@ -67,8 +96,13 @@ export function EmployeeSelector({
           ))}
         </div>
 
-        <button type="button" className={SECONDARY} disabled={busy} onClick={onRetry}>
-          {busy ? "Loading…" : "Refresh"}
+        <button
+          type="button"
+          className={SECONDARY}
+          disabled={busy || roster.status === "loading"}
+          onClick={onRetry}
+        >
+          {roster.status === "loading" ? "Loading…" : "Refresh"}
         </button>
       </div>
     </div>
@@ -147,13 +181,19 @@ export function RegisterOpenPanel({
   employee,
   busy,
   error,
+  recovery,
   onOpen,
+  onAdoptCurrentRegister,
   onSwitchEmployee,
 }: {
   employee: EmployeeSession;
   busy: boolean;
   error: string | null;
+  /** Set when a refused sale sent the operator back here. */
+  recovery: boolean;
   onOpen: (openingCash: number) => void;
+  /** The explicit act that adopts the register the server currently reports. */
+  onAdoptCurrentRegister: () => void;
   onSwitchEmployee: () => void;
 }) {
   const [cash, setCash] = useState("");
@@ -180,6 +220,28 @@ export function RegisterOpenPanel({
       >
         <h1 className="text-lg font-semibold text-neutral-900">Open the register</h1>
         <p className="text-sm text-neutral-600">Signed in: {employee.displayName}</p>
+
+        {/* v1.3 Feature 1B-RUNTIME correction — the register recovery surface.
+            The sale was refused because the register this till was selling
+            through is not the one the server holds. The till does NOT adopt the
+            current register by itself; it says so, and offers a button. The
+            press is the explicit act that re-establishes checkout. */}
+        {recovery && (
+          <>
+            <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+              The register changed on this till. Take the register that is open now, or open a
+              new one.
+            </p>
+            <button
+              type="button"
+              className={SECONDARY}
+              disabled={busy}
+              onClick={onAdoptCurrentRegister}
+            >
+              {busy ? "Checking…" : "Use the register that is open"}
+            </button>
+          </>
+        )}
 
         <label className="text-sm text-neutral-600" htmlFor="opening-cash">
           Cash in the drawer

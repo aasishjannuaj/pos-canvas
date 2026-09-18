@@ -30,8 +30,6 @@ const ADA: EmployeeSession = {
   startedAt: "2026-09-18T02:00:00.000Z",
 };
 
-const BO: EmployeeSession = { ...ADA, employeeSessionId: "sess-bo", employeeId: "emp-bo", displayName: "Bo" };
-
 const REGISTER: RegisterSession = {
   registerSessionId: "reg-1",
   openedAt: "2026-09-18T02:05:00.000Z",
@@ -41,7 +39,7 @@ const REGISTER: RegisterSession = {
   closedByEmployeeId: null,
 };
 
-const established: PosGateState = { employee: ADA, register: REGISTER, establishedOnline: true };
+const established: PosGateState = { employee: ADA, register: REGISTER, establishedOnline: true, recovery: null };
 
 describe("which gate the till stands at", () => {
   it("asks for an employee first", () => {
@@ -49,7 +47,7 @@ describe("which gate the till stands at", () => {
   });
 
   it("asks for a register once an employee is signed in", () => {
-    expect(resolvePosGate({ employee: ADA, register: null, establishedOnline: false })).toBe("register");
+    expect(resolvePosGate({ employee: ADA, register: null, establishedOnline: false, recovery: null })).toBe("register");
   });
 
   it("opens the POS only when both exist", () => {
@@ -59,7 +57,7 @@ describe("which gate the till stands at", () => {
   it("returns to the employee gate when the employee is gone, even with a register", () => {
     // The order is the contract: a register cannot be opened — or sold
     // through — without someone signed in.
-    expect(resolvePosGate({ employee: null, register: REGISTER, establishedOnline: false })).toBe(
+    expect(resolvePosGate({ employee: null, register: REGISTER, establishedOnline: false, recovery: null })).toBe(
       "employee"
     );
   });
@@ -78,14 +76,14 @@ describe("Policy 1 — offline checkout needs state established online", () => {
   });
 
   it("blocks when only the employee is established", () => {
-    expect(canCheckoutOffline({ employee: ADA, register: null, establishedOnline: false }).ok).toBe(
+    expect(canCheckoutOffline({ employee: ADA, register: null, establishedOnline: false, recovery: null }).ok).toBe(
       false
     );
   });
 
   it("blocks when only the register is established", () => {
     expect(
-      canCheckoutOffline({ employee: null, register: REGISTER, establishedOnline: false }).ok
+      canCheckoutOffline({ employee: null, register: REGISTER, establishedOnline: false, recovery: null }).ok
     ).toBe(false);
   });
 
@@ -93,7 +91,7 @@ describe("Policy 1 — offline checkout needs state established online", () => {
     // The whole point of establishedOnline: holding an employee and a register
     // is not the same as having derived them. A till that assembled this from
     // stale UI state must not sell on it.
-    expect(canCheckoutOffline({ employee: ADA, register: REGISTER, establishedOnline: false }).ok).toBe(
+    expect(canCheckoutOffline({ employee: ADA, register: REGISTER, establishedOnline: false, recovery: null }).ok).toBe(
       false
     );
   });
@@ -125,6 +123,7 @@ describe("server derivation is the only way state is established", () => {
       employee: ADA,
       register: null,
       establishedOnline: false,
+      recovery: null,
     });
   });
 
@@ -160,26 +159,26 @@ describe("stale-state refusals from complete_sale_v5", () => {
     expect(classifySaleAttributionFailure(null)).toBeNull();
   });
 
-  it("an employee refusal drops both sessions and un-establishes", () => {
-    expect(applySaleAttributionFailure(established, "employee_changed")).toEqual(
-      EMPTY_POS_GATE_STATE
-    );
-    expect(applySaleAttributionFailure(established, "employee_missing")).toEqual(
-      EMPTY_POS_GATE_STATE
-    );
+  it("an employee refusal drops both sessions and demands an EMPLOYEE recovery", () => {
+    for (const failure of ["employee_changed", "employee_missing", "expectations_missing"] as const) {
+      expect(applySaleAttributionFailure(established, failure)).toEqual({
+        employee: null,
+        register: null,
+        establishedOnline: false,
+        recovery: "employee",
+      });
+    }
   });
 
-  it("a register refusal keeps the employee but drops the register", () => {
-    expect(applySaleAttributionFailure(established, "register_changed")).toEqual({
-      employee: ADA,
-      register: null,
-      establishedOnline: false,
-    });
-    expect(applySaleAttributionFailure(established, "register_closed")).toEqual({
-      employee: ADA,
-      register: null,
-      establishedOnline: false,
-    });
+  it("a register refusal keeps the employee and demands a REGISTER recovery", () => {
+    for (const failure of ["register_changed", "register_closed"] as const) {
+      expect(applySaleAttributionFailure(established, failure)).toEqual({
+        employee: ADA,
+        register: null,
+        establishedOnline: false,
+        recovery: "register",
+      });
+    }
   });
 
   it("every refusal leaves the till unable to check out offline until it re-derives", () => {
@@ -196,16 +195,12 @@ describe("stale-state refusals from complete_sale_v5", () => {
 
   it("a switch mid-cart cannot silently become the new employee", () => {
     // The refusal names the employee, so the till forgets who it thought was
-    // signed in. Re-deriving brings back Bo; the sale is NOT resubmitted, and
-    // nothing here reuses the old expectation.
+    // signed in and REMEMBERS THAT SOMEONE MUST SIGN IN AGAIN. The sale is not
+    // resubmitted, and nothing here reuses the old expectation.
     const afterRefusal = applySaleAttributionFailure(established, "employee_changed");
 
     expect(afterRefusal.employee).toBeNull();
+    expect(afterRefusal.recovery).toBe("employee");
     expect(resolvePosGate(afterRefusal)).toBe("employee");
-
-    const rederived = applyServerDerivation({ employee: BO, register: REGISTER });
-
-    expect(rederived.employee?.employeeId).toBe("emp-bo");
-    expect(buildOfflineClaims(rederived).employeePosSessionId).toBe("sess-bo");
   });
 });
