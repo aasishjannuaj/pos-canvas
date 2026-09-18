@@ -196,6 +196,15 @@ export async function completeOfflineSale(input: {
   cart: readonly CartItem[];
   paymentMethod: PaymentMethod;
   now: number;
+  /**
+   * v1.3 Feature 1B — the employee and register this till had established when
+   * the sale was rung, stored on the record as HISTORICAL CLAIMS.
+   *
+   * Optional so every pre-Feature-1B caller and test is unchanged. They are not
+   * part of the sale's financial content and take no part in equivalence: a
+   * stored record still matches a retry of the same cart whatever these say.
+   */
+  claims?: { employeePosSessionId: string | null; registerSessionId: string | null };
 }): Promise<OfflineSaleOutcome> {
   const attempted = buildOfflineEnqueueInput({
     draft: input.draft,
@@ -203,6 +212,7 @@ export async function completeOfflineSale(input: {
     cart: input.cart,
     paymentMethod: input.paymentMethod,
     now: input.now,
+    claims: input.claims,
   });
 
   const enqueued = await enqueueSale(attempted);

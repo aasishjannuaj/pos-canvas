@@ -99,14 +99,18 @@ describe("rollout safety: authoring exists only because every host calls v3", ()
     }
   });
 
-  it("every checkout host calls a v3 entry point", () => {
+  it("every checkout host calls its approved modifier-capable entry point", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the device host moved to
+    // completeDeviceSaleV5. Owner and Builder stay on v3 by decision, which is
+    // what the other two assertions still pin. Every host is still asserted
+    // individually, so a host that stops submitting sales fails loudly.
     // Asserted per host rather than over a filtered list, so a host that stops
     // submitting sales entirely fails loudly instead of passing vacuously.
     expect(code(read("components/runtime/OwnerPosRuntime.tsx"))).toContain(
       "completeSaleOrderV3"
     );
     expect(code(read("components/device/DeviceApp.tsx"))).toContain(
-      "completeDeviceSaleV3"
+      "completeDeviceSaleV5"
     );
     expect(code(read("components/editor/EditorShell.tsx"))).toContain(
       "completeSaleOrderV3"

@@ -73,7 +73,9 @@ const ALL_APP_SOURCES = [
  */
 const MODIFIER_CAPABLE_SURFACES: { file: string; entryPoint: string }[] = [
   { file: "components/runtime/OwnerPosRuntime.tsx", entryPoint: "completeSaleOrderV3" },
-  { file: "components/device/DeviceApp.tsx", entryPoint: "completeDeviceSaleV3" },
+  // UPDATED BY v1.3 Feature 1B-RUNTIME: the device host's approved entry point
+  // is completeDeviceSaleV5. Owner and Builder stay on v3.
+  { file: "components/device/DeviceApp.tsx", entryPoint: "completeDeviceSaleV5" },
   { file: "components/editor/EditorShell.tsx", entryPoint: "completeSaleOrderV3" },
 ];
 

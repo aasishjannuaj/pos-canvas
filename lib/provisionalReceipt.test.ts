@@ -86,6 +86,8 @@ function record(overrides: Partial<QueuedSale> = {}): QueuedSale {
     serverOrderId: null,
     serverOrderNumber: null,
     serverCreatedAt: null,
+    employeePosSessionId: null,
+    registerSessionId: null,
     ...overrides,
   };
 }

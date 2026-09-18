@@ -360,11 +360,20 @@ describe("Feature 24.5A stops at read-only startup", () => {
     // and the sync adapter now issues v4 — both are the approved work. The
     // surviving property is where that call may live: exactly one adapter, and
     // never the checkout path.
-    const v4Callers = productSourceFiles().filter((file) =>
-      code(read(file)).includes('rpc("complete_sale_v4"')
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the queued-sale adapter submits v5.
+    // The surviving property is where that call may live — one adapter, never
+    // the checkout path.
+    const queueCallers = productSourceFiles().filter((file) =>
+      code(read(file)).includes('rpc("complete_sale_v5"')
     );
 
-    expect(v4Callers).toEqual(["lib/offlineSaleRpc.ts"]);
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. Online device sales and queued device
+    // sales now use the SAME server function (complete_sale_v5), so "who may
+    // call that RPC" is no longer one module — it is exactly two, each owning
+    // one path: lib/device.rpc.ts for the live checkout and lib/offlineSaleRpc.ts
+    // for the queue. The property that matters is unchanged: no component, no
+    // checkout surface and no template may issue the call itself.
+    expect(queueCallers).toEqual(["lib/device.rpc.ts", "lib/offlineSaleRpc.ts"]);
 
     for (const file of [RUNTIME, DEVICE_APP, "lib/device.rpc.ts", "lib/saleSubmission.ts"]) {
       const source = code(read(file));

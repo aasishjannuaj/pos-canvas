@@ -442,11 +442,14 @@ describe("the installer carries the runtime and nothing customer-specific", () =
     );
   });
 
-  it("v3 stays online checkout and v4 stays queue-sync only", () => {
+  it("online checkout and queue sync stay in their own adapters", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: online device sales are v5 through
+    // lib/device.rpc.ts, and queued sales are v5 through lib/offlineSaleRpc.ts.
+    // The separation being guarded is unchanged.
     const rpc = code(read("lib/device.rpc.ts"));
 
-    expect(rpc).toContain('rpc("complete_sale_v3"');
+    expect(rpc).toContain('rpc("complete_sale_v5"');
     expect(rpc).not.toContain("complete_sale_v4");
-    expect(code(read("lib/offlineSaleRpc.ts"))).toContain('rpc("complete_sale_v4"');
+    expect(code(read("lib/offlineSaleRpc.ts"))).toContain('rpc("complete_sale_v5"');
   });
 });

@@ -94,6 +94,14 @@ export type EnqueueSaleInput = {
   items: QueuedSaleItem[];
   occurredAt: string;
   now: string;
+  /**
+   * v1.3 Feature 1B — the historical attribution claims, or null.
+   *
+   * OPTIONAL ON THE INPUT so every existing caller and test compiles unchanged;
+   * the record always stores an explicit null rather than an absent key.
+   */
+  employeePosSessionId?: string | null;
+  registerSessionId?: string | null;
 };
 
 /**
@@ -141,6 +149,10 @@ export async function enqueueSale(input: EnqueueSaleInput): Promise<QueueResult<
     serverOrderId: null,
     serverOrderNumber: null,
     serverCreatedAt: null,
+    // Claims only. The server decides whether it can prove them; a sale is
+    // never refused for lacking them.
+    employeePosSessionId: input.employeePosSessionId ?? null,
+    registerSessionId: input.registerSessionId ?? null,
   };
 
   // Validated BEFORE it is written, using the same reader that guards every

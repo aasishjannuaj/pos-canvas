@@ -156,6 +156,27 @@ export type QueuedSale = {
   serverOrderId: string | null;
   serverOrderNumber: string | null;
   serverCreatedAt: string | null;
+
+  /**
+   * v1.3 Feature 1B — the HISTORICAL attribution claims for this sale.
+   *
+   * ADDITIVE AND OPTIONAL, exactly as 24.5D's server fields above are, and for
+   * the same reason: the envelope version does not move, so a record written
+   * before these existed still deserializes and still syncs. Absent reads back
+   * as null, which is precisely what "this till could not claim anything" means.
+   *
+   * CLAIMS, NEVER AUTHORITY, AND NEVER FINANCIAL. complete_sale_v5 validates
+   * each one against its own history — the session must belong to the syncing
+   * device, its employee to that device's project, and occurred_at must fall
+   * inside the interval — and stores NULL for whichever cannot be proven. A
+   * financially valid sale is never refused because one of these fails.
+   *
+   * Deliberately OUTSIDE the financial payload: they are not part of
+   * saleContentSignature and not part of the server's canonical hash, so a sale
+   * whose operator or register changed later is still the same sale.
+   */
+  employeePosSessionId: string | null;
+  registerSessionId: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -612,6 +633,12 @@ export function readQueuedSale(value: unknown): QueueReadResult {
       serverOrderNumber: nullableString(raw.serverOrderNumber),
       // Held to the same bar as every other timestamp in this record.
       serverCreatedAt: serverCreatedAt.value,
+      // v1.3 Feature 1B — absent on every record written before this feature,
+      // and absent whenever the till had nothing to claim. Null either way: a
+      // missing claim is never a reason to refuse a record that is otherwise
+      // readable, because the money it represents has already changed hands.
+      employeePosSessionId: nonEmptyString(raw.employeePosSessionId),
+      registerSessionId: nonEmptyString(raw.registerSessionId),
     },
   };
 }

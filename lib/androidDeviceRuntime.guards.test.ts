@@ -602,8 +602,14 @@ describe("the revoked screen is not a dead end", () => {
     }
   });
 
-  it("v4 is still the only offline sync path", () => {
-    expect(code(read("lib/offlineSaleRpc.ts"))).toContain('rpc("complete_sale_v4"');
+  it("one adapter is still the only offline sync path", () => {
+        // UPDATED BY v1.3 Feature 1B-RUNTIME. The device runtime's approved sale
+    // cutover moved the ONLINE paired-device path from complete_sale_v3 to
+    // complete_sale_v5 and the OFFLINE sync adapter from complete_sale_v4 to
+    // complete_sale_v5. What this guard protects is unchanged: exactly one
+    // module may invoke the sale RPC, the device host may not reach a retired
+    // entry point, and the owner/browser host stays where it is.
+    expect(code(read("lib/offlineSaleRpc.ts"))).toContain('rpc("complete_sale_v5"');
     expect(code(read("lib/device.rpc.ts"))).not.toContain("complete_sale_v4");
 
     const engine = code(read("lib/saleSyncEngine.ts"));
@@ -643,10 +649,12 @@ describe("packaging changed no financial behaviour", () => {
     expect(rpc).not.toContain("complete_sale_v4");
   });
 
-  it("complete_sale_v4 is still reachable only from the sync adapter", () => {
+  it("the queued-sale RPC is still reachable only from the sync adapter", () => {
     const adapter = code(read("lib/offlineSaleRpc.ts"));
 
-    expect(adapter).toContain('rpc("complete_sale_v4"');
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the adapter now submits v5. It is
+    // still the only module that submits a queued sale at all.
+    expect(adapter).toContain('rpc("complete_sale_v5"');
 
     const engine = code(read("lib/saleSyncEngine.ts"));
 

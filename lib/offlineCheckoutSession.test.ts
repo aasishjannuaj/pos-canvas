@@ -1017,6 +1017,8 @@ describe("a duplicate key is a success only when it is the SAME sale", () => {
       serverOrderId: null,
       serverOrderNumber: null,
       serverCreatedAt: null,
+    employeePosSessionId: null,
+    registerSessionId: null,
     };
 
     // Canonically identical.

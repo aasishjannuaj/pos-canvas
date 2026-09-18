@@ -217,10 +217,13 @@ describe("24.5C stores intents and submits nothing", () => {
     expect(app).toContain("describeOfflineCheckoutBlock(");
   });
 
-  it("online checkout still calls complete_sale_v3, never v4", () => {
+  it("online checkout calls its own entry point, never the queued-sale one", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: online device sales call v5 directly,
+    // and the queued-sale adapter now submits v5 too. The property guarded here
+    // is unchanged — the online path must never reach the QUEUE's adapter.
     const rpc = read(RPC);
 
-    expect(rpc).toContain('rpc("complete_sale_v3"');
+    expect(rpc).toContain('rpc("complete_sale_v5"');
     expect(rpc).not.toContain("complete_sale_v4");
 
     // NARROWED BY 24.5D. The sync adapter now legitimately issues v4 — that is
@@ -228,10 +231,16 @@ describe("24.5C stores intents and submits nothing", () => {
     // never touches it: an online sale goes to v3, and the runtime knows
     // nothing about the offline RPC.
     const callers = productSourceFiles().filter((file) =>
-      code(read(file)).includes('rpc("complete_sale_v4"')
+      code(read(file)).includes('rpc("complete_sale_v5"')
     );
 
-    expect(callers).toEqual(["lib/offlineSaleRpc.ts"]);
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. Online device sales and queued device
+    // sales now use the SAME server function (complete_sale_v5), so "who may
+    // call that RPC" is no longer one module — it is exactly two, each owning
+    // one path: lib/device.rpc.ts for the live checkout and lib/offlineSaleRpc.ts
+    // for the queue. The property that matters is unchanged: no component, no
+    // checkout surface and no template may issue the call itself.
+    expect(callers).toEqual(["lib/device.rpc.ts", "lib/offlineSaleRpc.ts"]);
 
     for (const file of [
       "lib/device.rpc.ts",

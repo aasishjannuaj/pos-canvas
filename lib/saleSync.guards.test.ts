@@ -60,13 +60,21 @@ function productSourceFiles(): string[] {
 // Where v4 may be called from
 // ---------------------------------------------------------------------------
 
-describe("complete_sale_v4 is reachable from exactly one adapter", () => {
+// UPDATED BY v1.3 Feature 1B-RUNTIME: the queued-sale RPC is complete_sale_v5.
+// One adapter, one caller — the property is unchanged.
+describe("the queued-sale RPC is reachable from exactly one adapter", () => {
   it("only lib/offlineSaleRpc.ts issues the RPC", () => {
     const callers = productSourceFiles().filter((file) =>
-      code(read(file)).includes('rpc("complete_sale_v4"')
+      code(read(file)).includes('rpc("complete_sale_v5"')
     );
 
-    expect(callers).toEqual([RPC_ADAPTER]);
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. Online device sales and queued device
+    // sales now use the SAME server function (complete_sale_v5), so "who may
+    // call that RPC" is no longer one module — it is exactly two, each owning
+    // one path: lib/device.rpc.ts for the live checkout and lib/offlineSaleRpc.ts
+    // for the queue. The property that matters is unchanged: no component, no
+    // checkout surface and no template may issue the call itself.
+    expect(callers).toEqual(["lib/device.rpc.ts", RPC_ADAPTER]);
   });
 
   it("the adapter is imported only by the sync engine", () => {
@@ -80,7 +88,7 @@ describe("complete_sale_v4 is reachable from exactly one adapter", () => {
   it("the ordinary device RPC module knows nothing about v4", () => {
     const rpc = code(read(DEVICE_RPC));
 
-    expect(rpc).toContain('rpc("complete_sale_v3"');
+    expect(rpc).toContain('rpc("complete_sale_v5"');
     expect(rpc).not.toContain("complete_sale_v4");
     expect(rpc).not.toContain("offline_queued");
   });

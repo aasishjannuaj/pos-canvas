@@ -27,8 +27,14 @@ import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import DeviceSyncStatus from "@/components/device/DeviceSyncStatus";
 import {
+  EmployeePinEntry,
+  EmployeeSelector,
+  RegisterOpenPanel,
+  RegisterStatus,
+} from "@/components/device/PosGates";
+import {
   applyDeviceConfigUpdate,
-  completeDeviceSaleV3,
+  completeDeviceSaleV5,
   fetchDeviceConfig,
   fetchDevicePairingState,
   getDeviceSession,
@@ -118,6 +124,35 @@ import {
   resolveUncertainSale,
 } from "@/lib/uncertainSaleSession";
 import type { UncertainSale } from "@/lib/saleSubmission";
+import {
+  employeeLogin,
+  employeeLogout,
+  fetchCurrentEmployeeSession,
+  fetchLoginEmployees,
+} from "@/lib/employee.rpc";
+import {
+  getEmployeeLoginErrorMessage,
+  type LoginEmployee,
+} from "@/lib/employeeSession";
+import {
+  closeRegisterSession,
+  fetchCurrentRegisterSession,
+  openRegisterSession,
+} from "@/lib/register.rpc";
+import {
+  getRegisterCloseMessage,
+  getRegisterOpenMessage,
+} from "@/lib/registerSession";
+import {
+  EMPTY_POS_GATE_STATE,
+  applySaleAttributionFailure,
+  applyServerDerivation,
+  buildOfflineClaims,
+  canCheckoutOffline,
+  classifySaleAttributionFailure,
+  resolvePosGate,
+  type PosGateState,
+} from "@/lib/posGate";
 import type {
   PosRuntimeArmOnlineSale,
   PosRuntimeCompleteSale,
@@ -314,6 +349,234 @@ export default function DeviceApp() {
    * yet" is not the same claim as "this till cannot go offline".
    */
   const [offlinePrepared, setOfflinePrepared] = useState<boolean | null>(null);
+
+  /**
+   * v1.3 Feature 1B — the employee and register this till has established.
+   *
+   * IN MEMORY ONLY, DELIBERATELY. Nothing here is written to storage: an
+   * employee session and an open register are server state, and a till that
+   * remembered them across a restart would be inventing authority it no longer
+   * holds. Every start and every reconnect re-derives both from the server, and
+   * Policy 1 gates offline checkout on having done so in THIS app run.
+   */
+  const [gate, setGate] = useState<PosGateState>(EMPTY_POS_GATE_STATE);
+  const gateRef = useRef<PosGateState>(EMPTY_POS_GATE_STATE);
+  const [roster, setRoster] = useState<readonly LoginEmployee[]>([]);
+  const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+
+  useEffect(() => {
+    gateRef.current = gate;
+  }, [gate]);
+
+
+
+  /**
+   * Re-derives BOTH sessions from the server.
+   *
+   * The only way gate state is ever established. Used at startup, after a
+   * reconnect, and after any sale the server refused on attribution grounds —
+   * the till never promotes what it already holds, because the refusal is proof
+   * it was wrong about server state.
+   */
+  const deriveGateState = useCallback(async (): Promise<PosGateState> => {
+    const employee = await fetchCurrentEmployeeSession();
+
+    if (!employee.ok) {
+      const cleared = EMPTY_POS_GATE_STATE;
+      setGate(cleared);
+      return cleared;
+    }
+
+    if (employee.session === null) {
+      const cleared = applyServerDerivation({ employee: null, register: null });
+      setGate(cleared);
+      return cleared;
+    }
+
+    const register = await fetchCurrentRegisterSession();
+    const derived = applyServerDerivation({
+      employee: employee.session,
+      register: register.ok ? register.session : null,
+    });
+
+    setGate(derived);
+    return derived;
+  }, []);
+
+  /**
+   * True only while this till is ready AND online.
+   *
+   * Flipping false→true is the reconnect signal: the effect below re-derives
+   * both sessions from the server rather than promoting whatever the till was
+   * holding while it was offline.
+   */
+  const gateDerivationAllowed =
+    state.status === "ready" && getDeviceRuntimeMode(state) !== "offline";
+
+  /**
+   * Startup and reconnect derivation.
+   *
+   * Runs whenever the till is ready and ONLINE. Offline it does nothing at all:
+   * there is no server to ask, and inventing state from what the last screen
+   * showed is the one thing Policy 1 forbids. A till that goes offline keeps
+   * what it established; a till that STARTS offline holds nothing and cannot
+   * check out until it reconnects.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed) {
+      return;
+    }
+
+    // Deferred out of the commit phase, and cancellable — the same shape the
+    // revoked-drain effect below uses, for the same two reasons. A till that
+    // leaves this screen before the timer fires never starts a derivation whose
+    // answer nothing will read.
+    const start = setTimeout(() => {
+      void deriveGateState();
+    }, 0);
+
+    return () => clearTimeout(start);
+  }, [gateDerivationAllowed, deriveGateState]);
+
+  /**
+   * A pairing that stops being ready takes every established session with it.
+   *
+   * The clearing is deferred the same way, but note what that does NOT mean:
+   * the gate this guards is read from `gateRef`, which the checkout path
+   * consults directly, and `resolvePosGate` derives the screen from state that
+   * is already empty in the cases that matter. A cleanup that lands a tick late
+   * cannot widen the offline gate, because a till that is not `ready` has no
+   * POS mounted to sell from in the first place.
+   */
+  useEffect(() => {
+    if (state.status === "ready") {
+      return;
+    }
+
+    const clear = setTimeout(() => {
+      setGate(EMPTY_POS_GATE_STATE);
+      setSelectedEmployee(null);
+      setRoster([]);
+      setGateError(null);
+    }, 0);
+
+    return () => clearTimeout(clear);
+  }, [state.status]);
+
+  /** Signs the selected employee in, or switches the till to them. */
+  const handleEmployeeLogin = useCallback(
+    async (employeeId: string, pin: string) => {
+      setGateBusy(true);
+      setGateError(null);
+
+      // EVERY submitted attempt reaches the server, malformed or not: the
+      // per-device throttle can only count what it sees.
+      const result = await employeeLogin(employeeId, pin);
+
+      if (!result.ok) {
+        setGateBusy(false);
+        setGateError(getEmployeeLoginErrorMessage(result.error, result.retryAfterSeconds ?? null));
+        return;
+      }
+
+      // Re-derived rather than assumed from the login reply: signing in also
+      // decides whether a register is already open on this till.
+      await deriveGateState();
+      setGateBusy(false);
+      setSelectedEmployee(null);
+    },
+    [deriveGateState]
+  );
+
+  /** Opens the register on this till. */
+  const handleOpenRegister = useCallback(
+    async (openingCash: number) => {
+      setGateBusy(true);
+      setGateError(null);
+
+      // One request id per attempt, reused by nothing else: a retry of a lost
+      // response is the caller's to make with the same id, and a different
+      // amount under the same id is a conflict rather than an overwrite.
+      const result = await openRegisterSession(crypto.randomUUID(), openingCash);
+
+      setGateBusy(false);
+
+      if (!result.ok) {
+        // already_open carries the session that IS open, so the till adopts it
+        // instead of asking the cashier to resolve a race they did not cause.
+        if (result.code === "already_open" && result.session !== null) {
+          await deriveGateState();
+          return;
+        }
+
+        setGateError(getRegisterOpenMessage(result.code));
+        return;
+      }
+
+      await deriveGateState();
+    },
+    [deriveGateState]
+  );
+
+  /** Primitive close: lifecycle only, no cash reconciliation of any kind. */
+  const handleCloseRegister = useCallback(async () => {
+    const current = gateRef.current.register;
+
+    if (current === null) {
+      return;
+    }
+
+    setGateBusy(true);
+    setGateError(null);
+
+    const result = await closeRegisterSession(current.registerSessionId);
+
+    setGateBusy(false);
+
+    if (!result.ok) {
+      setGateError(getRegisterCloseMessage(result.code));
+      return;
+    }
+
+    // An already-closed reply is a success: the server returned the state it
+    // already holds, and the till simply catches up to it.
+    await deriveGateState();
+  }, [deriveGateState]);
+
+  /** Signs the current employee out. The register is left open, deliberately. */
+  const handleEmployeeLogout = useCallback(async () => {
+    setGateBusy(true);
+    setGateError(null);
+
+    await employeeLogout();
+    await deriveGateState();
+
+    setGateBusy(false);
+    setSelectedEmployee(null);
+  }, [deriveGateState]);
+
+  /**
+   * Loads the roster the selector offers. Names and ids only; the server reads
+   * the project off this device's own pairing row.
+   */
+  const loadRoster = useCallback(async () => {
+    setGateBusy(true);
+    setGateError(null);
+
+    const result = await fetchLoginEmployees();
+
+    setGateBusy(false);
+
+    if (!result.ok) {
+      setRoster([]);
+      setGateError("Could not load the employee list. Check the connection and try again.");
+      return;
+    }
+
+    setRoster(result.employees);
+  }, []);
 
   const refreshSaleStatus = useCallback(async () => {
     const status = await readOfflineSaleStatus();
@@ -1469,14 +1732,55 @@ export default function DeviceApp() {
   // and still returns the server's authoritative receipt; nothing about it
   // touches the queue.
   const completeSale: PosRuntimeCompleteSale = useCallback(
-    // Feature 18.2 — the device now calls complete_sale_v3.
-    async (input) => completeDeviceSaleV3({
-      projectId: input.projectId,
-      paymentMethod: input.paymentMethod,
-      items: input.items,
-      saleRequestId: input.saleRequestId,
-    }),
-    []
+    // v1.3 Feature 1B-RUNTIME — the device now calls complete_sale_v5.
+    //
+    // NO PROJECT ID: v5 derives the project, the device, the employee and the
+    // register from this device's own pairing row and the sessions open on it.
+    // The two ids below are EXPECTATIONS the server compares against what it
+    // has locked; they never become the stored attribution.
+    //
+    // A sale cannot be attempted at all without both, because PosRuntime is
+    // only mounted once the gates are satisfied — but the guard is restated
+    // here rather than assumed, since this callback is what a future host would
+    // reuse.
+    async (input) => {
+      const current = gateRef.current;
+
+      if (current.employee === null || current.register === null) {
+        return {
+          receipt: null,
+          error: "Sign in an employee and open the register before taking a sale.",
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
+      const result = await completeDeviceSaleV5({
+        paymentMethod: input.paymentMethod,
+        items: input.items,
+        saleRequestId: input.saleRequestId,
+        expectedEmployeePosSessionId: current.employee.employeeSessionId,
+        expectedRegisterSessionId: current.register.registerSessionId,
+      });
+
+      // STALE STATE IS NOT RETRIED. The server has just proven this till wrong
+      // about who is signed in or which register is open; resubmitting would
+      // put the sale under whatever is true now, which is precisely the silent
+      // misattribution the expectations exist to prevent. Forget what the
+      // server disagreed about, re-derive both, and make a person re-establish
+      // the gate. The cart is untouched, so the same sale can be rung again
+      // deliberately.
+      const attribution = classifySaleAttributionFailure(result.error);
+
+      if (attribution !== null) {
+        setGate(applySaleAttributionFailure(gateRef.current, attribution));
+        setGateError(result.error);
+        void deriveGateState();
+      }
+
+      return result;
+    },
+    [deriveGateState]
   );
 
   /**
@@ -1551,6 +1855,15 @@ export default function DeviceApp() {
       // identity behind for the retry rather than minting a second one.
       offlineDraftRef.current = drafted.draft;
 
+      // v1.3 Feature 1B — Policy 1, restated at the durable write. The UI is
+      // already gated, but this is the last point before money becomes a record
+      // and it must not depend on which screen was rendered.
+      const attribution = canCheckoutOffline(gateRef.current);
+
+      if (!attribution.ok) {
+        return { ok: false, message: attribution.message };
+      }
+
       const outcome = await completeOfflineSale({
         session: eligibility.session,
         config: eligibility.config,
@@ -1558,6 +1871,9 @@ export default function DeviceApp() {
         cart: input.cart,
         paymentMethod: input.paymentMethod,
         now,
+        // HISTORICAL CLAIMS, validated by the server at sync time and stored as
+        // NULL when they cannot be proven. Never a reason to refuse the sale.
+        claims: buildOfflineClaims(gateRef.current),
       });
 
       if (!outcome.ok) {
@@ -1954,7 +2270,71 @@ export default function DeviceApp() {
       // positive answer. An undecided device (null) and a refused one both
       // block, so there is no state in which "we have not checked yet" reads
       // as "go ahead".
-      const offlineSaleAllowed = offlineMode && offlineCheckout?.ok === true;
+      // v1.3 Feature 1B Policy 1 — an offline checkout ALSO requires an
+      // employee and a register established from the server during this app
+      // run. The disk-side eligibility above is unchanged; this is the second
+      // condition, and it is why an offline cold start can sell nothing.
+      const offlineAttribution = canCheckoutOffline(gate);
+      const offlineSaleAllowed =
+        offlineMode && offlineCheckout?.ok === true && offlineAttribution.ok;
+
+      // v1.3 Feature 1B-RUNTIME — the gates.
+      //
+      // ORDER IS THE CONTRACT: employee, then register, then the POS. A
+      // register cannot be opened without a signed-in employee, so offering it
+      // first would be offering a dead end. Both gates are device-HOST screens:
+      // PosRuntime is not mounted until they are satisfied, so no template ever
+      // sees employee or register logic.
+      //
+      // OFFLINE, THE GATES ARE NOT RENDERED AS A WAY IN. Neither can be
+      // satisfied without a server, so an offline till with nothing established
+      // shows the ordinary offline runtime and simply cannot check out.
+      const posGate = resolvePosGate(gate);
+
+      if (!offlineMode && posGate !== "pos") {
+        if (posGate === "employee") {
+          return selectedEmployee === null ? (
+            <EmployeeSelector
+              employees={roster}
+              busy={gateBusy}
+              error={gateError}
+              onSelect={(employee) => {
+                setGateError(null);
+                setSelectedEmployee(employee);
+              }}
+              onRetry={() => void loadRoster()}
+            />
+          ) : (
+            <EmployeePinEntry
+              employee={selectedEmployee}
+              busy={gateBusy}
+              error={gateError}
+              onSubmit={(pin) => void handleEmployeeLogin(selectedEmployee.employeeId, pin)}
+              onCancel={() => {
+                setGateError(null);
+                setSelectedEmployee(null);
+              }}
+            />
+          );
+        }
+
+        if (gate.employee !== null) {
+          return (
+            <RegisterOpenPanel
+              employee={gate.employee}
+              busy={gateBusy}
+              error={gateError}
+              onOpen={(openingCash) => void handleOpenRegister(openingCash)}
+              onSwitchEmployee={() => {
+                setGateError(null);
+                void loadRoster();
+                setSelectedEmployee(null);
+                setGate({ ...gateRef.current, employee: null, establishedOnline: false });
+              }}
+            />
+          );
+        }
+      }
 
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
@@ -1995,6 +2375,26 @@ export default function DeviceApp() {
               submission fails as a transport error, every record is preserved,
               and the backoff is unchanged. Availability keys on the queue's own
               counts, never on navigator.onLine. */}
+          {/* v1.3 Feature 1B — who is on the till and which register is open.
+              A device-host control, beside the sync status, so the register
+              lifecycle never enters a template. */}
+          {gate.employee !== null && gate.register !== null && (
+            <RegisterStatus
+              employee={gate.employee}
+              register={gate.register}
+              busy={gateBusy}
+              error={gateError}
+              onSwitchEmployee={() => {
+                setGateError(null);
+                void loadRoster();
+                setSelectedEmployee(null);
+                setGate({ ...gateRef.current, employee: null, establishedOnline: false });
+              }}
+              onLogout={() => void handleEmployeeLogout()}
+              onCloseRegister={() => void handleCloseRegister()}
+            />
+          )}
+
           <DeviceSyncStatus
             status={saleStatus}
             syncing={syncing}
