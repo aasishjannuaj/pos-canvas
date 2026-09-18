@@ -353,15 +353,48 @@ describe("recovery is an explicit act", () => {
     expect(app).toContain("onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}");
   });
 
-  it("the explicit adoption is the only caller of applyExplicitRegisterEstablished", () => {
-    expect(app.match(/applyExplicitRegisterEstablished\(/g)).toHaveLength(1);
-
-    const handler = app.slice(
-      app.indexOf("const handleAdoptCurrentRegister"),
-      app.indexOf("const handleCloseRegister")
+  it("one helper owns every establishment out of a register recovery", () => {
+    // applyExplicitRegisterEstablished is reachable only from
+    // establishRegisterAfterRecovery, so there is exactly one place that can
+    // turn a register recovery into an established pair.
+    const helper = app.slice(
+      app.indexOf("const establishRegisterAfterRecovery"),
+      app.indexOf("/** Opens the register on this till. */")
     );
 
-    expect(handler).toContain("applyExplicitRegisterEstablished(gateRef.current");
+    expect(helper).toContain("applyExplicitRegisterEstablished(gateRef.current");
+    // Every occurrence in the file is inside that helper.
+    expect(app.match(/applyExplicitRegisterEstablished\(/g)?.length).toBe(
+      helper.match(/applyExplicitRegisterEstablished\(/g)?.length
+    );
+  });
+
+  it("that helper reads BOTH sessions before establishing anything", () => {
+    // The defect: adopting the register while revalidating only the register
+    // could pair a locally-held employee with a freshly-read register.
+    const helper = app.slice(
+      app.indexOf("const establishRegisterAfterRecovery"),
+      app.indexOf("/** Opens the register on this till. */")
+    );
+
+    expect(helper).toContain("fetchCurrentEmployeeSession()");
+    expect(helper).toContain("fetchCurrentRegisterSession()");
+    // A failed read establishes nothing, and says so explicitly.
+    expect(helper.match(/\{ ok: false \}/g)?.length).toBe(2);
+  });
+
+  it("the Open register path routes its RECOVERY case through the same helper", () => {
+    // Same class: open_register_session opens under the SERVER's current
+    // employee session, so an establishing derivation afterwards would adopt
+    // whoever that is.
+    const handler = app.slice(
+      app.indexOf("const handleOpenRegister"),
+      app.indexOf("const handleAdoptCurrentRegister")
+    );
+
+    expect(handler).toContain('gateRef.current.recovery === "register"');
+    // Both exits — a fresh open and an already_open adoption — are covered.
+    expect(handler.match(/establishRegisterAfterRecovery\(\)/g)).toHaveLength(2);
   });
 });
 

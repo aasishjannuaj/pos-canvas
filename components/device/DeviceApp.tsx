@@ -544,6 +544,50 @@ export default function DeviceApp() {
     [deriveGateState]
   );
 
+  const establishRegisterAfterRecovery = useCallback(async () => {
+    // BOTH SESSIONS, FRESHLY READ. Reading only the register would let the till
+    // pair a locally-held employee with a newly-read register and call that
+    // established — although the server may have moved to a different employee
+    // in the meantime. The press authorizes taking the REGISTER; it is not
+    // authorization to switch EMPLOYEE.
+    const employee = await fetchCurrentEmployeeSession();
+
+    if (!employee.ok) {
+      setGate(applyExplicitRegisterEstablished(gateRef.current, { ok: false }));
+      setGateError("Could not check who is signed in. Check the connection and try again.");
+      return;
+    }
+
+    const register = await fetchCurrentRegisterSession();
+
+    if (!register.ok) {
+      setGate(applyExplicitRegisterEstablished(gateRef.current, { ok: false }));
+      setGateError("Could not check the register. Check the connection and try again.");
+      return;
+    }
+
+    const next = applyExplicitRegisterEstablished(gateRef.current, {
+      ok: true,
+      employee: employee.session,
+      register: register.session,
+    });
+
+    setGate(next);
+
+    // The pure transition has already decided; these only explain it. An
+    // escalation to the employee gate is the one an operator most needs told,
+    // because the screen changes under them.
+    if (next.recovery === "employee") {
+      setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+      setSelectedEmployee(null);
+      return;
+    }
+
+    setGateError(
+      next.recovery === "register" ? "No register is open on this till. Open one to continue." : null
+    );
+  }, []);
+
   /** Opens the register on this till. */
   const handleOpenRegister = useCallback(
     async (openingCash: number) => {
@@ -555,23 +599,50 @@ export default function DeviceApp() {
       // amount under the same id is a conflict rather than an overwrite.
       const result = await openRegisterSession(crypto.randomUUID(), openingCash);
 
-      setGateBusy(false);
+      // SAME CLASS AS THE ADOPT BUTTON, AND CORRECTED THE SAME WAY. During a
+      // register recovery the till is holding an employee it has not
+      // revalidated, and open_register_session opens under the server's OWN
+      // current employee session — never one the client names. So if the server
+      // had moved to Bo, this call opens a register belonging to Bo and an
+      // establishing derivation would then adopt Bo, turning a register
+      // recovery into an employee switch nobody performed.
+      //
+      // Routing the recovery case through the revalidating path closes it: the
+      // employee is compared by POS session identity, and a mismatch escalates
+      // to the employee gate instead of establishing. The register the server
+      // opened is real and stays open — it is recorded against whoever the
+      // server says opened it, which is the truth — and it is adopted only once
+      // somebody signs in and proves who they are.
+      const recovering = gateRef.current.recovery === "register";
 
       if (!result.ok) {
         // already_open carries the session that IS open, so the till adopts it
         // instead of asking the cashier to resolve a race they did not cause.
         if (result.code === "already_open" && result.session !== null) {
-          await deriveGateState();
+          if (recovering) {
+            await establishRegisterAfterRecovery();
+          } else {
+            await deriveGateState();
+          }
+
+          setGateBusy(false);
           return;
         }
 
+        setGateBusy(false);
         setGateError(getRegisterOpenMessage(result.code));
         return;
       }
 
-      await deriveGateState();
+      if (recovering) {
+        await establishRegisterAfterRecovery();
+      } else {
+        await deriveGateState();
+      }
+
+      setGateBusy(false);
     },
-    [deriveGateState]
+    [deriveGateState, establishRegisterAfterRecovery]
   );
 
   /**
@@ -586,26 +657,17 @@ export default function DeviceApp() {
    * The runtime never calls this on their behalf, which is the whole difference
    * between this and the silent adoption being corrected.
    */
+  /**
+   * The operator pressed "Use the register that is open".
+   *
+   * The button is the human act; every decision about whether it may establish
+   * anything belongs to the pure transition above.
+   */
   const handleAdoptCurrentRegister = useCallback(async () => {
     setGateBusy(true);
-    setGateError(null);
-
-    const current = await fetchCurrentRegisterSession();
-
+    await establishRegisterAfterRecovery();
     setGateBusy(false);
-
-    if (!current.ok) {
-      setGateError("Could not check the register. Check the connection and try again.");
-      return;
-    }
-
-    if (current.session === null) {
-      setGateError("No register is open on this till. Open one to continue.");
-      return;
-    }
-
-    setGate(applyExplicitRegisterEstablished(gateRef.current, current.session));
-  }, []);
+  }, [establishRegisterAfterRecovery]);
 
   /** Primitive close: lifecycle only, no cash reconciliation of any kind. */
   const handleCloseRegister = useCallback(async () => {

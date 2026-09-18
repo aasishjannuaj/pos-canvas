@@ -292,22 +292,83 @@ export function applyRecoveryObservation(
 }
 
 /**
- * The operator explicitly took the register that is open (register recovery).
+ * What the server reported when a register recovery was resolved.
  *
- * The one sanctioned way out of a register recovery without opening a new
- * session: a person is shown which register the server reports and presses the
- * button that adopts it. That press is the explicit act the contract requires —
- * the till never performs it on their behalf.
+ * `ok: false` means a read failed. It is a distinct case rather than a pair of
+ * nulls, because "the server says nobody is signed in" and "we could not ask"
+ * must not collapse into the same transition — the first is information, the
+ * second is the absence of it.
+ */
+export type RegisterRecoveryObservation =
+  | { ok: false }
+  | { ok: true; employee: EmployeeSession | null; register: RegisterSession | null };
+
+/**
+ * Resolves a register recovery from a FRESH READ OF BOTH SESSIONS.
+ *
+ * WHY BOTH. The recovery deliberately keeps the employee — they were not what
+ * the server disproved — and the operator's press authorizes taking the
+ * REGISTER. It is not authorization to switch EMPLOYEE. Reading only the
+ * register would let the till pair a locally-held Ada with a freshly-read
+ * register B and call the pair established, although the server had moved to Bo
+ * in between. Nothing would have proven Ada was still signed in.
+ *
+ * That pair is worse than useless: an online v5 sale would refuse the stale
+ * employee expectation, but if connectivity dropped first, Policy 1 would see
+ * `establishedOnline` and let a NEW OFFLINE SALE be taken under an employee the
+ * server had already replaced.
+ *
+ * SO THE EMPLOYEE IS COMPARED BY POS SESSION IDENTITY, not by employee id and
+ * certainly not by display name. A new session for the same person is still a
+ * different session, and complete_sale_v5 compares session ids too — matching
+ * anything weaker here would just move the refusal later.
+ *
+ * FAILS CLOSED IN EVERY DIRECTION. A mismatch, a missing employee or a failed
+ * read all end with `establishedOnline: false` and a recovery still pending.
+ * The only outcome that establishes is the one where the server confirms the
+ * very same employee session AND an open register.
  */
 export function applyExplicitRegisterEstablished(
   state: PosGateState,
-  register: RegisterSession
+  observed: RegisterRecoveryObservation
 ): PosGateState {
+  // No retained employee to revalidate against: there is nothing this function
+  // could safely establish, so it sends the operator all the way back.
   if (state.employee === null) {
-    return EMPTY_POS_GATE_STATE;
+    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
   }
 
-  return { employee: state.employee, register, establishedOnline: true, recovery: null };
+  // A read failed. Change nothing except the certainty that nothing is
+  // established; the operator stays on the recovery surface and can retry.
+  if (!observed.ok) {
+    return { ...state, register: null, establishedOnline: false, recovery: "register" };
+  }
+
+  // The employee is gone, or is somebody else. EITHER WAY THIS IS NOW AN
+  // EMPLOYEE RECOVERY: the observed employee is not adopted, not stored, and
+  // not claimable — somebody must sign in, with a PIN, before this till sells.
+  if (
+    observed.employee === null ||
+    observed.employee.employeeSessionId !== state.employee.employeeSessionId
+  ) {
+    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  }
+
+  // The employee holds, but there is no register to take. The recovery stands
+  // and the operator can open one.
+  if (observed.register === null) {
+    return { employee: state.employee, register: null, establishedOnline: false, recovery: "register" };
+  }
+
+  // Both confirmed, by the server, at the same moment, with the employee
+  // proven to be the one the operator established earlier. THE ONLY
+  // ESTABLISHING OUTCOME.
+  return {
+    employee: observed.employee,
+    register: observed.register,
+    establishedOnline: true,
+    recovery: null,
+  };
 }
 
 /**
