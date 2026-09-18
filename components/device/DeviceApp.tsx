@@ -2668,90 +2668,90 @@ export default function DeviceApp() {
               a boolean prop. The cart is untouched — this blocks interaction,
               not state. */}
           <div className="min-h-0 flex-1" inert={activeOverlay !== null}>
-        <PosRuntime
-          // Stock tracking is stripped for display: the pinned snapshot's
-          // stockQuantity is frozen at build time and is NOT live inventory.
-          // The server still enforces stock inside complete_sale_v3, and
-          // complete_sale_v4 floors it at zero for a queued sale rather than
-          // destroying the sale (docs/OFFLINE_ARCHITECTURE.md §9).
-          config={toDeviceDisplayConfig(state.config)}
-          submitSale={completeSale}
-          // No live stock source: `projects` is invisible to a device under RLS.
-          refreshStock={null}
-          // A till has nowhere to go back to.
-          homeLink={null}
-          // Feature 25.1 — the ONLY entry point to device settings on a healthy
-          // till. In the header rather than beside checkout: unpairing is an
-          // occasional administrative act, and a destructive control next to the
-          // pay button is a control that eventually gets pressed by accident.
-          // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
-          // Android viewport two full buttons would leave the business name
-          // almost nothing; a menu costs a fixed ~40px and has room to grow.
-          headerTrailing={
-            <OperatorMenu
-              onOpenHistory={() => {
-                setHistoryOrder(null);
-                setHistoryOpen(true);
-              }}
-              onOpenSettings={() => {
-                setResetNotice(null);
-                setSettingsOpen(true);
-              }}
+            <PosRuntime
+              // Stock tracking is stripped for display: the pinned snapshot's
+              // stockQuantity is frozen at build time and is NOT live inventory.
+              // The server still enforces stock inside complete_sale_v3, and
+              // complete_sale_v4 floors it at zero for a queued sale rather than
+              // destroying the sale (docs/OFFLINE_ARCHITECTURE.md §9).
+              config={toDeviceDisplayConfig(state.config)}
+              submitSale={completeSale}
+              // No live stock source: `projects` is invisible to a device under RLS.
+              refreshStock={null}
+              // A till has nowhere to go back to.
+              homeLink={null}
+              // Feature 25.1 — the ONLY entry point to device settings on a healthy
+              // till. In the header rather than beside checkout: unpairing is an
+              // occasional administrative act, and a destructive control next to the
+              // pay button is a control that eventually gets pressed by accident.
+              // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
+              // Android viewport two full buttons would leave the business name
+              // almost nothing; a menu costs a fixed ~40px and has room to grow.
+              headerTrailing={
+                <OperatorMenu
+                  onOpenHistory={() => {
+                    setHistoryOrder(null);
+                    setHistoryOpen(true);
+                  }}
+                  onOpenSettings={() => {
+                    setResetNotice(null);
+                    setSettingsOpen(true);
+                  }}
+                />
+              }
+              // Feature 19 — the logo origin. A device reads its logo from the
+              // PINNED snapshot's path, so replacing the owner's logo later cannot
+              // change what this till displays. Public bucket: no signing, and no
+              // storage grant a device does not already have.
+              logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
+              onSaleRejected={handleSaleRejected}
+              // Feature 24.5E — the fence now closes only when an offline sale
+              // would NOT be safe. Online is unaffected (null, as always). Offline
+              // and eligible passes null too, and supplies the durable handler
+              // below instead. Offline and ineligible states the reason.
+              // v1.3 Feature 1B-RUNTIME — AND a pending gate closes it too.
+              //
+              // The overlay above already stops a person reaching the pay button
+              // and `inert` stops every other route to it. This is the third,
+              // innermost fence, and it is the one that does not depend on the UI
+              // at all: checkoutBlockedReason is the FIRST statement in
+              // PosRuntime's completeSale, ahead of planSaleSubmission, submitSale
+              // and the durable enqueue. No sale RPC is called, no request id is
+              // minted and no record is written while a gate is pending.
+              //
+              // Offline, the attribution reason is reported as itself. It used to
+              // fall through to "storage_unavailable", which told an operator the
+              // disk had failed when what had actually happened was that Policy 1
+              // had nothing established to sell under.
+              checkoutBlockedReason={
+                !offlineMode
+                  ? describePosGateBlock(gate)
+                  : !offlineSaleAllowed
+                    ? !offlineAttribution.ok
+                      ? offlineAttribution.message
+                      : offlineCheckout === null
+                        ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
+                        : describeOfflineCheckoutBlock(
+                            offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
+                          )
+                    : null
+              }
+              // Non-null ONLY for a validated offline session. The owner runtime
+              // and the Builder Preview never pass this at all.
+              queueOfflineSale={offlineSaleAllowed ? queueOfflineSale : null}
+              // Supplied under the SAME condition as the handler above: the two are
+              // one capability, and a host that persisted sales without ever
+              // reporting an attempt over would let one sale's identity outlive it.
+              discardOfflineSaleDraft={offlineSaleAllowed ? discardOfflineSaleDraft : null}
+              // Feature 24.5F — durable protection for the ONLINE path's identity.
+              // Supplied unconditionally, not gated on offline eligibility: the
+              // request this protects is an online one, and it is exactly the till
+              // that never goes offline which would otherwise lose the key.
+              armOnlineSale={armOnlineSale}
+              resolveOnlineSale={resolveOnlineSale}
+              persistedUncertainSale={uncertainSale}
+              cartLineCountRef={liveCartLineCountRef}
             />
-          }
-          // Feature 19 — the logo origin. A device reads its logo from the
-          // PINNED snapshot's path, so replacing the owner's logo later cannot
-          // change what this till displays. Public bucket: no signing, and no
-          // storage grant a device does not already have.
-          logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
-          onSaleRejected={handleSaleRejected}
-          // Feature 24.5E — the fence now closes only when an offline sale
-          // would NOT be safe. Online is unaffected (null, as always). Offline
-          // and eligible passes null too, and supplies the durable handler
-          // below instead. Offline and ineligible states the reason.
-          // v1.3 Feature 1B-RUNTIME — AND a pending gate closes it too.
-          //
-          // The overlay above already stops a person reaching the pay button
-          // and `inert` stops every other route to it. This is the third,
-          // innermost fence, and it is the one that does not depend on the UI
-          // at all: checkoutBlockedReason is the FIRST statement in
-          // PosRuntime's completeSale, ahead of planSaleSubmission, submitSale
-          // and the durable enqueue. No sale RPC is called, no request id is
-          // minted and no record is written while a gate is pending.
-          //
-          // Offline, the attribution reason is reported as itself. It used to
-          // fall through to "storage_unavailable", which told an operator the
-          // disk had failed when what had actually happened was that Policy 1
-          // had nothing established to sell under.
-          checkoutBlockedReason={
-            !offlineMode
-              ? describePosGateBlock(gate)
-              : !offlineSaleAllowed
-                ? !offlineAttribution.ok
-                  ? offlineAttribution.message
-                  : offlineCheckout === null
-                    ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
-                    : describeOfflineCheckoutBlock(
-                        offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
-                      )
-                : null
-          }
-          // Non-null ONLY for a validated offline session. The owner runtime
-          // and the Builder Preview never pass this at all.
-          queueOfflineSale={offlineSaleAllowed ? queueOfflineSale : null}
-          // Supplied under the SAME condition as the handler above: the two are
-          // one capability, and a host that persisted sales without ever
-          // reporting an attempt over would let one sale's identity outlive it.
-          discardOfflineSaleDraft={offlineSaleAllowed ? discardOfflineSaleDraft : null}
-          // Feature 24.5F — durable protection for the ONLINE path's identity.
-          // Supplied unconditionally, not gated on offline eligibility: the
-          // request this protects is an online one, and it is exactly the till
-          // that never goes offline which would otherwise lose the key.
-          armOnlineSale={armOnlineSale}
-          resolveOnlineSale={resolveOnlineSale}
-          persistedUncertainSale={uncertainSale}
-          cartLineCountRef={liveCartLineCountRef}
-        />
           </div>
 
           {/* Above the POS, never instead of it — see the note on `overlay`.

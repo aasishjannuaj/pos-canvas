@@ -38,6 +38,54 @@ function code(source: string): string {
 const DEVICE_APP = "components/device/DeviceApp.tsx";
 const POS_RUNTIME = "components/runtime/PosRuntime.tsx";
 
+/**
+ * Blanks out every balanced `{...}` expression container, preserving offsets.
+ *
+ * WITHOUT THIS A TAG SCAN IS WRONG, and wrong in the direction that matters:
+ * JSX attributes hold arrow functions (`onSelect={(e) => ...}`), whose `>`
+ * closes a tag as far as any naive regex is concerned. A scan that trips there
+ * mis-reports which element contains which — which is exactly the mistake this
+ * file exists to make impossible.
+ */
+function maskExpressions(source: string): string {
+  const out = source.split("");
+  let depth = 0;
+
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    if (depth > 0) out[i] = " ";
+    if (source[i] === "}") depth -= 1;
+  }
+
+  return out.join("");
+}
+
+/**
+ * The offset just past the closing tag of the element that opens at `openEnd`.
+ *
+ * Counts real element tags only, skipping self-closing ones, so it answers the
+ * one question a source guard normally cannot: HAS THIS ELEMENT CLOSED YET?
+ */
+function findClose(source: string, openEnd: number): number | null {
+  const masked = maskExpressions(source);
+  const tag = /<(\/?)[A-Za-z][\w.]*[^<>]*?(\/?)>/g;
+
+  tag.lastIndex = openEnd;
+
+  let depth = 1;
+  let match: RegExpExecArray | null;
+
+  while ((match = tag.exec(masked)) !== null) {
+    if (match[2] === "/") continue;
+
+    depth += match[1] === "/" ? -1 : 1;
+
+    if (depth === 0) return match.index + match[0].length;
+  }
+
+  return null;
+}
+
 const app = code(read(DEVICE_APP));
 const runtime = code(read(POS_RUNTIME));
 
@@ -93,7 +141,14 @@ describe("3. the recovery surface sits over the mounted runtime", () => {
 });
 
 describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
-  const wrapper = '<div className="min-h-0 flex-1" inert={activeOverlay !== null}>';
+  const WRAPPER = '<div className="min-h-0 flex-1" inert={activeOverlay !== null}>';
+  const OVERLAY = "{activeOverlay !== null && (";
+
+  /** The single returned tree of the `ready` arm. */
+  const tree = readyArm.slice(readyArm.indexOf("\n      return ("));
+  const wrapperAt = tree.indexOf(WRAPPER);
+  const wrapperClose = findClose(tree, wrapperAt + WRAPPER.length);
+  const overlayAt = tree.indexOf(OVERLAY);
 
   it("the POS subtree is made inert whenever anything covers it", () => {
     // AN OPAQUE DIV IS NOT ENOUGH. It stops a mouse. It does not stop Tab
@@ -101,20 +156,49 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
     // keeping it, or a keyboard/wedge event landing on the focused element.
     // `inert` removes the subtree from focus, from pointer events and from the
     // accessibility tree at once.
-    expect(app).toContain(wrapper);
+    expect(wrapperAt).toBeGreaterThan(-1);
   });
 
-  it("the inert wrapper is the one that contains PosRuntime", () => {
-    const fromWrapper = app.slice(app.indexOf(wrapper));
+  it("1. the inert wrapper contains PosRuntime", () => {
+    expect(wrapperClose).not.toBeNull();
+    expect(tree.slice(wrapperAt, wrapperClose ?? undefined)).toContain("<PosRuntime");
+  });
 
-    expect(fromWrapper.slice(0, fromWrapper.indexOf("</div>"))).toContain("<PosRuntime");
+  it("2. the inert wrapper CLOSES before the overlay render begins", () => {
+    // THE PROPERTY THE OLD GUARD ONLY PRETENDED TO CHECK. It compared source
+    // positions, which cannot distinguish "the overlay comes after the wrapper
+    // opened" from "the overlay comes after the wrapper closed" — so it would
+    // have passed with the overlay nested INSIDE the inert subtree, where the
+    // operator could see the recovery controls and not touch them.
+    expect(wrapperClose).not.toBeNull();
+    expect(wrapperClose as number).toBeLessThan(overlayAt);
+  });
+
+  it("3. the overlay is a SIBLING that follows the inert wrapper", () => {
+    expect(overlayAt).toBeGreaterThan(wrapperClose as number);
+  });
+
+  it("4. the overlay is not nested inside ANY inert element", () => {
+    // Walk every `inert=` in the tree and prove none of them is still open
+    // where the overlay renders.
+    for (const match of tree.matchAll(/inert=\{[^}]*\}>/g)) {
+      const openEnd = match.index + match[0].length;
+      const close = findClose(tree, openEnd);
+
+      expect(close).not.toBeNull();
+      expect(openEnd < overlayAt && overlayAt < (close as number)).toBe(false);
+    }
+  });
+
+  it("ONLY the POS subtree is inert — nothing else in the tree is", () => {
+    expect(tree.match(/inert=/g)).toHaveLength(1);
   });
 
   it("it is keyed on the SAME value that draws the overlay", () => {
     // If these could disagree, there would be a state in which the POS is
     // covered but still operable, or inert with nothing covering it.
     expect(app).toContain("inert={activeOverlay !== null}");
-    expect(app).toContain("{activeOverlay !== null && (");
+    expect(app).toContain(OVERLAY);
   });
 
   it("the runtime has no global listener that could bypass the boundary", () => {
@@ -158,6 +242,37 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
   });
 });
 
+describe("5 + 6 + 7 + 8. every covering screen stays usable", () => {
+  const tree = readyArm.slice(readyArm.indexOf("\n      return ("));
+  const WRAPPER = '<div className="min-h-0 flex-1" inert={activeOverlay !== null}>';
+  const wrapperAt = tree.indexOf(WRAPPER);
+  const wrapperClose = findClose(tree, wrapperAt + WRAPPER.length) as number;
+
+  /** Everything the inert wrapper encloses. Nothing here may be interactive. */
+  const inertSubtree = tree.slice(wrapperAt, wrapperClose);
+
+  for (const screen of [
+    "EmployeeSelector",
+    "EmployeePinEntry",
+    "RegisterOpenPanel",
+    "DeviceSettingsScreen",
+    "SalesHistoryScreen",
+    "SalesHistoryDetail",
+    "RejectedSaleReview",
+  ]) {
+    it(`${screen} renders outside the inert subtree`, () => {
+      // It reaches the DOM through `activeOverlay`, which is a sibling of the
+      // wrapper — so the operator can actually use the screen they are shown.
+      expect(app).toContain(`<${screen}`);
+      expect(inertSubtree).not.toContain(`<${screen}`);
+    });
+  }
+
+  it("the inert subtree contains the POS and nothing else", () => {
+    expect(inertSubtree).toContain("<PosRuntime");
+  });
+});
+
 describe("7. checkout cannot be submitted while a gate is pending", () => {
   it("the host reports a pending gate as a blocked checkout", () => {
     expect(app).toContain("describePosGateBlock(gate)");
@@ -184,18 +299,8 @@ describe("7. checkout cannot be submitted while a gate is pending", () => {
   });
 });
 
-describe("12. the recovery UI itself stays usable", () => {
-  it("the overlay is outside the inert subtree", () => {
-    // Trivially true by placement, and worth pinning: an `inert` that wrapped
-    // the overlay too would gate the operator out of their own recovery.
-    const wrapperStart = app.indexOf('<div className="min-h-0 flex-1" inert=');
-    const wrapperEnd = app.indexOf("{activeOverlay !== null && (");
-
-    expect(wrapperStart).toBeLessThan(wrapperEnd);
-    expect(app.slice(wrapperStart, wrapperEnd)).not.toContain("{activeOverlay}");
-  });
-
-  it("it can scroll on a short screen", () => {
+describe("12. the recovery UI can still be read on a short screen", () => {
+  it("the covering layer scrolls", () => {
     expect(app).toContain("overflow-y-auto");
   });
 });
