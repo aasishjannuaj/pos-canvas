@@ -10,8 +10,9 @@ import {
   SALE_EXPECTATIONS_MISSING,
   SALE_REGISTER_CHANGED,
   SALE_REGISTER_CLOSED,
+  applyDailyRefresh,
+  applyEmployeeAuthenticated,
   applySaleAttributionFailure,
-  applyServerDerivation,
   buildOfflineClaims,
   canCheckoutOffline,
   classifySaleAttributionFailure,
@@ -21,7 +22,7 @@ import {
 } from "@/lib/posGate";
 import type { PosGateState } from "@/lib/posGate";
 import type { EmployeeSession } from "@/lib/employeeSession";
-import type { RegisterSession } from "@/lib/registerSession";
+import type { DailyRegisterContext } from "@/lib/dailyRegister";
 
 const ADA: EmployeeSession = {
   employeeSessionId: "sess-ada",
@@ -31,24 +32,32 @@ const ADA: EmployeeSession = {
   startedAt: "2026-09-18T02:00:00.000Z",
 };
 
-const REGISTER: RegisterSession = {
-  registerSessionId: "reg-1",
-  openedAt: "2026-09-18T02:05:00.000Z",
-  openedByEmployeeId: "emp-ada",
-  openingCash: "25.50",
-  closedAt: null,
-  closedByEmployeeId: null,
+/** A business day, exactly as ensure_daily_register_context() reports one. */
+const TODAY: DailyRegisterContext = {
+  registerSessionId: "daily-1",
+  businessDate: "2026-09-18",
+  businessTimezone: "America/New_York",
+  openedAt: "2026-09-18T04:00:00.000Z",
+  closedAt: "2026-09-19T04:00:00.000Z",
 };
 
-const established: PosGateState = { employee: ADA, register: REGISTER, establishedOnline: true, recovery: null };
+const established: PosGateState = {
+  employee: ADA,
+  daily: TODAY,
+  establishedOnline: true,
+  recovery: null,
+  setup: null,
+};
 
 describe("which gate the till stands at", () => {
   it("asks for an employee first", () => {
     expect(resolvePosGate(EMPTY_POS_GATE_STATE)).toBe("employee");
   });
 
-  it("asks for a register once an employee is signed in", () => {
-    expect(resolvePosGate({ employee: ADA, register: null, establishedOnline: false, recovery: null })).toBe("register");
+  it("asks for today's business day once an employee is signed in", () => {
+    expect(
+      resolvePosGate({ employee: ADA, daily: null, establishedOnline: false, recovery: null, setup: null })
+    ).toBe("daily");
   });
 
   it("opens the POS only when both exist", () => {
@@ -58,9 +67,9 @@ describe("which gate the till stands at", () => {
   it("returns to the employee gate when the employee is gone, even with a register", () => {
     // The order is the contract: a register cannot be opened — or sold
     // through — without someone signed in.
-    expect(resolvePosGate({ employee: null, register: REGISTER, establishedOnline: false, recovery: null })).toBe(
-      "employee"
-    );
+    expect(
+      resolvePosGate({ employee: null, daily: TODAY, establishedOnline: false, recovery: null, setup: null })
+    ).toBe("employee");
   });
 });
 
@@ -73,16 +82,21 @@ describe("what a pending gate tells the runtime's checkout fence", () => {
       "Sign in an employee before taking a sale."
     );
     expect(
-      describePosGateBlock({ employee: ADA, register: null, establishedOnline: false, recovery: null })
-    ).toBe("Open the register before taking a sale.");
+      describePosGateBlock({ employee: ADA, daily: null, establishedOnline: false, recovery: null, setup: null })
+    ).toBe("Reconnect to establish today's register before taking a sale.");
+
+    // The one setup problem a cashier cannot fix says so in its own words.
+    expect(
+      describePosGateBlock({ ...established, setup: "business_timezone" })
+    ).toBe("Set this business's timezone before taking a sale.");
   });
 
   it("blocks while EITHER recovery is pending, however complete the state looks", () => {
     expect(describePosGateBlock({ ...established, recovery: "employee" })).toBe(
       "Sign in an employee before taking a sale."
     );
-    expect(describePosGateBlock({ ...established, recovery: "register" })).toBe(
-      "Open the register before taking a sale."
+    expect(describePosGateBlock({ ...established, recovery: "daily" })).toBe(
+      "Reconnect to establish today's register before taking a sale."
     );
   });
 
@@ -116,14 +130,14 @@ describe("Policy 1 — offline checkout needs state established online", () => {
   });
 
   it("blocks when only the employee is established", () => {
-    expect(canCheckoutOffline({ employee: ADA, register: null, establishedOnline: false, recovery: null }).ok).toBe(
+    expect(canCheckoutOffline({ employee: ADA, daily: null, establishedOnline: false, recovery: null, setup: null }).ok).toBe(
       false
     );
   });
 
   it("blocks when only the register is established", () => {
     expect(
-      canCheckoutOffline({ employee: null, register: REGISTER, establishedOnline: false, recovery: null }).ok
+      canCheckoutOffline({ employee: null, daily: TODAY, establishedOnline: false, recovery: null, setup: null }).ok
     ).toBe(false);
   });
 
@@ -131,17 +145,17 @@ describe("Policy 1 — offline checkout needs state established online", () => {
     // The whole point of establishedOnline: holding an employee and a register
     // is not the same as having derived them. A till that assembled this from
     // stale UI state must not sell on it.
-    expect(canCheckoutOffline({ employee: ADA, register: REGISTER, establishedOnline: false, recovery: null }).ok).toBe(
+    expect(canCheckoutOffline({ employee: ADA, daily: TODAY, establishedOnline: false, recovery: null, setup: null }).ok).toBe(
       false
     );
   });
 });
 
 describe("what a queued offline sale claims", () => {
-  it("carries both session ids as claims", () => {
+  it("carries the employee session and the RETAINED DAILY id as claims", () => {
     expect(buildOfflineClaims(established)).toEqual({
       employeePosSessionId: "sess-ada",
-      registerSessionId: "reg-1",
+      registerSessionId: "daily-1",
     });
   });
 
@@ -153,22 +167,98 @@ describe("what a queued offline sale claims", () => {
   });
 });
 
-describe("server derivation is the only way state is established", () => {
-  it("establishes when both come back", () => {
-    expect(applyServerDerivation({ employee: ADA, register: REGISTER })).toEqual(established);
+describe("explicit authentication is the only way state is established", () => {
+  const same = { ok: true, session: ADA } as const;
+
+  it("establishes when the day comes back and the operator is still the same", () => {
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: true, context: TODAY },
+        revalidated: same,
+      })
+    ).toEqual(established);
   });
 
-  it("does NOT establish when the register is missing", () => {
-    expect(applyServerDerivation({ employee: ADA, register: null })).toEqual({
+  it("does NOT establish when the business has no timezone — that is setup, not recovery", () => {
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: false, reason: "timezone_required" },
+        revalidated: same,
+      })
+    ).toEqual({
       employee: ADA,
-      register: null,
+      daily: null,
       establishedOnline: false,
       recovery: null,
+      setup: "business_timezone",
     });
   });
 
-  it("does NOT establish when nobody is signed in", () => {
-    expect(applyServerDerivation({ employee: null, register: null })).toEqual(EMPTY_POS_GATE_STATE);
+  it("does NOT establish when the day was refused — that is an exception", () => {
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: false, reason: "conflict" },
+        revalidated: same,
+      })
+    ).toEqual({
+      employee: ADA,
+      daily: null,
+      establishedOnline: false,
+      recovery: "daily",
+      setup: null,
+    });
+  });
+
+  it("LOCKS when the POS session changed while the day was being established", () => {
+    // The race CP2d exists to close. Same person, new session id, is NOT the
+    // same authority — and a failed re-read is not evidence either way, so it
+    // locks too.
+    const reborn: EmployeeSession = { ...ADA, employeeSessionId: "sess-ada-2" };
+
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: true, context: TODAY },
+        revalidated: { ok: true, session: reborn },
+      })
+    ).toEqual(EMPTY_POS_GATE_STATE);
+
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: true, context: TODAY },
+        revalidated: { ok: true, session: null },
+      })
+    ).toEqual(EMPTY_POS_GATE_STATE);
+
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: { ok: true, context: TODAY },
+        revalidated: { ok: false },
+      })
+    ).toEqual(EMPTY_POS_GATE_STATE);
+  });
+
+  it("a refresh can only ever ADD — it never takes the till away", () => {
+    // Offline, or any unreachable server: everything is kept.
+    expect(applyDailyRefresh(established, { ok: false, reason: "unavailable" })).toEqual(established);
+
+    // A till with nobody signed in is not a way in.
+    expect(applyDailyRefresh(EMPTY_POS_GATE_STATE, { ok: true, context: TODAY })).toEqual(
+      EMPTY_POS_GATE_STATE
+    );
+
+    // A newer day replaces the old one, with the operator untouched.
+    const tomorrow: DailyRegisterContext = { ...TODAY, registerSessionId: "daily-2", businessDate: "2026-09-19" };
+
+    expect(applyDailyRefresh(established, { ok: true, context: tomorrow })).toEqual({
+      ...established,
+      daily: tomorrow,
+    });
   });
 
   it("clearing drops everything", () => {
@@ -202,21 +292,23 @@ describe("stale-state refusals from complete_sale_v5", () => {
   it("an employee refusal drops both sessions and demands an EMPLOYEE recovery", () => {
     for (const failure of ["employee_changed", "employee_missing", "expectations_missing"] as const) {
       expect(applySaleAttributionFailure(established, failure)).toEqual({
-        employee: null,
-        register: null,
-        establishedOnline: false,
+        ...EMPTY_POS_GATE_STATE,
         recovery: "employee",
       });
     }
   });
 
-  it("a register refusal keeps the employee and demands a REGISTER recovery", () => {
+  it("a register refusal keeps the employee and demands a DAILY recovery", () => {
+    // v1.3 CP2d — an ordinary midnight never gets here: complete_sale_v5 rolls
+    // the sale forward itself. A refusal that still reaches the till is an
+    // exception, and it is the DAY that must be re-established, not a drawer.
     for (const failure of ["register_changed", "register_closed"] as const) {
       expect(applySaleAttributionFailure(established, failure)).toEqual({
         employee: ADA,
-        register: null,
+        daily: null,
         establishedOnline: false,
-        recovery: "register",
+        recovery: "daily",
+        setup: null,
       });
     }
   });

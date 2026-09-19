@@ -19,6 +19,7 @@ import type { RosterState } from "@/lib/employeeRoster";
 import { isRosterConfirmedEmpty, rosterEmployees } from "@/lib/employeeRoster";
 import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employeeSession";
 import type { RegisterSession } from "@/lib/registerSession";
+import type { DailyRegisterContext } from "@/lib/dailyRegister";
 import { getOpeningCashMessage, validateOpeningCash } from "@/lib/registerSession";
 
 const PANEL = "mx-auto flex w-full max-w-sm flex-col gap-4 rounded-2xl bg-white p-6 shadow-sm";
@@ -437,6 +438,195 @@ export function RegisterStatus({
             onClick={onCloseRegister}
           >
             Close register
+          </button>
+        </span>
+      </div>
+
+      {error !== null && <p className="text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// v1.3 CP2d — the two EXCEPTIONS that replaced register management
+// ---------------------------------------------------------------------------
+
+/**
+ * The business has not told the server what timezone it keeps.
+ *
+ * DELIBERATELY NOT A PICKER. Offering the cashier a timezone here would let a
+ * till decide which day this shop's money lands on, which is the one thing the
+ * whole daily model exists to prevent — and the device's own zone is the least
+ * trustworthy answer available, because it follows whoever carried the tablet.
+ * Somebody with authority sets it once, in the owner's settings; this screen
+ * says so and offers to ask again.
+ */
+export function BusinessTimezoneRequiredCard({
+  busy,
+  error,
+  onRetry,
+}: {
+  busy: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <div className={SCREEN}>
+      <div className={PANEL}>
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-semibold text-neutral-900">Setup needed</h2>
+          <p className="text-sm text-neutral-600">
+            This business needs a timezone before sales can be rung up. An owner can set it in the
+            business settings.
+          </p>
+        </div>
+
+        <p className="text-sm text-neutral-500">
+          Sales already waiting to sync are safe and will be sent once this is sorted.
+        </p>
+
+        {error !== null && (
+          <p role="alert" className="text-sm text-red-600">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          className="rounded-xl bg-neutral-900 px-4 py-3 text-white disabled:opacity-50"
+          disabled={busy}
+          onClick={onRetry}
+        >
+          {busy ? "Checking…" : "Try again"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The server would not establish today's business day.
+ *
+ * THIS IS NOT REGISTER MANAGEMENT AND MUST NOT LOOK LIKE IT. An ordinary
+ * midnight never reaches this screen: complete_sale_v5 rolls a sale forward to
+ * the current day by itself, so a cashier crossing midnight notices nothing.
+ * Reaching here means the day genuinely could not be established — a timezone
+ * changed underneath an existing day, or the server was unreachable — and the
+ * only honest action is to ask again. No opening cash, no register to pick, and
+ * nothing this screen can invent locally.
+ */
+export function DailyContextRecoveryCard({
+  employee,
+  busy,
+  error,
+  recovery,
+  onRetry,
+  onSwitchEmployee,
+}: {
+  employee: EmployeeSession;
+  busy: boolean;
+  error: string | null;
+  recovery: boolean;
+  onRetry: () => void;
+  onSwitchEmployee: () => void;
+}) {
+  return (
+    <div className={SCREEN}>
+      <div className={PANEL}>
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-semibold text-neutral-900">
+            {recovery ? "Today's register needs checking" : "Getting today's register"}
+          </h2>
+          <p className="text-sm text-neutral-600">
+            {recovery
+              ? "The server could not confirm which business day this till is on. Nothing has been lost — try again, and check the connection if it keeps happening."
+              : "Setting this till up for today."}
+          </p>
+        </div>
+
+        <p className="text-sm text-neutral-500">
+          Signed in as <span className="font-medium text-neutral-800">{employee.displayName}</span>
+        </p>
+
+        {error !== null && (
+          <p role="alert" className="text-sm text-red-600">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          className="rounded-xl bg-neutral-900 px-4 py-3 text-white disabled:opacity-50"
+          disabled={busy}
+          onClick={onRetry}
+        >
+          {busy ? "Checking…" : "Try again"}
+        </button>
+
+        <button
+          type="button"
+          className="rounded-xl border border-neutral-300 px-4 py-3 disabled:opacity-50"
+          disabled={busy}
+          onClick={onSwitchEmployee}
+        >
+          Switch employee
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Who is on the till, and which business day it is.
+ *
+ * NO CLOSE BUTTON, deliberately. A business day is not a drawer period: nobody
+ * opens one and nobody closes one, and offering a cashier a button that ends
+ * the day would be offering them a way to misfile the evening's sales. Signing
+ * out leaves the day exactly where it is.
+ */
+export function DailyRegisterStatus({
+  employee,
+  daily,
+  busy,
+  error,
+  onSwitchEmployee,
+  onLogout,
+}: {
+  employee: EmployeeSession;
+  daily: DailyRegisterContext;
+  busy: boolean;
+  error: string | null;
+  onSwitchEmployee: () => void;
+  onLogout: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-xl bg-white p-3 text-sm shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-neutral-700">
+          <span className="font-medium text-neutral-900">{employee.displayName}</span>
+          {/* The SERVER's business date, shown exactly as it answered. Nothing
+              here formats, parses or recomputes it from a device clock. */}
+          {daily.businessDate !== "" && (
+            <span className="text-neutral-500"> · {daily.businessDate}</span>
+          )}
+        </span>
+
+        <span className="flex gap-2">
+          <button
+            type="button"
+            className="rounded-lg border border-neutral-300 px-3 py-1.5"
+            disabled={busy}
+            onClick={onSwitchEmployee}
+          >
+            Switch
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border border-neutral-300 px-3 py-1.5"
+            disabled={busy}
+            onClick={onLogout}
+          >
+            Sign out
           </button>
         </span>
       </div>

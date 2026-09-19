@@ -67,6 +67,23 @@ export type CompletedSaleReceipt = {
   // falls back to current configuration, because losing a whole receipt over a
   // missing toggle would be the worse failure.
   presentation?: unknown;
+  /**
+   * v1.3 CP2d — what the SERVER stored this sale against.
+   *
+   * complete_sale_v5 has always returned this; nothing read it until now, so it
+   * was dropped on parse. It is surfaced for ONE purpose: after CP2c rolls a
+   * sale forward onto a new business day, the paired device adopts the returned
+   * register id so the NEXT sale arrives current instead of rolling forward
+   * again. Freshness, never authority — the sale is already written, and
+   * ignoring this entirely would still be correct.
+   *
+   * DELIBERATELY `unknown`, and deliberately NOT validated by the guard below,
+   * for the same reason `presentation` is not: everything else here is money,
+   * where a malformed payload must be refused, and this is not. A receipt is
+   * never withheld over an attribution field, and lib/dailyRegister.ts checks
+   * the id's shape before anything acts on it.
+   */
+  attribution?: unknown;
 };
 
 const MONEY_PATTERN = /^-?\d+\.\d{2}$/;

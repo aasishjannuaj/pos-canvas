@@ -48,22 +48,30 @@ export function isEmployeeRole(value: unknown): value is EmployeeRole {
 // PIN shape
 // ---------------------------------------------------------------------------
 
+// v1.3 CP2d — CORRECTED TO 4, AND THE RANGE THEY DESCRIBED IS GONE.
+//
+// Checkpoint 1 tightened the PIN to exactly four digits on the server and in
+// isValidEmployeePinShape below, but these two constants were left describing
+// the old 4–6 range. Nothing reads either of them — the live rule is the regex
+// — so this was a stale statement rather than a live bug, and it is corrected
+// because a constant that says 6 next to a rule that means 4 is exactly the
+// kind of thing somebody later believes.
 export const EMPLOYEE_PIN_MIN_LENGTH = 4;
-export const EMPLOYEE_PIN_MAX_LENGTH = 6;
+export const EMPLOYEE_PIN_MAX_LENGTH = 4;
 
 /**
- * Exactly 4–6 ASCII digits. The same rule the database enforces, restated here
+ * Exactly 4 ASCII digits. The same rule the database enforces, restated here
  * so a till can refuse an obviously malformed entry without spending a round
  * trip — never so it can decide what is valid.
  *
  * IT DOES NOT TRIM, PAD, STRIP OR NORMALIZE. A pairing code is normalized on
  * both sides because an owner reads it aloud and a human retypes it with
  * spaces and hyphens; a PIN is typed on a keypad and a value that is not
- * already 4–6 digits is not a near-miss to be repaired, it is wrong. Coercing
+ * already 4 digits is not a near-miss to be repaired, it is wrong. Coercing
  * " 1234 " into "1234" here would also mean the client and the server disagreed
  * about what was submitted.
  *
- * Unicode digits are rejected on purpose: the server's check is `^[0-9]{4,6}$`
+ * Unicode digits are rejected on purpose: the server's check is `^[0-9]{4}$`
  * over ASCII, so accepting "١٢٣٤" here would only produce a puzzling round trip.
  */
 export function isValidEmployeePinShape(pin: unknown): pin is string {

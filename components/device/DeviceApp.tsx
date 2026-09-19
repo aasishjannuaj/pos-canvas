@@ -27,9 +27,10 @@ import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import DeviceSyncStatus from "@/components/device/DeviceSyncStatus";
 import {
+  BusinessTimezoneRequiredCard,
+  DailyContextRecoveryCard,
+  DailyRegisterStatus,
   EmployeeLockCard,
-  RegisterOpenPanel,
-  RegisterStatus,
 } from "@/components/device/PosGates";
 import {
   applyDeviceConfigUpdate,
@@ -135,9 +136,6 @@ import {
   type LoginEmployee,
 } from "@/lib/employeeSession";
 import {
-  closeRegisterSession,
-  fetchCurrentRegisterSession,
-  openRegisterSession,
 } from "@/lib/register.rpc";
 import {
   UNLOADED_ROSTER,
@@ -148,17 +146,20 @@ import {
   shouldLoadRoster,
 } from "@/lib/employeeRoster";
 import type { RosterState } from "@/lib/employeeRoster";
-import type { RegisterSession } from "@/lib/registerSession";
+import { ensureDailyRegisterContext } from "@/lib/daily.rpc";
 import {
-  getRegisterCloseMessage,
-  getRegisterOpenMessage,
-} from "@/lib/registerSession";
+  adoptSaleRegisterId,
+  nextDailyRefreshDelayMs,
+  shouldAdoptSaleRegisterId,
+  timestampMs,
+} from "@/lib/dailyRegister";
 import {
   EMPTY_POS_GATE_STATE,
-  applyExplicitRegisterEstablished,
+  applyExplicitDailyEstablished,
+  applyDailyRefresh,
+  applySaleRegisterAdoption,
   applyEmployeeAuthenticated,
   applyReconnectDerivation,
-  applyRecoveryObservation,
   applySaleAttributionFailure,
   buildOfflineClaims,
   canCheckoutOffline,
@@ -167,6 +168,7 @@ import {
   checkRetainedEmployee,
   classifySaleAttributionFailure,
   resolvePosGate,
+  type DailyAcquisition,
   type PosGateState,
   type SessionRead,
 } from "@/lib/posGate";
@@ -393,6 +395,14 @@ export default function DeviceApp() {
   const [gate, setGate] = useState<PosGateState>(EMPTY_POS_GATE_STATE);
   const gateRef = useRef<PosGateState>(EMPTY_POS_GATE_STATE);
   /**
+   * Consecutive freshness refreshes that came back with the SAME context.
+   *
+   * Feeds the backoff in lib/dailyRegister.ts. A ref rather than state: it
+   * changes nothing on screen, and making it state would re-run the very effect
+   * that writes it.
+   */
+  const dailyUnchangedRef = useRef(0);
+  /**
    * The login roster, as a LIFECYCLE rather than an array.
    *
    * An empty array could not tell "nobody has asked yet" apart from "this
@@ -432,42 +442,104 @@ export default function DeviceApp() {
    * "observe" is the read that follows a stale-expectation refusal. It asks the
    * same questions and adopts NOTHING — see applyRecoveryObservation.
    */
+  /**
+   * What to tell the operator after a daily acquisition, and nothing more.
+   *
+   * The pure transition has already decided what the till holds; this only
+   * explains it. `null` clears the message, which is what a success means.
+   */
+  const describeDailyOutcome = useCallback(
+    (next: PosGateState, daily: DailyAcquisition): string | null => {
+      if (daily.ok) return null;
+
+      if (daily.reason === "timezone_required") {
+        return "This business needs a timezone before sales can be rung up.";
+      }
+
+      if (daily.reason === "conflict") {
+        return "Could not confirm which business day this till is on. Try again.";
+      }
+
+      // Unreachable server. A till that was already established keeps selling
+      // and is told nothing; one that has nothing yet is told to check.
+      return next.establishedOnline
+        ? null
+        : "Could not reach the server to set up today. Check the connection and try again.";
+    },
+    []
+  );
+
+  /** One employee read, in the shape the pure rules consume. */
+  const readEmployeeSession = useCallback(async (): Promise<SessionRead<EmployeeSession>> => {
+    const result = await fetchCurrentEmployeeSession();
+
+    return result.ok ? { ok: true, session: result.session } : { ok: false };
+  }, []);
+
+  /**
+   * One ensure_daily_register_context() call, in the shape the pure rules
+   * consume.
+   *
+   * THE ONLY PLACE A BUSINESS DAY COMES FROM. Nothing else in this component
+   * computes, formats, guesses or caches one, and the two domain refusals are
+   * kept apart from a transport failure here rather than downstream: a business
+   * with no timezone is somebody's job to fix, a conflict is an exception a
+   * cashier can retry past, and an unreachable server is neither.
+   */
+  const acquireDaily = useCallback(async (): Promise<DailyAcquisition> => {
+    const result = await ensureDailyRegisterContext();
+
+    if (result.ok) {
+      return { ok: true, context: result.context };
+    }
+
+    if (result.error === "business_timezone_required") {
+      return { ok: false, reason: "timezone_required" };
+    }
+
+    if (result.error === "daily_register_timezone_conflict") {
+      return { ok: false, reason: "conflict" };
+    }
+
+    return { ok: false, reason: "unavailable" };
+  }, []);
+
   const deriveGateState = useCallback(
     async (mode: GateDerivationMode = "reconnect"): Promise<PosGateState> => {
-      const apply = (observed: {
-        employee: EmployeeSession | null;
-        register: RegisterSession | null;
-      }): PosGateState => {
-        const next =
-          mode === "observe"
-            ? applyRecoveryObservation(gateRef.current, observed)
-            : applyReconnectDerivation(gateRef.current, observed);
+      // v1.3 CP2d — ONE SHAPE FOR EVERY RE-DERIVATION: who is signed in, and
+      // what day the server says it is. The register is no longer asked about,
+      // because there is no longer a register to choose.
+      const employee = await readEmployeeSession();
+
+      // The employee read decides whether the till keeps its operator at all,
+      // so a failed or empty one short-circuits: there is nobody to establish a
+      // business day for, and asking would only create one nobody is standing
+      // behind.
+      if (!employee.ok || employee.session === null) {
+        const next = applyReconnectDerivation(gateRef.current, {
+          employee,
+          daily: { ok: false, reason: "unavailable" },
+        });
 
         setGate(next);
         return next;
-      };
-
-      const employee = await fetchCurrentEmployeeSession();
-
-      if (!employee.ok) {
-        // The read itself failed. Nothing is established either way, and a
-        // pending recovery must survive a failed read rather than be forgotten
-        // by it — so this goes through the same function.
-        return apply({ employee: null, register: null });
       }
 
-      if (employee.session === null) {
-        return apply({ employee: null, register: null });
-      }
+      const daily = await acquireDaily();
 
-      const register = await fetchCurrentRegisterSession();
+      // "observe" follows a stale-expectation refusal and must adopt NOTHING:
+      // the server has just proven this till wrong, and a fresh read is an
+      // observation, not the operator's choice to trust it again. The recovery
+      // survives and keeps the gate shut.
+      const next =
+        mode === "observe"
+          ? applyDailyRefresh(gateRef.current, { ok: false, reason: "unavailable" })
+          : applyReconnectDerivation(gateRef.current, { employee, daily });
 
-      return apply({
-        employee: employee.session,
-        register: register.ok ? register.session : null,
-      });
+      setGate(next);
+      return next;
     },
-    []
+    [readEmployeeSession, acquireDaily]
   );
 
   /**
@@ -503,6 +575,91 @@ export default function DeviceApp() {
     }, 0);
 
     return () => clearTimeout(start);
+  }, [gateDerivationAllowed, deriveGateState]);
+
+  /**
+   * v1.3 CP2d — MIDNIGHT IS FRESHNESS, NEVER CORRECTNESS.
+   *
+   * This timer exists so a till that has been open all evening is already
+   * holding tomorrow's context when the first morning sale is rung, saving a
+   * server-side roll-forward. It is not what makes midnight work:
+   * complete_sale_v5 rolls any sale onto the current business day by itself, so
+   * a timer that fires late, fires early, or never fires at all cannot misfile
+   * money. Android suspends, Windows sleeps, JS timers drift and device clocks
+   * are wrong — all of that is assumed here, and none of it matters.
+   *
+   * IT CAN ONLY EVER ADD. applyDailyRefresh never locks the till, never ends an
+   * employee session, never touches the cart and never stops an authorized
+   * offline checkout because a business day ended by this device's reckoning.
+   * A refresh that cannot reach the server changes nothing at all.
+   *
+   * WHEN IT RUNS. Only while the till is ready, online and established. Offline
+   * it does not run, which is exactly what keeps a till that crossed midnight
+   * without a network selling under the day it legitimately established.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed || !gate.establishedOnline || gate.daily === null) {
+      return;
+    }
+
+    const delay = nextDailyRefreshDelayMs({
+      closedAtMs: timestampMs(gate.daily.closedAt),
+      nowMs: Date.now(),
+      consecutiveUnchanged: dailyUnchangedRef.current,
+    });
+
+    const held = gate.daily.registerSessionId;
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const acquisition = await acquireDaily();
+
+        // THE BACKOFF LIVES HERE. A server that keeps answering with the same
+        // context — because this clock is ahead, or because the day genuinely
+        // has not turned — makes the next wait longer instead of spinning.
+        if (acquisition.ok && acquisition.context.registerSessionId === held) {
+          dailyUnchangedRef.current += 1;
+        } else if (acquisition.ok) {
+          dailyUnchangedRef.current = 0;
+        }
+
+        setGate(applyDailyRefresh(gateRef.current, acquisition));
+      })();
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [gateDerivationAllowed, gate.establishedOnline, gate.daily, acquireDaily]);
+
+  /**
+   * Coming back to the foreground is a reconnect, and is treated as one.
+   *
+   * A till that was backgrounded over midnight — or for three days — wakes with
+   * a stale context and possibly a replaced employee session. Both questions
+   * are the same ones a reconnect asks, so this reuses the same derivation
+   * rather than inventing a second path: same POS session or the till locks,
+   * and whatever business day the server says it is now.
+   *
+   * GENERIC ON PURPOSE. `visibilitychange` is what Android's WebView and the
+   * Windows shell both deliver; there is no platform-specific branch here and
+   * no platform-specific register behaviour anywhere in this component.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed || typeof document === "undefined") {
+      return;
+    }
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // A till with nobody signed in has nothing to revalidate, and a
+      // derivation would only ask questions whose answers cannot unlock it.
+      if (gateRef.current.employee === null) return;
+
+      void deriveGateState();
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [gateDerivationAllowed, deriveGateState]);
 
   /**
@@ -557,27 +714,44 @@ export default function DeviceApp() {
         return;
       }
 
-      const register = await fetchCurrentRegisterSession();
+      // ==================================================================
+      // v1.3 CP2d — THE REST OF LOGIN IS THE SERVER ESTABLISHING TODAY.
+      //
+      // There is no cashier step between these two calls. No register to
+      // choose, no opening cash to count, no panel to dismiss: the business
+      // day is a calendar fact, so the till asks for it and unlocks.
+      //
+      // AND THEN IT ASKS WHO IS SIGNED IN AGAIN. Between the login returning
+      // and the day coming back, the employee POS session can have been
+      // replaced -- a switch at this till, or another one on the same pairing.
+      // Unlocking on the login's word alone would open the POS under an
+      // operator the server had already moved on from, and a connection drop
+      // straight afterwards would let offline sales be taken under them. The
+      // comparison is by SESSION ID, in lib/posGate.ts, and a mismatch sends
+      // the cashier back to Employee ID and PIN with the cart untouched.
+      // ==================================================================
+      const daily = await acquireDaily();
+      const revalidated = await readEmployeeSession();
 
-      setGate(
-        applyEmployeeAuthenticated({
-          employee: result.session,
-          register: register.ok ? register.session : null,
-        })
-      );
+      const next = applyEmployeeAuthenticated({
+        employee: result.session,
+        daily,
+        revalidated,
+      });
 
+      setGate(next);
       setGateBusy(false);
       setSelectedEmployee(null);
+
+      if (next.employee === null) {
+        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+        return;
+      }
+
+      setGateError(describeDailyOutcome(next, daily));
     },
-    []
+    [acquireDaily, readEmployeeSession, describeDailyOutcome]
   );
-
-  /** One employee read, in the shape the pure recovery rules consume. */
-  const readEmployeeSession = useCallback(async (): Promise<SessionRead<EmployeeSession>> => {
-    const result = await fetchCurrentEmployeeSession();
-
-    return result.ok ? { ok: true, session: result.session } : { ok: false };
-  }, []);
 
   /**
    * Resolves a register recovery around ONE register operation, with the
@@ -600,163 +774,60 @@ export default function DeviceApp() {
    * Every identity comparison belongs to lib/posGate.ts. This function performs
    * reads and renders the outcome; it decides nothing.
    */
-  const establishRegisterAfterRecovery = useCallback(
-    async (operation: () => Promise<SessionRead<RegisterSession>>) => {
-      const employeeBefore = await readEmployeeSession();
-      const precheck = checkRetainedEmployee(gateRef.current, employeeBefore);
-
-      if (!precheck.ok) {
-        // FAIL CLOSED BEFORE THE OPERATION RUNS. Nothing is attempted, so there
-        // is no server-side side effect to explain afterwards.
-        setGate(precheck.state);
-
-        if (precheck.reason === "employee_changed") {
-          setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
-          setSelectedEmployee(null);
-        } else {
-          setGateError("Could not check who is signed in. Check the connection and try again.");
-        }
-
-        return;
-      }
-
-      const register = await operation();
-      const employeeAfter = await readEmployeeSession();
-
-      const next = applyExplicitRegisterEstablished(gateRef.current, {
-        employeeBefore,
-        register,
-        employeeAfter,
-      });
-
-      setGate(next);
-
-      // The pure transition has already decided; these only explain it. An
-      // escalation to the employee gate is the one an operator most needs told,
-      // because the screen changes under them.
-      if (next.recovery === "employee") {
-        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
-        setSelectedEmployee(null);
-        return;
-      }
-
-      if (next.recovery === "register") {
-        setGateError(
-          register.ok
-            ? "No register is open on this till. Open one to continue."
-            : "Could not check the register. Check the connection and try again."
-        );
-        return;
-      }
-
-      setGateError(null);
-    },
-    [readEmployeeSession]
-  );
-
-  /** Opens the register on this till. */
-  const handleOpenRegister = useCallback(
-    async (openingCash: number) => {
-      setGateBusy(true);
-      setGateError(null);
-
-      // DURING A RECOVERY THE OPEN IS SANDWICHED TOO, and the pre-check comes
-      // first for a reason beyond correctness: open_register_session opens
-      // under the SERVER's own current employee session, never one the client
-      // names. Calling it while the server had already moved to somebody else
-      // would open a real register belonging to THEM — a side effect the local
-      // operator never asked for. Checking before the call avoids creating it
-      // at all, rather than discovering it afterwards.
-      if (gateRef.current.recovery === "register") {
-        await establishRegisterAfterRecovery(async () => {
-          const result = await openRegisterSession(crypto.randomUUID(), openingCash);
-
-          if (result.ok) {
-            return { ok: true, session: result.session };
-          }
-
-          // already_open carries the session that IS open, so the till adopts
-          // it instead of asking the cashier to resolve a race they did not
-          // cause. It receives the same pre- and post-checks as a fresh open.
-          if (result.code === "already_open" && result.session !== null) {
-            return { ok: true, session: result.session };
-          }
-
-          setGateError(getRegisterOpenMessage(result.code));
-          return { ok: false };
-        });
-
-        setGateBusy(false);
-        return;
-      }
-
-      // One request id per attempt, reused by nothing else: a retry of a lost
-      // response is the caller's to make with the same id, and a different
-      // amount under the same id is a conflict rather than an overwrite.
-      const result = await openRegisterSession(crypto.randomUUID(), openingCash);
-
-      if (!result.ok) {
-        if (result.code === "already_open" && result.session !== null) {
-          await deriveGateState();
-          setGateBusy(false);
-          return;
-        }
-
-        setGateBusy(false);
-        setGateError(getRegisterOpenMessage(result.code));
-        return;
-      }
-
-      await deriveGateState();
-      setGateBusy(false);
-    },
-    [deriveGateState, establishRegisterAfterRecovery]
-  );
-
-  /**
-   * The operator pressed "Use the register that is open".
-   *
-   * The button is the human act; every decision about whether it may establish
-   * anything belongs to the pure transition above.
-   */
-  const handleAdoptCurrentRegister = useCallback(async () => {
-    setGateBusy(true);
-
-    await establishRegisterAfterRecovery(async () => {
-      const current = await fetchCurrentRegisterSession();
-
-      return current.ok ? { ok: true, session: current.session } : { ok: false };
-    });
-
-    setGateBusy(false);
-  }, [establishRegisterAfterRecovery]);
-
-  /** Primitive close: lifecycle only, no cash reconciliation of any kind. */
-  const handleCloseRegister = useCallback(async () => {
-    const current = gateRef.current.register;
-
-    if (current === null) {
-      return;
-    }
-
+  const recoverDailyContext = useCallback(async () => {
     setGateBusy(true);
     setGateError(null);
 
-    const result = await closeRegisterSession(current.registerSessionId);
+    const employeeBefore = await readEmployeeSession();
+    const precheck = checkRetainedEmployee(gateRef.current, employeeBefore);
 
-    setGateBusy(false);
+    if (!precheck.ok) {
+      // FAIL CLOSED BEFORE THE ENSURE RUNS. Nothing is attempted, so there is
+      // no server-side context created under an operator nobody was recovering.
+      setGate(precheck.state);
+      setGateBusy(false);
 
-    if (!result.ok) {
-      setGateError(getRegisterCloseMessage(result.code));
+      if (precheck.reason === "employee_changed") {
+        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+        setSelectedEmployee(null);
+      } else {
+        setGateError("Could not check who is signed in. Check the connection and try again.");
+      }
+
       return;
     }
 
-    // An already-closed reply is a success: the server returned the state it
-    // already holds, and the till simply catches up to it.
-    await deriveGateState();
-  }, [deriveGateState]);
+    const daily = await acquireDaily();
+    const employeeAfter = await readEmployeeSession();
 
-  /** Signs the current employee out. The register is left open, deliberately. */
+    const next = applyExplicitDailyEstablished(gateRef.current, {
+      employeeBefore,
+      daily,
+      employeeAfter,
+    });
+
+    setGate(next);
+    setGateBusy(false);
+
+    // The pure transition has already decided; these only explain it. An
+    // escalation to the employee gate is the one an operator most needs told,
+    // because the screen changes under them.
+    if (next.recovery === "employee") {
+      setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+      setSelectedEmployee(null);
+      return;
+    }
+
+    setGateError(describeDailyOutcome(next, daily));
+  }, [acquireDaily, readEmployeeSession, describeDailyOutcome]);
+
+  /**
+   * Signs the current employee out.
+   *
+   * The DAILY context is left exactly as it is, deliberately: a business day is
+   * not a drawer period and nobody closes one. The next person to sign in gets
+   * the same day back from the server.
+   */
   const handleEmployeeLogout = useCallback(async () => {
     setGateBusy(true);
     setGateError(null);
@@ -1996,10 +2067,10 @@ export default function DeviceApp() {
     async (input) => {
       const current = gateRef.current;
 
-      if (current.employee === null || current.register === null) {
+      if (current.employee === null || current.daily === null) {
         return {
           receipt: null,
-          error: "Sign in an employee and open the register before taking a sale.",
+          error: "Sign in an employee before taking a sale.",
           failure: "server_rejected",
           rolledBack: true,
         };
@@ -2010,7 +2081,7 @@ export default function DeviceApp() {
         items: input.items,
         saleRequestId: input.saleRequestId,
         expectedEmployeePosSessionId: current.employee.employeeSessionId,
-        expectedRegisterSessionId: current.register.registerSessionId,
+        expectedRegisterSessionId: current.daily.registerSessionId,
       });
 
       // STALE STATE IS NOT RETRIED. The server has just proven this till wrong
@@ -2040,6 +2111,37 @@ export default function DeviceApp() {
         setGate(recovering);
         setGateError(result.error);
         void deriveGateState("observe");
+
+        return result;
+      }
+
+      // ==================================================================
+      // v1.3 CP2d — ADOPTING WHAT THE SERVER ACTUALLY STORED. Freshness only.
+      //
+      // complete_sale_v5 returns the register id it wrote the order against.
+      // When CP2c rolled this sale forward onto a new business day, that id is
+      // the CURRENT day and the one this till was holding is yesterday's.
+      // Taking it means the next sale arrives current instead of rolling
+      // forward again — one round trip saved, and nothing more: refusing to
+      // adopt would still be correct, because CP2c would roll that one forward
+      // too. This runs ONLY after the server has already completed the sale.
+      //
+      // NO BUSINESS DATE IS DERIVED HERE. The response carries an id and
+      // nothing else useful, so the adopted context is marked as having no
+      // known end and the freshness timer reconciles the rest from the server.
+      // ==================================================================
+      const stored = (result.receipt as { attribution?: { registerSessionId?: unknown } } | null)
+        ?.attribution?.registerSessionId;
+
+      if (result.receipt !== null && shouldAdoptSaleRegisterId(gateRef.current.daily, stored)) {
+        const adopted = applySaleRegisterAdoption(
+          gateRef.current,
+          adoptSaleRegisterId(gateRef.current.daily, stored)
+        );
+
+        dailyUnchangedRef.current = 0;
+        gateRef.current = adopted;
+        setGate(adopted);
       }
 
       return result;
@@ -2577,14 +2679,26 @@ export default function DeviceApp() {
             recovery={gate.recovery === "employee"}
             onSubmit={(employeeCode, pin) => void handleEmployeeCodeLogin(employeeCode, pin)}
           />
+        ) : posGate === "timezone" ? (
+          // THE ONE SETUP PROBLEM A CASHIER MUST NOT WORK AROUND. No timezone
+          // picker here, and no local guess: choosing one would date this
+          // shop's money from a device. Lane 3 owns the setting.
+          <BusinessTimezoneRequiredCard
+            busy={gateBusy}
+            error={gateError}
+            onRetry={() => void recoverDailyContext()}
+          />
         ) : gate.employee !== null ? (
-          <RegisterOpenPanel
+          // EXCEPTIONAL, NOT REGISTER MANAGEMENT. An ordinary midnight never
+          // reaches here -- CP2c rolls it forward inside the sale. This is a
+          // day the server would not establish, and the only button is to ask
+          // it again.
+          <DailyContextRecoveryCard
             employee={gate.employee}
             busy={gateBusy}
             error={gateError}
-            recovery={gate.recovery === "register"}
-            onOpen={(openingCash) => void handleOpenRegister(openingCash)}
-            onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}
+            recovery={gate.recovery === "daily"}
+            onRetry={() => void recoverDailyContext()}
             onSwitchEmployee={() => {
               setGateError(null);
               void loadRoster();
@@ -2642,13 +2756,14 @@ export default function DeviceApp() {
               submission fails as a transport error, every record is preserved,
               and the backoff is unchanged. Availability keys on the queue's own
               counts, never on navigator.onLine. */}
-          {/* v1.3 Feature 1B — who is on the till and which register is open.
-              A device-host control, beside the sync status, so the register
-              lifecycle never enters a template. */}
-          {gate.employee !== null && gate.register !== null && (
-            <RegisterStatus
+          {/* v1.3 CP2d — who is on the till, and which business day it is.
+              A device-host control, beside the sync status, so nothing about
+              the register model enters a template. There is no Close Register:
+              a business day is not a drawer period and nobody closes one. */}
+          {gate.employee !== null && gate.daily !== null && (
+            <DailyRegisterStatus
               employee={gate.employee}
-              register={gate.register}
+              daily={gate.daily}
               busy={gateBusy}
               error={gateError}
               onSwitchEmployee={() => {
@@ -2658,7 +2773,6 @@ export default function DeviceApp() {
                 setGate(beginEmployeeSwitch(gateRef.current));
               }}
               onLogout={() => void handleEmployeeLogout()}
-              onCloseRegister={() => void handleCloseRegister()}
             />
           )}
 

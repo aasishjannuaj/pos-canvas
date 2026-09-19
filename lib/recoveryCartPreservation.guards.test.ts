@@ -113,7 +113,7 @@ describe("1 + 2. a refusal cannot unmount the runtime", () => {
     expect(app).toContain('<div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{activeOverlay}</div>');
   });
 
-  it("BOTH recovery kinds go through it — employee and register", () => {
+  it("BOTH recovery kinds go through it — employee and daily", () => {
     const gateOverlay = app.slice(app.indexOf("const gateOverlay ="), app.indexOf("const activeOverlay"));
 
     // UPDATED BY v1.3 checkpoint 2: the primary cashier login is the
@@ -121,9 +121,12 @@ describe("1 + 2. a refusal cannot unmount the runtime", () => {
     // guard protects is unchanged — both recovery kinds render through the one
     // overlay slot, over a still-mounted PosRuntime.
     expect(gateOverlay).toContain("<EmployeeLockCard");
-    expect(gateOverlay).toContain("<RegisterOpenPanel");
+    expect(gateOverlay).toContain("<DailyContextRecoveryCard");
+    // v1.3 CP2d — and the setup state renders through the same slot, so a
+    // business with no timezone also keeps the cart and the runtime.
+    expect(gateOverlay).toContain("<BusinessTimezoneRequiredCard");
     expect(gateOverlay).toContain('recovery={gate.recovery === "employee"}');
-    expect(gateOverlay).toContain('recovery={gate.recovery === "register"}');
+    expect(gateOverlay).toContain('recovery={gate.recovery === "daily"}');
   });
 });
 
@@ -256,7 +259,8 @@ describe("5 + 6 + 7 + 8. every covering screen stays usable", () => {
 
   for (const screen of [
     "EmployeeLockCard",
-    "RegisterOpenPanel",
+    "DailyContextRecoveryCard",
+    "BusinessTimezoneRequiredCard",
     "DeviceSettingsScreen",
     "SalesHistoryScreen",
     "SalesHistoryDetail",

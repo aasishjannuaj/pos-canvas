@@ -19,10 +19,12 @@ import {
   canCheckoutOffline,
   resolvePosGate,
 } from "@/lib/posGate";
+import type { DailyAcquisition } from "@/lib/posGate";
+import type { DailyRegisterContext } from "@/lib/dailyRegister";
 import type { PosGateState } from "@/lib/posGate";
 import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employeeSession";
 import type { EmployeeSession } from "@/lib/employeeSession";
-import type { RegisterSession } from "@/lib/registerSession";
+
 
 const ADA: EmployeeSession = {
   employeeSessionId: "sess-ada",
@@ -42,16 +44,27 @@ const BO: EmployeeSession = {
 /** Ada, signed in again later — same person, a DIFFERENT session. */
 const ADA_AGAIN: EmployeeSession = { ...ADA, employeeSessionId: "sess-ada-2" };
 
-const REGISTER: RegisterSession = {
-  registerSessionId: "reg-1",
-  openedAt: "2026-09-19T08:05:00.000Z",
-  openedByEmployeeId: "emp-ada",
-  openingCash: "125.50",
-  closedAt: null,
-  closedByEmployeeId: null,
+/** A business day, exactly as ensure_daily_register_context() reports one. */
+const TODAY: DailyRegisterContext = {
+  registerSessionId: "daily-1",
+  businessDate: "2026-09-19",
+  businessTimezone: "America/New_York",
+  openedAt: "2026-09-19T04:00:00.000Z",
+  closedAt: "2026-09-20T04:00:00.000Z",
 };
 
-const OTHER_REGISTER: RegisterSession = { ...REGISTER, registerSessionId: "reg-2" };
+/** Tomorrow, as the server would report it after a rollover. */
+const TOMORROW: DailyRegisterContext = {
+  ...TODAY,
+  registerSessionId: "daily-2",
+  businessDate: "2026-09-20",
+};
+
+const gotToday: DailyAcquisition = { ok: true, context: TODAY };
+const noDay: DailyAcquisition = { ok: false, reason: "unavailable" };
+
+/** The revalidation read that says "still the same person". */
+const stillSame = (employee: EmployeeSession) => ({ ok: true as const, session: employee });
 
 // ---------------------------------------------------------------------------
 // Employee ID and PIN shapes
@@ -115,13 +128,10 @@ describe("startup and reload leave the till LOCKED", () => {
     // THE CHECKPOINT-2 RULE. The server reports Ada signed in with a register
     // open — the most tempting possible observation — and the till stays locked
     // because nobody has authenticated here.
-    const observed = applyReconnectDerivation(applyStartupLock(), {
-      employee: ADA,
-      register: REGISTER,
-    });
+    const observed = applyReconnectDerivation(applyStartupLock(), { employee: stillSame(ADA), daily: gotToday });
 
     expect(observed.employee).toBeNull();
-    expect(observed.register).toBeNull();
+    expect(observed.daily).toBeNull();
     expect(observed.establishedOnline).toBe(false);
     expect(resolvePosGate(observed)).toBe("employee");
   });
@@ -130,17 +140,14 @@ describe("startup and reload leave the till LOCKED", () => {
     let state = applyStartupLock();
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      state = applyReconnectDerivation(state, { employee: ADA, register: REGISTER });
+      state = applyReconnectDerivation(state, { employee: stillSame(ADA), daily: gotToday });
     }
 
     expect(resolvePosGate(state)).toBe("employee");
   });
 
   it("and nothing observed can be claimed on an offline sale", () => {
-    const observed = applyReconnectDerivation(applyStartupLock(), {
-      employee: ADA,
-      register: REGISTER,
-    });
+    const observed = applyReconnectDerivation(applyStartupLock(), { employee: stillSame(ADA), daily: gotToday });
 
     expect(buildOfflineClaims(observed)).toEqual({
       employeePosSessionId: null,
@@ -156,43 +163,43 @@ describe("startup and reload leave the till LOCKED", () => {
 
 describe("explicit Employee ID + PIN authentication", () => {
   it("unlocks the POS when a register is already open", () => {
-    const authenticated = applyEmployeeAuthenticated({ employee: ADA, register: REGISTER });
+    const authenticated = applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) });
 
     expect(authenticated.employee).toEqual(ADA);
-    expect(authenticated.register).toEqual(REGISTER);
+    expect(authenticated.daily).toEqual(TODAY);
     expect(authenticated.establishedOnline).toBe(true);
     expect(resolvePosGate(authenticated)).toBe("pos");
   });
 
-  it("REUSES the open register — it does not rotate it", () => {
-    const authenticated = applyEmployeeAuthenticated({ employee: BO, register: REGISTER });
+  it("takes the DAY the server reports — signing in is not a drawer event", () => {
+    const authenticated = applyEmployeeAuthenticated({ employee: BO, daily: gotToday, revalidated: stillSame(BO) });
 
     // Same session id, same opening cash, same opened_by. Signing in is not a
     // drawer event, and one register spans many operators.
-    expect(authenticated.register).toBe(REGISTER);
-    expect(authenticated.register?.registerSessionId).toBe("reg-1");
-    expect(authenticated.register?.openingCash).toBe("125.50");
-    expect(authenticated.register?.openedByEmployeeId).toBe("emp-ada");
-    expect(authenticated.register?.closedAt).toBeNull();
+    expect(authenticated.daily).toBe(TODAY);
+    expect(authenticated.daily?.registerSessionId).toBe("daily-1");
+    // A business day has no opener and no opening cash. It has a date.
+    expect(authenticated.daily?.businessDate).toBe("2026-09-19");
+    expect(authenticated.daily?.businessTimezone).toBe("America/New_York");
   });
 
-  it("stops at the register gate when no register is open", () => {
-    const authenticated = applyEmployeeAuthenticated({ employee: ADA, register: null });
+  it("stops at the daily gate when the server could not establish the day", () => {
+    const authenticated = applyEmployeeAuthenticated({ employee: ADA, daily: noDay, revalidated: stillSame(ADA) });
 
     expect(authenticated.employee).toEqual(ADA);
     expect(authenticated.establishedOnline).toBe(false);
-    expect(resolvePosGate(authenticated)).toBe("register");
+    expect(resolvePosGate(authenticated)).toBe("daily");
   });
 
   it("and only then may an offline sale be taken", () => {
-    expect(canCheckoutOffline(applyEmployeeAuthenticated({ employee: ADA, register: REGISTER })).ok)
+    expect(canCheckoutOffline(applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) })).ok)
       .toBe(true);
-    expect(canCheckoutOffline(applyEmployeeAuthenticated({ employee: ADA, register: null })).ok)
+    expect(canCheckoutOffline(applyEmployeeAuthenticated({ employee: ADA, daily: noDay, revalidated: stillSame(ADA) })).ok)
       .toBe(false);
   });
 
   it("clears any pending recovery, because a person just re-established it", () => {
-    expect(applyEmployeeAuthenticated({ employee: ADA, register: REGISTER }).recovery).toBeNull();
+    expect(applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) }).recovery).toBeNull();
   });
 });
 
@@ -201,13 +208,10 @@ describe("explicit Employee ID + PIN authentication", () => {
 // ---------------------------------------------------------------------------
 
 describe("reconnect keeps an authenticated operator, and only them", () => {
-  const authenticated = applyEmployeeAuthenticated({ employee: ADA, register: REGISTER });
+  const authenticated = applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) });
 
   it("a flapping connection is not a shift change", () => {
-    const after = applyReconnectDerivation(authenticated, {
-      employee: ADA,
-      register: REGISTER,
-    });
+    const after = applyReconnectDerivation(authenticated, { employee: stillSame(ADA), daily: gotToday });
 
     expect(after.employee).toEqual(ADA);
     expect(resolvePosGate(after)).toBe("pos");
@@ -215,16 +219,16 @@ describe("reconnect keeps an authenticated operator, and only them", () => {
 
   it("it picks up a register that was opened meanwhile", () => {
     const after = applyReconnectDerivation(
-      applyEmployeeAuthenticated({ employee: ADA, register: null }),
-      { employee: ADA, register: REGISTER }
+      applyEmployeeAuthenticated({ employee: ADA, daily: noDay, revalidated: stillSame(ADA) }),
+      { employee: stillSame(ADA), daily: gotToday }
     );
 
-    expect(after.register).toEqual(REGISTER);
+    expect(after.daily).toEqual(TODAY);
     expect(resolvePosGate(after)).toBe("pos");
   });
 
   it("it LOCKS when the server reports a different employee", () => {
-    const after = applyReconnectDerivation(authenticated, { employee: BO, register: REGISTER });
+    const after = applyReconnectDerivation(authenticated, { employee: stillSame(BO), daily: gotToday });
 
     expect(after.employee).toBeNull();
     expect(resolvePosGate(after)).toBe("employee");
@@ -233,33 +237,30 @@ describe("reconnect keeps an authenticated operator, and only them", () => {
   it("a new session for the SAME person also locks", () => {
     // The cashier believes Ada is signed in; the server would attribute a sale
     // to a different session. Same person is not the same session.
-    const after = applyReconnectDerivation(authenticated, {
-      employee: ADA_AGAIN,
-      register: REGISTER,
-    });
+    const after = applyReconnectDerivation(authenticated, { employee: stillSame(ADA_AGAIN), daily: gotToday });
 
     expect(after.employee).toBeNull();
     expect(resolvePosGate(after)).toBe("employee");
   });
 
   it("it locks when the server reports nobody", () => {
-    expect(resolvePosGate(applyReconnectDerivation(authenticated, { employee: null, register: REGISTER })))
-      .toBe("employee");
+    expect(
+      resolvePosGate(
+        applyReconnectDerivation(authenticated, { employee: { ok: true, session: null }, daily: gotToday })
+      )
+    ).toBe("employee");
   });
 
   it("it cannot unlock a locked till, whatever it sees", () => {
-    expect(resolvePosGate(applyReconnectDerivation(EMPTY_POS_GATE_STATE, {
-      employee: ADA,
-      register: REGISTER,
-    }))).toBe("employee");
+    expect(resolvePosGate(applyReconnectDerivation(EMPTY_POS_GATE_STATE, { employee: stillSame(ADA), daily: gotToday }))).toBe("employee");
   });
 
   it("a pending recovery survives a reconnect", () => {
-    const recovering: PosGateState = { ...authenticated, recovery: "register" };
-    const after = applyReconnectDerivation(recovering, { employee: ADA, register: OTHER_REGISTER });
+    const recovering: PosGateState = { ...authenticated, recovery: "daily" };
+    const after = applyReconnectDerivation(recovering, { employee: stillSame(ADA), daily: { ok: true, context: TOMORROW } });
 
-    expect(after.recovery).toBe("register");
-    expect(resolvePosGate(after)).toBe("register");
+    expect(after.recovery).toBe("daily");
+    expect(resolvePosGate(after)).toBe("daily");
   });
 });
 
@@ -268,7 +269,7 @@ describe("reconnect keeps an authenticated operator, and only them", () => {
 // ---------------------------------------------------------------------------
 
 describe("stale employee recovery uses the same lock, and needs a PIN", () => {
-  const established = applyEmployeeAuthenticated({ employee: ADA, register: REGISTER });
+  const established = applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) });
   const refused = applySaleAttributionFailure(established, "employee_changed");
 
   it("the refusal locks the till and names the reason", () => {
@@ -278,7 +279,7 @@ describe("stale employee recovery uses the same lock, and needs a PIN", () => {
   });
 
   it("re-reading the server does not unlock it", () => {
-    expect(resolvePosGate(applyReconnectDerivation(refused, { employee: BO, register: REGISTER })))
+    expect(resolvePosGate(applyReconnectDerivation(refused, { employee: stillSame(BO), daily: gotToday })))
       .toBe("employee");
   });
 
@@ -287,7 +288,7 @@ describe("stale employee recovery uses the same lock, and needs a PIN", () => {
   });
 
   it("explicit authentication is what resolves it", () => {
-    const recovered = applyEmployeeAuthenticated({ employee: BO, register: REGISTER });
+    const recovered = applyEmployeeAuthenticated({ employee: BO, daily: gotToday, revalidated: stillSame(BO) });
 
     expect(recovered.recovery).toBeNull();
     expect(resolvePosGate(recovered)).toBe("pos");
@@ -295,34 +296,30 @@ describe("stale employee recovery uses the same lock, and needs a PIN", () => {
   });
 
   it("and the register is reused, not rotated, by that recovery", () => {
-    expect(applyEmployeeAuthenticated({ employee: BO, register: REGISTER }).register).toBe(REGISTER);
+    expect(applyEmployeeAuthenticated({ employee: BO, daily: gotToday, revalidated: stillSame(BO) }).daily).toBe(TODAY);
   });
 });
 
-describe("employee recovery does not weaken stale-REGISTER protection", () => {
-  const established = applyEmployeeAuthenticated({ employee: ADA, register: REGISTER });
+describe("employee recovery does not weaken stale-TODAY protection", () => {
+  const established = applyEmployeeAuthenticated({ employee: ADA, daily: gotToday, revalidated: stillSame(ADA) });
 
   it("a register refusal still demands its own explicit recovery", () => {
     const refused = applySaleAttributionFailure(established, "register_changed");
 
-    expect(refused.recovery).toBe("register");
-    expect(refused.register).toBeNull();
-    expect(resolvePosGate(refused)).toBe("register");
+    expect(refused.recovery).toBe("daily");
+    expect(refused.daily).toBeNull();
+    expect(resolvePosGate(refused)).toBe("daily");
   });
 
-  it("authenticating an employee does not adopt a changed register", () => {
-    // The combined case. Signing in again is permission to operate, not
-    // permission to accept a drawer period nobody chose: the register handed to
-    // applyEmployeeAuthenticated is whatever the server reports at that moment,
-    // and a pending register recovery is resolved by its own explicit path.
+  it("a reconnect does not adopt a new day out of a pending recovery", () => {
+    // The combined case. The server reporting a perfectly good business day is
+    // an observation, not this operator choosing to trust the till again: a
+    // pending daily recovery is resolved by its own explicit path.
     const registerRecovery = applySaleAttributionFailure(established, "register_changed");
-    const reconnected = applyReconnectDerivation(registerRecovery, {
-      employee: ADA,
-      register: OTHER_REGISTER,
-    });
+    const reconnected = applyReconnectDerivation(registerRecovery, { employee: stillSame(ADA), daily: { ok: true, context: TOMORROW } });
 
-    expect(reconnected.recovery).toBe("register");
-    expect(resolvePosGate(reconnected)).toBe("register");
+    expect(reconnected.recovery).toBe("daily");
+    expect(resolvePosGate(reconnected)).toBe("daily");
     expect(canCheckoutOffline(reconnected).ok).toBe(false);
   });
 });

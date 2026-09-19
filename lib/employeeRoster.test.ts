@@ -135,8 +135,11 @@ describe("when the till must NOT ask", () => {
     expect(shouldLoadRoster({ ...AT_THE_GATE, ready: false, roster: UNLOADED_ROSTER })).toBe(false);
   });
 
-  it("not at the register gate or inside the POS", () => {
-    expect(shouldLoadRoster({ ...AT_THE_GATE, gate: "register", roster: UNLOADED_ROSTER })).toBe(
+  it("not at an exception gate or inside the POS", () => {
+    expect(shouldLoadRoster({ ...AT_THE_GATE, gate: "daily", roster: UNLOADED_ROSTER })).toBe(
+      false
+    );
+    expect(shouldLoadRoster({ ...AT_THE_GATE, gate: "timezone", roster: UNLOADED_ROSTER })).toBe(
       false
     );
     expect(shouldLoadRoster({ ...AT_THE_GATE, gate: "pos", roster: UNLOADED_ROSTER })).toBe(false);

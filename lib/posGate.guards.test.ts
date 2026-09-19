@@ -68,9 +68,9 @@ function filesUnder(relative: string): string[] {
 describe("the device host owns the gates", () => {
   const app = code(read(DEVICE_APP));
 
-  it("derives both sessions from the server", () => {
+  it("derives the employee and the DAILY context from the server", () => {
     expect(app).toContain("fetchCurrentEmployeeSession");
-    expect(app).toContain("fetchCurrentRegisterSession");
+    expect(app).toContain("ensureDailyRegisterContext");
     expect(app).toContain("deriveGateState");
   });
 
@@ -136,8 +136,8 @@ describe("the device host owns the gates", () => {
     expect(callback).not.toMatch(/deriveGateState\(\s*\)/);
   });
 
-  it("only observe mode reaches applyRecoveryObservation, and it is the only user", () => {
-    expect(app).toContain("applyRecoveryObservation");
+  it("only observe mode reaches the non-adopting refresh, and it is the only user", () => {
+    expect(app).toContain("applyDailyRefresh");
     expect(app).toContain('mode === "observe"');
   });
 });
@@ -237,7 +237,7 @@ describe("no template carries Feature 1B behaviour", () => {
         "employeeLogin",
         "openRegisterSession",
         "closeRegisterSession",
-        "fetchCurrentRegisterSession",
+        "ensureDailyRegisterContext",
         "completeDeviceSaleV5",
         "buildOfflineClaims",
         "canCheckoutOffline",
@@ -344,116 +344,77 @@ describe("recovery is an explicit act", () => {
   const app = code(read(DEVICE_APP));
   const gates = code(read("components/device/PosGates.tsx"));
 
-  it("both gates are told when they are a recovery surface", () => {
+  it("both exception surfaces are told when they are a recovery surface", () => {
     expect(app).toContain('recovery={gate.recovery === "employee"}');
-    expect(app).toContain('recovery={gate.recovery === "register"}');
+    expect(app).toContain('recovery={gate.recovery === "daily"}');
   });
 
-  it("adopting the open register is a button, never automatic", () => {
-    expect(gates).toContain("onAdoptCurrentRegister");
-    expect(app).toContain("handleAdoptCurrentRegister");
-
-    // The host's handler is reachable only from that callback prop.
-    expect(app).toContain("onAdoptCurrentRegister={() => void handleAdoptCurrentRegister()}");
+  it("re-establishing the day is a button, never automatic", () => {
+    expect(gates).toContain("onRetry");
+    expect(app).toContain("recoverDailyContext");
+    expect(app).toContain("onRetry={() => void recoverDailyContext()}");
   });
 
-  it("one helper owns every establishment out of a register recovery", () => {
-    // applyExplicitRegisterEstablished is reachable only from
-    // establishRegisterAfterRecovery, so there is exactly one place that can
-    // turn a register recovery into an established pair.
+  it("one helper owns every establishment out of a daily recovery", () => {
+    // applyExplicitDailyEstablished is reachable only from recoverDailyContext,
+    // so there is exactly one place that can turn a recovery into an
+    // established pair.
     const helper = app.slice(
-      app.indexOf("const establishRegisterAfterRecovery"),
-      app.indexOf("/** Opens the register on this till. */")
+      app.indexOf("const recoverDailyContext"),
+      app.indexOf("const handleEmployeeLogout")
     );
 
-    expect(helper).toContain("applyExplicitRegisterEstablished(gateRef.current");
-    // Every occurrence in the file is inside that helper.
-    expect(app.match(/applyExplicitRegisterEstablished\(/g)?.length).toBe(
-      helper.match(/applyExplicitRegisterEstablished\(/g)?.length
+    expect(helper).toContain("applyExplicitDailyEstablished(gateRef.current");
+    expect(app.match(/applyExplicitDailyEstablished\(/g)?.length).toBe(
+      helper.match(/applyExplicitDailyEstablished\(/g)?.length
     );
   });
 
-  it("that helper SANDWICHES the register operation between two employee reads", () => {
+  it("that helper SANDWICHES the ensure call between two employee reads", () => {
     const helper = app.slice(
-      app.indexOf("const establishRegisterAfterRecovery"),
-      app.indexOf("/** Opens the register on this till. */")
+      app.indexOf("const recoverDailyContext"),
+      app.indexOf("const handleEmployeeLogout")
     );
 
-    // before → operation → after. Two reads, not one: a single read leaves the
-    // window where the server switches employee before the register is read.
+    // before -> ensure -> after. Two reads, not one: a single read leaves the
+    // window where the server switches employee before the day is established.
     expect(helper.match(/await readEmployeeSession\(\)/g)).toHaveLength(2);
     expect(helper).toContain("const employeeBefore = await readEmployeeSession();");
     expect(helper).toContain("const employeeAfter = await readEmployeeSession();");
 
-    // The order is the property. The operation must sit between them.
     const before = helper.indexOf("const employeeBefore");
-    const operation = helper.indexOf("await operation()");
+    const ensure = helper.indexOf("await acquireDaily()");
     const after = helper.indexOf("const employeeAfter");
 
     expect(before).toBeGreaterThan(-1);
-    expect(operation).toBeGreaterThan(before);
-    expect(after).toBeGreaterThan(operation);
+    expect(ensure).toBeGreaterThan(before);
+    expect(after).toBeGreaterThan(ensure);
   });
 
-  it("the PRE-CHECK gates the operation — it does not merely report on it", () => {
+  it("the PRE-CHECK gates the ensure — it does not merely report on it", () => {
     const helper = app.slice(
-      app.indexOf("const establishRegisterAfterRecovery"),
-      app.indexOf("/** Opens the register on this till. */")
+      app.indexOf("const recoverDailyContext"),
+      app.indexOf("const handleEmployeeLogout")
     );
 
     const precheck = helper.indexOf("checkRetainedEmployee(gateRef.current, employeeBefore)");
-    const operation = helper.indexOf("await operation()");
+    const ensure = helper.indexOf("await acquireDaily()");
 
     expect(precheck).toBeGreaterThan(-1);
-    expect(precheck).toBeLessThan(operation);
-    // And it returns without running the operation when it refuses.
-    expect(helper.slice(precheck, operation)).toContain("return;");
+    expect(precheck).toBeLessThan(ensure);
+    // And it returns without asking for a day when it refuses.
+    expect(helper.slice(precheck, ensure)).toContain("return;");
   });
 
-  it("the Open register path routes its RECOVERY case through the same helper", () => {
-    // Same class: open_register_session opens under the SERVER's current
-    // employee session, so an establishing derivation afterwards would adopt
-    // whoever that is.
-    const handler = app.slice(
-      app.indexOf("const handleOpenRegister"),
-      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
+  it("recovery re-establishes the day through ensure, never a legacy open", () => {
+    const helper = app.slice(
+      app.indexOf("const recoverDailyContext"),
+      app.indexOf("const handleEmployeeLogout")
     );
 
-    expect(handler).toContain('gateRef.current.recovery === "register"');
-    expect(handler).toContain("establishRegisterAfterRecovery(async () => {");
-  });
-
-  it("the open RPC is issued INSIDE the sandwich, never before it", () => {
-    const handler = app.slice(
-      app.indexOf("const handleOpenRegister"),
-      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
-    );
-
-    const recovery = handler.indexOf('gateRef.current.recovery === "register"');
-    const sandwich = handler.indexOf("establishRegisterAfterRecovery(async () => {");
-    const openInside = handler.indexOf("await openRegisterSession(", sandwich);
-
-    // The recovery branch comes first, and its open call sits within the
-    // callback the helper invokes only after the pre-check passes.
-    expect(recovery).toBeLessThan(sandwich);
-    expect(openInside).toBeGreaterThan(sandwich);
-
-    // Nothing calls the RPC between the recovery test and the sandwich.
-    expect(handler.slice(recovery, sandwich)).not.toContain("openRegisterSession(");
-  });
-
-  it("already_open is returned through the same operation slot", () => {
-    const handler = app.slice(
-      app.indexOf("const handleOpenRegister"),
-      app.indexOf('/**\n   * The operator pressed "Use the register that is open".')
-    );
-
-    const sandwich = handler.indexOf("establishRegisterAfterRecovery(async () => {");
-    const inside = handler.slice(sandwich);
-
-    expect(inside).toContain('result.code === "already_open"');
-    // It yields a session to the transition rather than establishing directly.
-    expect(inside.slice(0, inside.indexOf("});"))).not.toContain("setGate(");
+    expect(helper).toContain("acquireDaily()");
+    expect(helper).not.toContain("openRegisterSession");
+    expect(helper).not.toContain("openingCash");
   });
 });
 

@@ -20,18 +20,19 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_POS_GATE_STATE,
-  applyExplicitRegisterEstablished,
-  applyRecoveryObservation,
+  applyDailyRefresh,
+  applyEmployeeAuthenticated,
+  applyExplicitDailyEstablished,
+  applyReconnectDerivation,
   applySaleAttributionFailure,
-  applyServerDerivation,
   beginEmployeeSwitch,
   buildOfflineClaims,
   canCheckoutOffline,
   resolvePosGate,
 } from "@/lib/posGate";
-import type { PosGateState } from "@/lib/posGate";
+import type { DailyAcquisition, PosGateState } from "@/lib/posGate";
 import type { EmployeeSession } from "@/lib/employeeSession";
-import type { RegisterSession } from "@/lib/registerSession";
+import type { DailyRegisterContext } from "@/lib/dailyRegister";
 
 const ADA: EmployeeSession = {
   employeeSessionId: "sess-ada",
@@ -48,28 +49,31 @@ const BO: EmployeeSession = {
   displayName: "Bo",
 };
 
-const REGISTER_A: RegisterSession = {
-  registerSessionId: "reg-a",
-  openedAt: "2026-09-18T02:05:00.000Z",
-  openedByEmployeeId: "emp-ada",
-  openingCash: "25.50",
-  closedAt: null,
-  closedByEmployeeId: null,
+const DAY_A: DailyRegisterContext = {
+  registerSessionId: "daily-a",
+  businessDate: "2026-09-18",
+  businessTimezone: "America/New_York",
+  openedAt: "2026-09-18T04:00:00.000Z",
+  closedAt: "2026-09-19T04:00:00.000Z",
 };
 
-const REGISTER_B: RegisterSession = {
-  ...REGISTER_A,
-  registerSessionId: "reg-b",
-  openedByEmployeeId: "emp-bo",
-  openingCash: "100.00",
+const DAY_B: DailyRegisterContext = {
+  ...DAY_A,
+  registerSessionId: "daily-b",
+  businessDate: "2026-09-19",
 };
 
-/** Ada + register A, established from the server. The till is selling. */
+const gotA: DailyAcquisition = { ok: true, context: DAY_A };
+const gotB: DailyAcquisition = { ok: true, context: DAY_B };
+const stillSame = (employee: EmployeeSession) => ({ ok: true as const, session: employee });
+
+/** Ada + today, established from the server. The till is selling. */
 const established: PosGateState = {
   employee: ADA,
-  register: REGISTER_A,
+  daily: DAY_A,
   establishedOnline: true,
   recovery: null,
+  setup: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,11 +84,11 @@ describe("employee_changed: the server reports Bo, and the POS must not reopen",
   // The exact scenario in the review: local till believes Ada + register A, the
   // server has moved on to Bo + register B, the sale is refused.
   const refused = applySaleAttributionFailure(established, "employee_changed");
-  const observed = applyRecoveryObservation(refused, { employee: BO, register: REGISTER_B });
+  const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
   it("the refusal itself drops Ada and raises an employee recovery", () => {
     expect(refused.employee).toBeNull();
-    expect(refused.register).toBeNull();
+    expect(refused.daily).toBeNull();
     expect(refused.establishedOnline).toBe(false);
     expect(refused.recovery).toBe("employee");
   });
@@ -96,7 +100,7 @@ describe("employee_changed: the server reports Bo, and the POS must not reopen",
 
   it("re-reading the server does NOT adopt register B either", () => {
     // Never even stored, so no later code path can reach it.
-    expect(observed.register).toBeNull();
+    expect(observed.daily).toBeNull();
   });
 
   it("the POS MUST NOT reopen — the employee gate is required", () => {
@@ -119,7 +123,7 @@ describe("employee_changed: the server reports Bo, and the POS must not reopen",
     // What the host does after employee_login succeeds: a plain derivation,
     // which is the ONE path that clears `recovery`. It is reachable only from a
     // successful PIN entry — a person choosing an employee and proving it.
-    const afterExplicitLogin = applyServerDerivation({ employee: BO, register: REGISTER_B });
+    const afterExplicitLogin = applyEmployeeAuthenticated({ employee: BO, daily: { ok: true, context: DAY_B }, revalidated: stillSame(BO) });
 
     expect(afterExplicitLogin.recovery).toBeNull();
     expect(afterExplicitLogin.establishedOnline).toBe(true);
@@ -132,7 +136,7 @@ describe("employee_changed: the server reports Bo, and the POS must not reopen",
     let state = refused;
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      state = applyRecoveryObservation(state, { employee: BO, register: REGISTER_B });
+      state = applyDailyRefresh(state, { ok: false, reason: 'unavailable' });
     }
 
     expect(state.recovery).toBe("employee");
@@ -153,14 +157,14 @@ describe("employee_missing: no automatic POS reopening", () => {
   });
 
   it("does not reopen even if the server has since signed someone in", () => {
-    const observed = applyRecoveryObservation(refused, { employee: BO, register: REGISTER_B });
+    const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
     expect(resolvePosGate(observed)).toBe("employee");
     expect(observed.establishedOnline).toBe(false);
   });
 
   it("does not reopen when the server reports nobody either", () => {
-    const observed = applyRecoveryObservation(refused, { employee: null, register: null });
+    const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
     expect(resolvePosGate(observed)).toBe("employee");
   });
@@ -172,20 +176,20 @@ describe("employee_missing: no automatic POS reopening", () => {
 
 describe("register_changed: the employee survives, the register must be re-taken", () => {
   const refused = applySaleAttributionFailure(established, "register_changed");
-  const observed = applyRecoveryObservation(refused, { employee: ADA, register: REGISTER_B });
+  const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
   it("Ada stays signed in — she was not what the server disproved", () => {
     expect(refused.employee).toEqual(ADA);
-    expect(refused.recovery).toBe("register");
+    expect(refused.recovery).toBe("daily");
   });
 
   it("the changed register is NOT silently adopted", () => {
-    expect(observed.register).toBeNull();
-    expect(observed.recovery).toBe("register");
+    expect(observed.daily).toBeNull();
+    expect(observed.recovery).toBe("daily");
   });
 
   it("the POS MUST NOT continue under the changed register", () => {
-    expect(resolvePosGate(observed)).toBe("register");
+    expect(resolvePosGate(observed)).toBe("daily");
     expect(observed.establishedOnline).toBe(false);
   });
 
@@ -202,59 +206,69 @@ describe("register_changed: the employee survives, the register must be re-taken
     // offers a button. THE PRESS is the explicit act; the till never performs
     // it on the operator's behalf — and the adoption revalidates BOTH sessions,
     // which is why the employee is passed here too.
-    const adopted = applyExplicitRegisterEstablished(observed, { employeeBefore: { ok: true, session: ADA }, register: { ok: true, session: REGISTER_B }, employeeAfter: { ok: true, session: ADA } });
+    const adopted = applyExplicitDailyEstablished(observed, { employeeBefore: { ok: true, session: ADA }, daily: { ok: true, context: DAY_B }, employeeAfter: { ok: true, session: ADA } });
 
     expect(adopted.recovery).toBeNull();
-    expect(adopted.register).toEqual(REGISTER_B);
+    expect(adopted.daily).toEqual(DAY_B);
     expect(adopted.employee).toEqual(ADA);
     expect(resolvePosGate(adopted)).toBe("pos");
     expect(canCheckoutOffline(adopted).ok).toBe(true);
   });
 
   it("opening a register outright also clears it, because that too is explicit", () => {
-    expect(applyServerDerivation({ employee: ADA, register: REGISTER_B }).recovery).toBeNull();
+    expect(applyEmployeeAuthenticated({ employee: ADA, daily: { ok: true, context: DAY_B }, revalidated: stillSame(ADA) }).recovery).toBeNull();
   });
 
-  it("ESCALATES to an employee recovery if the employee ALSO changed", () => {
-    // This is what makes the re-read worth performing during a register
+  it("a refresh cannot resolve it, however good the server's answer looks", () => {
+    // A refresh is not the operator's choice to trust the till again. Even a
+    // perfectly good business day leaves the recovery standing and the POS shut.
+    const refreshed = applyDailyRefresh(refused, gotB);
+
+    expect(refreshed.recovery).toBe("daily");
+    expect(refreshed.establishedOnline).toBe(false);
+    expect(refreshed.daily).toBeNull();
+    expect(resolvePosGate(refreshed)).toBe("daily");
+  });
+
+  it("and a reconnect ESCALATES when the employee also changed", () => {
+    // This is what makes the employee read worth performing during a daily
     // recovery: it can discover a second, worse mismatch.
-    const escalated = applyRecoveryObservation(refused, { employee: BO, register: REGISTER_B });
+    const escalated = applyReconnectDerivation(refused, {
+      employee: { ok: true, session: BO },
+      daily: gotB,
+    });
 
     expect(escalated.employee).toBeNull();
-    expect(escalated.recovery).toBe("employee");
+    expect(escalated.recovery).toBeNull();
+    expect(escalated.establishedOnline).toBe(false);
     expect(resolvePosGate(escalated)).toBe("employee");
   });
 
-  it("escalates when the server reports nobody signed in at all", () => {
-    const escalated = applyRecoveryObservation(refused, { employee: null, register: REGISTER_B });
+  it("a reconnect that confirms the SAME operator still keeps the recovery", () => {
+    const same = applyReconnectDerivation(refused, {
+      employee: { ok: true, session: ADA },
+      daily: gotB,
+    });
 
-    expect(escalated.recovery).toBe("employee");
-  });
-
-  it("an explicit adoption with nobody signed in establishes nothing", () => {
-    expect(
-      applyExplicitRegisterEstablished(EMPTY_POS_GATE_STATE, { employeeBefore: { ok: true, session: ADA }, register: { ok: true, session: REGISTER_B }, employeeAfter: { ok: true, session: ADA } })
-    ).toEqual({ employee: null, register: null, establishedOnline: false, recovery: "employee" });
+    expect(same.employee).toEqual(ADA);
+    expect(same.recovery).toBe("daily");
+    expect(resolvePosGate(same)).toBe("daily");
   });
 });
-
-// ---------------------------------------------------------------------------
-// REGISTER CLOSED
-// ---------------------------------------------------------------------------
 
 describe("register_closed: the register gate is required", () => {
   const refused = applySaleAttributionFailure(established, "register_closed");
 
   it("sends the operator to the register gate", () => {
-    expect(refused.recovery).toBe("register");
-    expect(resolvePosGate(refused)).toBe("register");
+    expect(refused.recovery).toBe("daily");
+    expect(resolvePosGate(refused)).toBe("daily");
   });
 
   it("stays there even when the server reports a NEW register already open", () => {
-    const observed = applyRecoveryObservation(refused, { employee: ADA, register: REGISTER_B });
+    const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
-    expect(resolvePosGate(observed)).toBe("register");
-    expect(observed.register).toBeNull();
+    expect(resolvePosGate(observed)).toBe("daily");
+    expect(observed.daily).toBeNull();
   });
 });
 
@@ -267,13 +281,13 @@ describe("expectations_missing: explicit recovery required", () => {
 
   it("is treated as the strictest case — back to the employee gate", () => {
     expect(refused.employee).toBeNull();
-    expect(refused.register).toBeNull();
+    expect(refused.daily).toBeNull();
     expect(refused.recovery).toBe("employee");
     expect(resolvePosGate(refused)).toBe("employee");
   });
 
   it("a re-read cannot shortcut it", () => {
-    const observed = applyRecoveryObservation(refused, { employee: ADA, register: REGISTER_A });
+    const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
     expect(resolvePosGate(observed)).toBe("employee");
     expect(canCheckoutOffline(observed).ok).toBe(false);
@@ -298,7 +312,7 @@ describe("every refusal, every time", () => {
       const refused = applySaleAttributionFailure(established, failure);
       // The worst case for the runtime: the server reports a complete, healthy,
       // DIFFERENT context, which is exactly what would tempt an adoption.
-      const observed = applyRecoveryObservation(refused, { employee: BO, register: REGISTER_B });
+      const observed = applyDailyRefresh(refused, { ok: false, reason: 'unavailable' });
 
       it("never reopens the POS by itself", () => {
         expect(resolvePosGate(observed)).not.toBe("pos");
@@ -322,7 +336,7 @@ describe("every refusal, every time", () => {
         const claims = buildOfflineClaims(observed);
 
         expect(claims.employeePosSessionId).not.toBe("sess-bo");
-        expect(claims.registerSessionId).not.toBe("reg-b");
+        expect(claims.registerSessionId).not.toBe("daily-b");
       });
     });
   }
@@ -334,7 +348,7 @@ describe("every refusal, every time", () => {
 
 describe("ordinary startup and reconnect derivation is unchanged", () => {
   it("a clean startup that finds both establishes normally", () => {
-    const started = applyServerDerivation({ employee: ADA, register: REGISTER_A });
+    const started = applyEmployeeAuthenticated({ employee: ADA, daily: { ok: true, context: DAY_A }, revalidated: stillSame(ADA) });
 
     expect(started).toEqual(established);
     expect(resolvePosGate(started)).toBe("pos");
@@ -345,23 +359,33 @@ describe("ordinary startup and reconnect derivation is unchanged", () => {
     // No refusal has happened here. Nobody has been proven wrong about
     // anything; the till simply asked and was told. Tightening this would break
     // the approved startup contract, which is not what the correction asks for.
-    const reconnected = applyServerDerivation({ employee: BO, register: REGISTER_B });
+    const reconnected = applyEmployeeAuthenticated({ employee: BO, daily: { ok: true, context: DAY_B }, revalidated: stillSame(BO) });
 
     expect(reconnected.recovery).toBeNull();
     expect(reconnected.establishedOnline).toBe(true);
     expect(resolvePosGate(reconnected)).toBe("pos");
   });
 
-  it("a startup that finds an employee but no register stops at the register gate", () => {
-    const started = applyServerDerivation({ employee: ADA, register: null });
+  it("a login whose day could not be established stops at the daily gate", () => {
+    const started = applyEmployeeAuthenticated({
+      employee: ADA,
+      daily: { ok: false, reason: "unavailable" },
+      revalidated: stillSame(ADA),
+    });
 
     expect(started.recovery).toBeNull();
     expect(started.establishedOnline).toBe(false);
-    expect(resolvePosGate(started)).toBe("register");
+    expect(resolvePosGate(started)).toBe("daily");
   });
 
-  it("a startup that finds nothing stops at the employee gate", () => {
-    expect(applyServerDerivation({ employee: null, register: null })).toEqual(EMPTY_POS_GATE_STATE);
+  it("a login whose operator was replaced mid-flight stops at the employee gate", () => {
+    expect(
+      applyEmployeeAuthenticated({
+        employee: ADA,
+        daily: gotA,
+        revalidated: { ok: true, session: null },
+      })
+    ).toEqual(EMPTY_POS_GATE_STATE);
   });
 
   it("switching employee is explicit, so it raises no recovery", () => {
@@ -377,7 +401,7 @@ describe("ordinary startup and reconnect derivation is unchanged", () => {
     // Belt and braces: `establishedOnline` would already block this. The
     // explicit `recovery` check means a future refactor that reorders these
     // flags cannot quietly reopen the hole.
-    expect(canCheckoutOffline({ ...established, recovery: "register" }).ok).toBe(false);
+    expect(canCheckoutOffline({ ...established, recovery: "daily" }).ok).toBe(false);
     expect(canCheckoutOffline({ ...established, recovery: "employee" }).ok).toBe(false);
   });
 });

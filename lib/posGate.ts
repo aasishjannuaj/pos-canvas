@@ -20,10 +20,19 @@
 //      all. That is Policy 1, and it is enforced by `canCheckoutOffline` rather
 //      than by whatever the last screen happened to show.
 import type { EmployeeSession } from "@/lib/employeeSession";
-import type { RegisterSession } from "@/lib/registerSession";
+import type { DailyRegisterContext } from "@/lib/dailyRegister";
 
-/** Which screen the device host owes the operator. */
-export type PosGate = "employee" | "register" | "pos";
+/**
+ * Which screen the device host owes the operator.
+ *
+ * v1.3 CP2d REPLACED THE REGISTER GATE. There is no longer a normal cashier
+ * step for opening a register, entering opening cash or choosing one: a
+ * business day is a calendar fact the server establishes, so the till asks for
+ * it and either has it or does not. What is left are two EXCEPTIONS -- a
+ * business with no timezone configured, and a daily context the server refused
+ * to establish -- and neither is register management.
+ */
+export type PosGate = "employee" | "timezone" | "daily" | "pos";
 
 /**
  * What the operator must EXPLICITLY re-establish before another sale.
@@ -41,13 +50,23 @@ export type PosGate = "employee" | "register" | "pos";
  * till was not who it thought. This field survives the re-derivation and forces
  * the gate regardless of what the server reports.
  */
-export type PosGateRecovery = "employee" | "register";
+export type PosGateRecovery = "employee" | "daily";
+
+/**
+ * The one setup problem a cashier cannot fix and must not work around.
+ *
+ * The server refused to establish a business day because nobody has told it
+ * what timezone this business keeps. There is no safe local answer -- not the
+ * browser's zone, not Android's, not Windows's, not UTC -- so the till says so
+ * and stops. Configuring it is the owner's job, in Lane 3.
+ */
+export type PosGateSetup = "business_timezone";
 
 export type PosGateState = {
   /** The employee POS session, as the server last reported it. */
   employee: EmployeeSession | null;
-  /** The OPEN register session, as the server last reported it. */
-  register: RegisterSession | null;
+  /** The DAILY register context, as the server last established it. */
+  daily: DailyRegisterContext | null;
   /**
    * True once both have been derived from the server in THIS app run.
    *
@@ -57,6 +76,14 @@ export type PosGateState = {
    * trusting what it holds.
    */
   establishedOnline: boolean;
+  /**
+   * Set when the server answered `business_timezone_required`.
+   *
+   * Kept apart from `recovery` because it is not a staleness problem and no
+   * amount of retrying by this cashier will clear it: somebody has to
+   * configure the business. Cleared by a later ensure that succeeds.
+   */
+  setup: PosGateSetup | null;
   /**
    * Set after a stale-expectation refusal; cleared only by an explicit act.
    *
@@ -68,9 +95,10 @@ export type PosGateState = {
 
 export const EMPTY_POS_GATE_STATE: PosGateState = {
   employee: null,
-  register: null,
+  daily: null,
   establishedOnline: false,
   recovery: null,
+  setup: null,
 };
 
 /**
@@ -88,7 +116,11 @@ export function resolvePosGate(state: PosGateState): PosGate {
   // because "the server has A" and "this operator chose A" are different
   // claims, and only the second one may reopen the POS.
   if (state.recovery === "employee" || state.employee === null) return "employee";
-  if (state.recovery === "register" || state.register === null) return "register";
+  // Setup outranks recovery: retrying a daily context for a business that has
+  // no timezone can only fail again, and telling the cashier to recover
+  // something nobody at the till can fix would be a lie about whose job it is.
+  if (state.setup === "business_timezone") return "timezone";
+  if (state.recovery === "daily" || state.daily === null) return "daily";
 
   return "pos";
 }
@@ -104,7 +136,8 @@ export function resolvePosGate(state: PosGateState): PosGate {
  */
 const GATE_BLOCKED_MESSAGES: Record<Exclude<PosGate, "pos">, string> = {
   employee: "Sign in an employee before taking a sale.",
-  register: "Open the register before taking a sale.",
+  timezone: "Set this business's timezone before taking a sale.",
+  daily: "Reconnect to establish today's register before taking a sale.",
 };
 
 export function describePosGateBlock(state: PosGateState): string | null {
@@ -136,9 +169,10 @@ const NOT_ESTABLISHED =
 export function canCheckoutOffline(state: PosGateState): OfflineCheckoutGate {
   if (
     state.recovery !== null ||
+    state.setup !== null ||
     !state.establishedOnline ||
     state.employee === null ||
-    state.register === null
+    state.daily === null
   ) {
     return { ok: false, reason: "not_established", message: NOT_ESTABLISHED };
   }
@@ -162,7 +196,12 @@ export type OfflineAttributionClaims = {
 export function buildOfflineClaims(state: PosGateState): OfflineAttributionClaims {
   return {
     employeePosSessionId: state.employee?.employeeSessionId ?? null,
-    registerSessionId: state.register?.registerSessionId ?? null,
+    // v1.3 CP2d — the retained DAILY id, deliberately. A till that queued sales
+    // across midnight keeps sending the day it was established under, and CP2c
+    // treats that as the DAILY-MODE SIGNAL and derives the real day from
+    // occurred_at. Manufacturing tomorrow's id here, from a device clock, is
+    // exactly what must not happen.
+    registerSessionId: state.daily?.registerSessionId ?? null,
   };
 }
 
@@ -235,33 +274,78 @@ export function applySaleAttributionFailure(
       // The register may still be open, but it is re-established anyway: the
       // till has just been proven wrong about server state, so it re-asks for
       // both, and `recovery` makes the employee gate mandatory on the way back.
-      return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+      return { ...EMPTY_POS_GATE_STATE, recovery: "employee" };
     case "register_changed":
     case "register_closed":
-      // The employee was NOT disproved, so they stay signed in — but the
-      // register must be re-established by a person, not by whatever the next
-      // derivation happens to find open.
-      return { ...state, register: null, establishedOnline: false, recovery: "register" };
+      // v1.3 CP2d — THIS IS NOW AN EXCEPTION, NOT A SHIFT CHANGE. CP2c rolls an
+      // ordinary midnight forward inside the sale itself, so a register refusal
+      // that still reaches the till is not "the day turned over": it is a daily
+      // context the server would not establish, or one this till has no
+      // business holding. The employee was NOT disproved and stays signed in;
+      // the context is re-established by an explicit act, never by whatever the
+      // next derivation happens to find.
+      return { ...state, daily: null, establishedOnline: false, recovery: "daily" };
   }
 }
 
 /**
- * What the till holds after a server derivation.
+ * The outcome of one ensure_daily_register_context() call, as the pure rules
+ * consume it.
  *
- * `establishedOnline` is true only when BOTH came back, because that is the
- * pair Policy 1 gates offline checkout on. A derivation that returns an
- * employee but no register leaves the till at the register gate, online, with
- * nothing established.
+ * A FAILED CALL IS NOT A REFUSED DAY. `unavailable` means the question never
+ * reached the server; the till keeps what it already had and tries again. Only
+ * `timezone_required` and `conflict` are the server saying no, and they earn
+ * different screens because one is a setup job and the other is an exception.
  */
-export function applyServerDerivation(input: {
-  employee: EmployeeSession | null;
-  register: RegisterSession | null;
-}): PosGateState {
+export type DailyAcquisition =
+  | { ok: true; context: DailyRegisterContext }
+  | { ok: false; reason: "timezone_required" | "conflict" | "unavailable" };
+
+/**
+ * Applies a daily acquisition to a state whose employee is already confirmed.
+ *
+ * Shared by login, reconnect, resume and recovery so there is exactly one
+ * answer to "what does this outcome mean", rather than four that drift.
+ */
+function withDaily(
+  employee: EmployeeSession,
+  previous: DailyRegisterContext | null,
+  acquisition: DailyAcquisition,
+  recovery: PosGateRecovery | null
+): PosGateState {
+  if (acquisition.ok) {
+    // A PENDING RECOVERY SURVIVES A SUCCESSFUL ACQUISITION. The server having a
+    // perfectly good business day is an observation; it is not this operator
+    // choosing to trust the till again. Only an explicit act clears a recovery,
+    // which is why `establishedOnline` follows the recovery rather than the
+    // acquisition.
+    return {
+      employee,
+      daily: recovery === null ? acquisition.context : null,
+      establishedOnline: recovery === null,
+      recovery,
+      setup: null,
+    };
+  }
+
+  if (acquisition.reason === "timezone_required") {
+    return { employee, daily: null, establishedOnline: false, recovery: null, setup: "business_timezone" };
+  }
+
+  if (acquisition.reason === "conflict") {
+    return { employee, daily: null, establishedOnline: false, recovery: "daily", setup: null };
+  }
+
+  // UNAVAILABLE. Nothing was learned, so nothing established is thrown away: a
+  // till that was already selling keeps its context and carries on offline,
+  // which is exactly what Policy 1 allows and what a midnight refresh that
+  // fires without a network must not undo.
   return {
-    employee: input.employee,
-    register: input.register,
-    establishedOnline: input.employee !== null && input.register !== null,
-    recovery: null,
+    employee,
+    daily: previous,
+    establishedOnline: previous !== null,
+    recovery,
+    setup: null,
   };
 }
 
@@ -276,112 +360,150 @@ export function applyServerDerivation(input: {
  * authenticated, for anyone who picks it up.
  *
  * So nothing observed populates `employee`. A person types an Employee ID and
- * a PIN, or the POS stays locked.
- *
- * The register is not derived here either: it is derived after login, which is
- * also when it can be reused or found missing.
+ * a PIN, or the POS stays locked. The daily context is not derived here either:
+ * it is established after login, by the server, and a till with nobody signed
+ * in has no business holding one.
  */
 export function applyStartupLock(): PosGateState {
   return EMPTY_POS_GATE_STATE;
 }
 
 /**
- * The operator authenticated HERE, in this app run, with ID and PIN.
+ * The operator authenticated HERE, in this app run, and the till then asked the
+ * server for today.
  *
- * The one way `employee` is ever populated. `register` is whatever the server
- * reports at that moment: an open one is REUSED as-is, and null sends the
- * operator to the register gate. Employee sessions and drawer periods are
- * independent lifecycles, so signing in never rotates a register.
+ * THE RACE THIS FUNCTION EXISTS TO CLOSE. Between the login returning and the
+ * daily context coming back, another till on the same pairing -- or a switch at
+ * this one -- can have replaced the employee POS session. Establishing on the
+ * login's word alone would open the POS under an operator the server had
+ * already moved on from, and a connection drop straight afterwards would let
+ * offline sales be taken under them.
+ *
+ * So the login's session id is re-read AFTER the daily call and compared by
+ * SESSION IDENTITY. Not employee id, not employee code, not display name: the
+ * same person signing out and back in is a different POS session, and
+ * complete_sale_v5 compares session ids too, so anything weaker only moves the
+ * refusal later.
+ *
+ * A REVALIDATION THAT FAILS LOCKS THE TILL. Not "adopt the new session", not
+ * "retry the login" -- back to Employee ID and PIN, with the cart untouched.
  */
 export function applyEmployeeAuthenticated(input: {
+  /** The session employee_login_by_code returned, in THIS app run. */
   employee: EmployeeSession;
-  register: RegisterSession | null;
+  /** What ensure_daily_register_context() answered. */
+  daily: DailyAcquisition;
+  /** The employee session re-read AFTER the daily call. */
+  revalidated: SessionRead<EmployeeSession>;
 }): PosGateState {
-  return {
-    employee: input.employee,
-    register: input.register,
-    establishedOnline: input.register !== null,
-    recovery: null,
-  };
+  if (!input.revalidated.ok) {
+    // The re-read never happened, so the spanning check cannot be satisfied.
+    // Nothing is established on an unverified pair.
+    return applyStartupLock();
+  }
+
+  if (
+    input.revalidated.session === null ||
+    input.revalidated.session.employeeSessionId !== input.employee.employeeSessionId
+  ) {
+    return applyStartupLock();
+  }
+
+  return withDaily(input.employee, null, input.daily, null);
 }
 
 /**
- * A reconnect, for a till whose operator already authenticated here.
+ * A reconnect or a resume, for a till whose operator authenticated here.
  *
- * It must not log them out — a flapping connection is not a shift change — and
- * it must not unlock a till nobody signed into. So: locked stays locked, and an
- * authenticated operator is kept ONLY while the server still reports the very
- * same POS session. Anything else locks the till, because the person the
- * cashier believes is signed in is no longer the person the server would
- * attribute a sale to.
+ * It must not log them out -- a flapping connection is not a shift change, and
+ * neither is a new calendar day -- and it must not unlock a till nobody signed
+ * into. So: locked stays locked, an authenticated operator is kept ONLY while
+ * the server still reports the very same POS session, and the daily context is
+ * whatever the server says it is now.
+ *
+ * DATE CHANGE ALONE NEVER COSTS A LOGIN. A till that slept through midnight
+ * comes back, confirms the same session, ensures the current context and
+ * carries on. A CHANGED OR MISSING SESSION ALWAYS DOES.
  */
 export function applyReconnectDerivation(
   state: PosGateState,
-  observed: { employee: EmployeeSession | null; register: RegisterSession | null }
+  observed: { employee: SessionRead<EmployeeSession>; daily: DailyAcquisition }
 ): PosGateState {
   if (state.employee === null) {
     return applyStartupLock();
   }
 
+  if (!observed.employee.ok) {
+    return applyStartupLock();
+  }
+
   if (
-    observed.employee === null ||
-    observed.employee.employeeSessionId !== state.employee.employeeSessionId
+    observed.employee.session === null ||
+    observed.employee.session.employeeSessionId !== state.employee.employeeSessionId
   ) {
     return applyStartupLock();
   }
 
-  return {
-    employee: state.employee,
-    register: observed.register,
-    establishedOnline: observed.register !== null,
-    recovery: state.recovery,
-  };
+  return withDaily(state.employee, state.daily, observed.daily, state.recovery);
 }
 
 /**
- * The re-read that follows a stale-expectation refusal. AUTHORITATIVE
- * OBSERVATION, NOT ESTABLISHED AUTHORITY.
+ * A refresh that must never take anything away.
  *
- * The server has just proven this till wrong about its own sale context, so the
- * runtime asks again — but what comes back may not reopen the POS. Two
- * different claims are being kept apart here:
+ * The freshness timer, and any refresh that fires while the till is offline or
+ * mid-sale. It can only ever REPLACE the context with a newer authoritative
+ * one; it cannot lock the till, cannot end the employee session, cannot clear
+ * the cart and cannot stop an already-authorized offline checkout because a
+ * business day ended on the device's clock.
  *
- *   "the server currently reports Bo and register B"   — an observation
- *   "this operator signed in as Bo and took register B" — authority
- *
- * Only the second may sell. So nothing observed is adopted: `establishedOnline`
- * stays false, `recovery` survives, and `resolvePosGate` keeps the operator at
- * the gate. The read is still worth making — it is what detects that the
- * employee ALSO changed during a register recovery, which escalates.
- *
- * NOTHING OBSERVED IS EVEN STORED in the fields a sale reads. That is
- * deliberate: an observed register that never lands in `state.register` cannot
- * be claimed by `buildOfflineClaims`, cannot become an expectation, and cannot
- * be reached by any future code path that forgets why this existed.
+ * A till with nothing established is left exactly as it was: a refresh is not
+ * a way in.
  */
-export function applyRecoveryObservation(
+export function applyDailyRefresh(
   state: PosGateState,
-  observed: { employee: EmployeeSession | null; register: RegisterSession | null }
+  acquisition: DailyAcquisition
 ): PosGateState {
-  // Anything other than a register-only recovery sends the operator all the way
-  // back to the employee gate. A state with no recovery pending reaching this
-  // function is a caller bug, and the safe direction is the strict one.
-  if (state.recovery !== "register" || state.employee === null) {
-    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  if (state.employee === null) {
+    return state;
   }
 
-  // The register was the only thing disproved, so the signed-in employee may be
-  // carried — but ONLY while the server still reports the very same session. A
-  // different session id means the employee changed too, and that is an
-  // employee recovery, not a register one.
-  if (
-    observed.employee === null ||
-    observed.employee.employeeSessionId !== state.employee.employeeSessionId
-  ) {
-    return { employee: null, register: null, establishedOnline: false, recovery: "employee" };
+  if (!acquisition.ok) {
+    if (acquisition.reason === "unavailable") {
+      // Offline, or the server could not be reached. Keep everything.
+      return state;
+    }
+
+    // The server refused. The till stops being established -- but the operator
+    // is NOT signed out and the cart is NOT touched; those belong to the host.
+    return withDaily(state.employee, null, acquisition, state.recovery);
   }
 
-  return { employee: state.employee, register: null, establishedOnline: false, recovery: "register" };
+  // A pending recovery is carried straight through: withDaily refuses to
+  // establish while one is set, so a refresh nobody asked for cannot reopen a
+  // till the server has already proven wrong.
+  return withDaily(state.employee, state.daily, acquisition, state.recovery);
+}
+
+/**
+ * Adopting the register id a COMPLETED sale was stored against.
+ *
+ * Freshness only, and only ever after the server has already written the order.
+ * CP2c rolls a sale forward at the moment of sale, so the id that comes back
+ * may be a newer business day than the one this till was holding. Taking it
+ * means the next sale arrives current instead of rolling forward again.
+ *
+ * It cannot establish anything: a till with nothing established, or one with a
+ * recovery pending, is returned untouched.
+ */
+export function applySaleRegisterAdoption(
+  state: PosGateState,
+  context: DailyRegisterContext
+): PosGateState {
+  if (state.employee === null || !state.establishedOnline || state.recovery !== null) {
+    return state;
+  }
+
+  return { ...state, daily: context };
 }
 
 /**
@@ -389,44 +511,14 @@ export function applyRecoveryObservation(
  * found a session or it did not.
  *
  * A FAILED READ IS NOT AN ABSENT SESSION. "The server says nobody is signed in"
- * and "we could not ask" must never collapse into the same transition — the
+ * and "we could not ask" must never collapse into the same transition -- the
  * first is information, the second is the absence of it, and they call for
  * different gates.
  */
 export type SessionRead<T> = { ok: false } | { ok: true; session: T | null };
 
 /**
- * The three reads that surround a register-recovery operation.
- *
- * THE EMPLOYEE SESSION MUST SPAN THE REGISTER OBSERVATION. Reading the employee
- * once and then the register left a window: the server could switch from Ada to
- * Bo in between, and the till would pair a confirmed-a-moment-ago Ada with a
- * register read after she was gone. The second employee read closes exactly
- * that window by requiring the same POS session on both sides of the register
- * operation.
- *
- * This is not atomicity, and it is not claimed to be. A switch AFTER the final
- * read is ordinary runtime staleness, which complete_sale_v5's online
- * expectations already refuse. What it removes is the case where the client
- * ITSELF observed the register under one employee and established under
- * another — the only version of this race that can reach the offline queue.
- */
-export type RegisterRecoveryReads = {
-  /** Before the register operation. */
-  employeeBefore: SessionRead<EmployeeSession>;
-  /** The register that was read, opened, or found already open. */
-  register: SessionRead<RegisterSession>;
-  /** After the register operation. Must be the same session as `employeeBefore`. */
-  employeeAfter: SessionRead<EmployeeSession>;
-};
-
-/**
- * Whether the employee the recovery retained is still the one signed in.
- *
- * Used twice per adoption and once more as the PRE-CHECK that decides whether
- * open_register_session may be called at all. Every identity comparison in the
- * register-recovery flow goes through here, so there is one rule and one place
- * to read it.
+ * Whether the employee a recovery retained is still the one signed in.
  *
  * COMPARED BY POS SESSION IDENTITY. Not by employee id, and certainly not by
  * display name: Ada signing out and back in is a NEW session, and
@@ -446,20 +538,16 @@ export function checkRetainedEmployee(
 ): RetainedEmployeeCheck {
   // Nothing retained to revalidate against: there is no safe way forward.
   if (state.employee === null) {
-    return {
-      ok: false,
-      reason: "employee_changed",
-      state: { employee: null, register: null, establishedOnline: false, recovery: "employee" },
-    };
+    return { ok: false, reason: "employee_changed", state: { ...EMPTY_POS_GATE_STATE, recovery: "employee" } };
   }
 
   if (!read.ok) {
     // The operator stays where they are and can retry. The retained employee is
-    // NOT signed out — a failed read is not evidence that they left.
+    // NOT signed out -- a failed read is not evidence that they left.
     return {
       ok: false,
       reason: "unavailable",
-      state: { ...state, register: null, establishedOnline: false, recovery: "register" },
+      state: { ...state, daily: null, establishedOnline: false, recovery: "daily" },
     };
   }
 
@@ -470,36 +558,44 @@ export function checkRetainedEmployee(
     // Gone, or somebody else. EITHER WAY THIS IS AN EMPLOYEE RECOVERY: the
     // observed employee is not adopted, not stored and not claimable. Somebody
     // signs in, with a PIN, before this till sells again.
-    return {
-      ok: false,
-      reason: "employee_changed",
-      state: { employee: null, register: null, establishedOnline: false, recovery: "employee" },
-    };
+    return { ok: false, reason: "employee_changed", state: { ...EMPTY_POS_GATE_STATE, recovery: "employee" } };
   }
 
   return { ok: true, employee: read.session };
 }
 
 /**
- * Resolves a register recovery from a sandwich of reads.
+ * The reads that surround an EXPLICIT daily recovery.
  *
- * The operator's press authorizes taking the REGISTER. It is not authorization
- * to switch EMPLOYEE, so the retained employee must be confirmed on BOTH sides
- * of the register operation before anything is established.
+ * The operator's press authorizes re-establishing the DAY. It is not
+ * authorization to switch EMPLOYEE, so the retained employee is confirmed on
+ * BOTH sides of the ensure call before anything is established.
  *
  * WHY THE SECOND READ EARNS ITS ROUND TRIP. Without it the client could
  * establish a pair it had never seen coexist: employee confirmed, employee
- * switched, register read, pair established. An online sale would refuse that
- * pair — but `establishedOnline` is what Policy 1 reads, so a connection drop
+ * switched, context established, pair adopted. An online sale would refuse that
+ * pair -- but `establishedOnline` is what Policy 1 reads, so a connection drop
  * straight afterwards would let a NEW OFFLINE SALE be taken under an employee
  * the server had already replaced, and no later refusal can un-take it.
+ */
+export type DailyRecoveryReads = {
+  /** Before the ensure call. */
+  employeeBefore: SessionRead<EmployeeSession>;
+  /** What ensure_daily_register_context() answered. */
+  daily: DailyAcquisition;
+  /** After the ensure call. Must be the same session as `employeeBefore`. */
+  employeeAfter: SessionRead<EmployeeSession>;
+};
+
+/**
+ * Resolves an explicit daily recovery from a sandwich of reads.
  *
  * FAILS CLOSED IN EVERY DIRECTION. The only outcome that establishes is: same
- * POS session before, an open register, same POS session after.
+ * POS session before, a context the server established, same POS session after.
  */
-export function applyExplicitRegisterEstablished(
+export function applyExplicitDailyEstablished(
   state: PosGateState,
-  reads: RegisterRecoveryReads
+  reads: DailyRecoveryReads
 ): PosGateState {
   const before = checkRetainedEmployee(state, reads.employeeBefore);
 
@@ -507,34 +603,36 @@ export function applyExplicitRegisterEstablished(
     return before.state;
   }
 
-  if (!reads.register.ok) {
-    return { ...state, register: null, establishedOnline: false, recovery: "register" };
-  }
-
-  // THE SPANNING CHECK. Same retained session, read after the register.
+  // THE SPANNING CHECK. Same retained session, read after the ensure.
   const after = checkRetainedEmployee(state, reads.employeeAfter);
 
   if (!after.ok) {
     return after.state;
   }
 
-  // The employee held throughout, but there is no register to take.
-  if (reads.register.session === null) {
-    return { employee: after.employee, register: null, establishedOnline: false, recovery: "register" };
+  if (!reads.daily.ok) {
+    if (reads.daily.reason === "timezone_required") {
+      return { employee: after.employee, daily: null, establishedOnline: false, recovery: null, setup: "business_timezone" };
+    }
+
+    // Still refused, or still unreachable: the operator stays in recovery and
+    // may try again. Nothing is invented and nothing is adopted.
+    return { employee: after.employee, daily: null, establishedOnline: false, recovery: "daily", setup: null };
   }
 
-  // Confirmed, spanned, and open. THE ONLY ESTABLISHING OUTCOME.
+  // Confirmed, spanned, and established. THE ONLY ESTABLISHING OUTCOME.
   return {
     employee: after.employee,
-    register: reads.register.session,
+    daily: reads.daily.context,
     establishedOnline: true,
     recovery: null,
+    setup: null,
   };
 }
 
 /**
  * The operator chose to switch employee. An explicit act, so no recovery is
- * raised — but the POS closes until somebody signs in.
+ * raised -- but the POS closes until somebody signs in.
  */
 export function beginEmployeeSwitch(state: PosGateState): PosGateState {
   return { ...state, employee: null, establishedOnline: false };

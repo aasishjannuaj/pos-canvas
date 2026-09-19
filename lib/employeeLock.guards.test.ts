@@ -108,7 +108,7 @@ describe("the host calls employee_login_by_code, and sends nothing else", () => 
   it("the failure message is whatever the server said", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler).toContain("getEmployeeLoginErrorMessage(result.error");
@@ -120,7 +120,7 @@ describe("the host calls employee_login_by_code, and sends nothing else", () => 
   it("throttling is presented, not circumvented", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler).toContain("result.retryAfterSeconds");
@@ -140,7 +140,7 @@ describe("the roster is no longer the primary flow, and is not deleted", () => {
   it("normal login does not depend on a roster fetch", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler).not.toContain("loadRoster");
@@ -172,7 +172,7 @@ describe("a server observation cannot unlock the POS", () => {
 
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler).toContain("applyEmployeeAuthenticated({");
@@ -181,34 +181,39 @@ describe("a server observation cannot unlock the POS", () => {
   it("and it is reached only after the server accepted the credentials", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler.indexOf("if (!result.ok)")).toBeLessThan(handler.indexOf("applyEmployeeAuthenticated"));
   });
 
-  it("DeviceApp no longer imports the observation-based derivation", () => {
-    // applyServerDerivation populates `employee` from what the server reports,
-    // which is exactly what checkpoint 2 forbids on startup.
+  it("DeviceApp has no observation-based derivation at all", () => {
+    // Anything that populates `employee` from what the server merely reports is
+    // exactly what checkpoint 2 forbids on startup.
     expect(app).not.toContain("applyServerDerivation");
+    expect(app).not.toContain("applyRecoveryObservation");
   });
 });
 
 describe("signing in never rotates the register", () => {
-  it("the login handler reads the register and hands it over untouched", () => {
+  it("the login handler asks the SERVER for the day and hands it over untouched", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
-    expect(handler).toContain("fetchCurrentRegisterSession()");
-    expect(handler).toContain("register: register.ok ? register.session : null");
+    // v1.3 CP2d — there is no register to read any more. The day comes from
+    // ensure_daily_register_context and is handed to the pure transition
+    // exactly as the server returned it.
+    expect(handler).toContain("await acquireDaily()");
+    expect(handler).toContain("daily,");
+    expect(handler).not.toContain("fetchCurrentRegisterSession");
   });
 
   it("it opens and closes nothing", () => {
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     for (const banned of ["openRegisterSession", "closeRegisterSession", "applyExplicitRegisterEstablished"]) {
@@ -346,7 +351,7 @@ describe("offline is untouched", () => {
     // Employee ID and a PIN without one.
     const handler = app.slice(
       app.indexOf("const handleEmployeeCodeLogin"),
-      app.indexOf("const readEmployeeSession")
+      app.indexOf("const recoverDailyContext")
     );
 
     expect(handler).toContain("await employeeLoginByCode(");
