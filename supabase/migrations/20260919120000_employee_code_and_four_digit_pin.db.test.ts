@@ -220,7 +220,14 @@ function freshDatabase(name: string, withMigration: boolean): void {
     .sort();
 
   for (const file of files) {
-    if (file === MIGRATION && !withMigration) continue;
+    // "WITHOUT the migration" means the database as it was BEFORE it -- so every
+    // migration that comes AFTER it is skipped too, not just the one under test.
+    // Filenames begin with a fixed-width timestamp, so a lexicographic compare
+    // is a chronological one. Without this, a successor that depends on the
+    // migration under test cannot apply at all, and -- worse -- the "before"
+    // assertions would be measuring a database carrying changes that had not
+    // happened yet, while reporting success.
+    if (!withMigration && file >= MIGRATION) continue;
 
     // Skipped BEFORE it is attempted, by exact name. Anything else that fails
     // propagates and fails the suite.
