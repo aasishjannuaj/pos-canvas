@@ -439,6 +439,7 @@ declare
   v_daily record;
   v_daily_claim record;
   v_business_date date;
+  v_current_zone text;
   v_employee_session record;
   v_shortfall     integer;
   v_has_shortfall boolean := false;
@@ -1177,8 +1178,12 @@ begin
         -- this device, so a foreign daily id falls through to the accepted
         -- historical validation below, which is scoped the same way and stores
         -- NULL. It can never manufacture attribution for this till.
+        --
+        -- AND THE ZONE IT WAS TAKEN UNDER MUST STILL BE THE BUSINESS'S ZONE.
+        -- Deriving a day is only honest while the calendar has not moved
+        -- underneath the sale; see the snapshot comparison below.
         -- ==================================================================
-        select r.id
+        select r.id, r.business_timezone
           into v_daily_claim
         from public.register_sessions r
         where r.id = p_register_session_id
@@ -1187,20 +1192,60 @@ begin
         for share;
 
         if found then
-          select c.register_session_id, c.failure
-            into v_daily
-          from public.daily_register_context_for_sale(v_device_id, v_occurred_at) c;
+          -- ================================================================
+          -- THE SNAPSHOT IS PART OF THE CLAIM, AND IT IS CHECKED FIRST.
+          --
+          -- The claim carries the zone the till was operating under when the
+          -- money changed hands. If the business has since changed zones, the
+          -- day this sale belonged to was measured with a ruler nobody uses
+          -- any more -- and deriving it now, with the new zone, would be
+          -- REINTERPRETING a completed sale rather than recording it.
+          --
+          -- Waiting for daily_register_context_for_sale to notice is not
+          -- enough, and that was the defect. Its conflict check only fires
+          -- when an interval already covers the instant; for a past day with
+          -- no context yet it would cheerfully CREATE one under the new zone,
+          -- which is the incompatible historical row this whole design exists
+          -- to prevent. So the comparison happens here, before it is called.
+          --
+          -- IDENTITY, NOT EQUIVALENCE. CP2a stores the zone verbatim and CP2b
+          -- treats any changed snapshot as a conflict. A distinct string is a
+          -- conflict here for the same reason: no alias canonicalization, no
+          -- offset comparison, no normalization. Two spellings of the same
+          -- offset are still two different answers to "what did this business
+          -- call that day", and picking one would be inventing an answer.
+          --
+          -- The project row is already held FOR UPDATE by section 3, so this
+          -- is a plain read of a pinned row -- no new lock, no lock order.
+          -- A NULL current zone is distinct from the claim's (a daily row
+          -- cannot have a null one), so the already-approved "no timezone now
+          -- means unprovable" behaviour falls out of the same comparison.
+          -- ================================================================
+          select p.business_timezone
+            into v_current_zone
+          from public.projects p
+          where p.id = v_project_id;
 
-          -- QUEUED MONEY IS NOT LOST TO AN AUDIT QUESTION. This sale was paid
-          -- for, offline, before anything here was asked. If the historical day
-          -- cannot be established safely -- no timezone now, or a snapshot that
-          -- conflicts with one -- the register attribution is unprovable and is
-          -- stored NULL, exactly as an unprovable legacy claim already is. The
-          -- sale still completes. Nothing historical is rewritten to avoid this,
-          -- and this excuses nothing financial: the hash, the totals, the
-          -- pairing rules and every occurred_at bound have already been checked
-          -- above and are not reached by this decision.
-          v_register_session_id := v_daily.register_session_id;
+          if v_daily_claim.business_timezone is distinct from v_current_zone then
+            -- UNPROVABLE, NOT INVALID. Nothing is created, nothing is
+            -- rewritten, and the claim row is not touched.
+            v_register_session_id := null;
+          else
+            select c.register_session_id, c.failure
+              into v_daily
+            from public.daily_register_context_for_sale(v_device_id, v_occurred_at) c;
+
+            -- QUEUED MONEY IS NOT LOST TO AN AUDIT QUESTION. This sale was paid
+            -- for, offline, before anything here was asked. If the historical day
+            -- cannot be established safely -- no timezone now, or a snapshot that
+            -- conflicts with one -- the register attribution is unprovable and is
+            -- stored NULL, exactly as an unprovable legacy claim already is. The
+            -- sale still completes. Nothing historical is rewritten to avoid this,
+            -- and this excuses nothing financial: the hash, the totals, the
+            -- pairing rules and every occurred_at bound have already been checked
+            -- above and are not reached by this decision.
+            v_register_session_id := v_daily.register_session_id;
+          end if;
         else
           -- ==================================================================
           -- LEGACY / MANUAL, or a claim this device cannot own -- the accepted

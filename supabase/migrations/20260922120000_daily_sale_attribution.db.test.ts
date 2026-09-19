@@ -462,6 +462,8 @@ const SALES = {
   noZone:    "30000000-0000-4000-8000-000000000001",
   conflict:  "30000000-0000-4000-8000-000000000002",
   replay:    "40000000-0000-4000-8000-000000000001",
+  snapshot:  "60000000-0000-4000-8000-000000000001",
+  snapNeg:   "60000000-0000-4000-8000-000000000002",
 } as const;
 
 const run = PG_BIN === null ? describe.skip : describe;
@@ -1114,6 +1116,133 @@ run("a paid queued sale is never lost to an attribution question", () => {
 });
 
 // ===========================================================================
+// THE CLAIM'S TIMEZONE SNAPSHOT
+// ===========================================================================
+
+run("a queued sale is never reinterpreted under a timezone it never knew", () => {
+  const DB = "cp2c_snapshot";
+  let session = "";
+  let claim = "";
+  let claimRow = "";
+  let occurredAt = "";
+  let pastDay = "";
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    seedSales(DB, 1);
+    expect(applyMigration(DB).ok).toBe(true);
+    session = signIn(DB, 1);
+
+    // 1-2. A real daily claim of THIS device, taken under New York.
+    claim = JSON.parse(asRole(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()::text`)).registerSession.registerSessionId;
+    claimRow = sql(DB, `select md5(r::text) from public.register_sessions r where r.id='${claim}'`);
+
+    // 3. A past business date that has NO context at all. That is what makes
+    //    this case different from the conflict the helper can already see:
+    //    with nothing covering the instant, the helper would happily CREATE a
+    //    context under whatever zone is current.
+    occurredAt = instantIn(-3, "9 hours");
+    pastDay = sql(DB, `select ((now() at time zone '${ZONE}')::date - 3)::text`);
+  }, 300_000);
+
+  it("the target day genuinely has no context, and the claim is a New York one", () => {
+    expect(sql(DB, `select business_timezone from public.register_sessions where id='${claim}'`))
+      .toBe(ZONE);
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}' and business_date='${pastDay}'`)).toBe("0");
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}'`)).toBe("1");
+  });
+
+  it("4-5. with the business now on Chicago, the sale completes and is UNATTRIBUTED", () => {
+    sql(DB, `update public.projects set business_timezone='America/Chicago' where id='${PROJECT}'`);
+
+    const answer = JSON.parse(sale(DB, 1, {
+      request: SALES.snapshot, session, register: claim,
+      source: "offline_queued", at: occurredAt,
+    }));
+
+    // Financially whole.
+    expect(answer.total).toBe("4.00");
+    expect(answer.subtotal).toBe("4.00");
+    // Register attribution unprovable.
+    expect(answer.attribution.registerSessionId).toBeNull();
+    // Device attribution stays server-derived.
+    expect(answer.attribution.pairedDeviceId).toBe(device(1));
+  });
+
+  it("exactly one order, with the register NULL and the device intact", () => {
+    expect(sql(DB, `select count(*) from public.orders
+                    where sale_request_id='${SALES.snapshot}'`)).toBe("1");
+    expect(sql(DB, `select coalesce(register_session_id::text,'NULL') || ' | ' ||
+                           coalesce(paired_device_id::text,'NULL') || ' | ' || total::text
+                    from public.orders where sale_request_id='${SALES.snapshot}'`))
+      .toBe(`NULL | ${device(1)} | 4.00`);
+  });
+
+  it("NO Chicago historical context was created — this is the whole point", () => {
+    // If the snapshot comparison were absent, the helper would have created a
+    // context for this instant under America/Chicago and attributed the sale
+    // to it. Nothing was created at all.
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}'`)).toBe("1");
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where business_timezone <> '${ZONE}'`)).toBe("0");
+  });
+
+  it("and the NULL is because of the SNAPSHOT, not the overlap protection", () => {
+    // Stated explicitly, because the two produce the same stored result. The
+    // helper's conflict check only fires when an existing interval covers the
+    // instant; there is no such interval here, and the claim's own interval is
+    // nowhere near this occurred_at.
+    expect(sql(DB, `select count(*) from public.register_sessions r
+                    where r.paired_device_id='${device(1)}'
+                      and r.business_date is not null
+                      and r.opened_at <= ${occurredAt} and ${occurredAt} < r.closed_at`)).toBe("0");
+    expect(sql(DB, `select (r.business_timezone is distinct from p.business_timezone)::text
+                    from public.register_sessions r
+                    cross join public.projects p
+                    where r.id='${claim}' and p.id='${PROJECT}'`)).toBe("true");
+  });
+
+  it("8. the original New York claim row is byte-for-byte unchanged", () => {
+    expect(sql(DB, `select md5(r::text) from public.register_sessions r where r.id='${claim}'`))
+      .toBe(claimRow);
+  });
+
+  it("7. employee attribution still followed its own independent validation", () => {
+    // The POS session started today; the sale happened three days ago, so the
+    // claim does not validate and is NULL -- by the accepted Feature 1B rule,
+    // not by anything this correction added.
+    expect(sql(DB, `select coalesce(employee_id::text,'NULL') from public.orders
+                    where sale_request_id='${SALES.snapshot}'`)).toBe("NULL");
+
+    const inSession = JSON.parse(sale(DB, 1, {
+      request: SALES.snapNeg, session, register: claim,
+      source: "offline_queued", at: "now()",
+    }));
+
+    // Same snapshot mismatch, so the register is still NULL -- but the
+    // employee claim is inside its session and is recorded.
+    expect(inSession.attribution.registerSessionId).toBeNull();
+    expect(inSession.attribution.employeeId).toBe(EMPLOYEE);
+  });
+
+  it("restoring the original zone makes derivation possible again", () => {
+    sql(DB, `update public.projects set business_timezone='${ZONE}' where id='${PROJECT}'`);
+
+    const answer = JSON.parse(sale(DB, 1, {
+      request: SALES.rolled, session, register: claim,
+      source: "offline_queued", at: occurredAt,
+    }));
+
+    expect(answer.attribution.registerSessionId).not.toBeNull();
+    expect(filedUnder(DB, SALES.rolled)).toBe(pastDay);
+  });
+});
+
+// ===========================================================================
 // THE INTERNAL HELPER IS NOT A SECOND, WEAKER IMPLEMENTATION
 // ===========================================================================
 
@@ -1419,8 +1548,8 @@ run("the tests above fail against a deliberately broken complete_sale_v5", () =>
 
   it("CONTROL 3: honouring the retained claim files a post-midnight sale on the wrong day", () => {
     const observed = broken(
-      [["          v_register_session_id := v_daily.register_session_id;\n        else",
-        "          v_register_session_id := v_daily_claim.id;\n        else"]],
+      [["            v_register_session_id := v_daily.register_session_id;\n          end if;",
+        "            v_register_session_id := v_daily_claim.id;\n          end if;"]],
       () => {
         sale(DB, 1, {
           request: SALES.postMid, session, register: todayDaily,
@@ -1479,8 +1608,13 @@ run("the tests above fail against a deliberately broken complete_sale_v5", () =>
     const observed = broken(
       [["      if p_register_session_id is not null then\n        -- ==================================================================\n        -- v1.3 CP2c -- THE CLAIM SIGNALS THE MODEL, NEVER THE ATTRIBUTION.",
         "      if true then\n        -- ==================================================================\n        -- v1.3 CP2c -- THE CLAIM SIGNALS THE MODEL, NEVER THE ATTRIBUTION."],
-       ["        if found then\n          select c.register_session_id, c.failure",
-        "        if true then\n          select c.register_session_id, c.failure"]],
+       ["        if found then\n          -- ================================================================\n          -- THE SNAPSHOT IS PART OF THE CLAIM, AND IT IS CHECKED FIRST.",
+        "        if true then\n          -- ================================================================\n          -- THE SNAPSHOT IS PART OF THE CLAIM, AND IT IS CHECKED FIRST."],
+       // The daily path has TWO gates now: the claim must be found, and its
+       // snapshot must still match. Opening only one would leave a null claim
+       // refused by the other, and the control would prove nothing.
+       ["          if v_daily_claim.business_timezone is distinct from v_current_zone then",
+        "          if false then"]],
       () => JSON.parse(sale(DB, 1, {
         request: SALES.nullClaim, session: null, register: null,
         source: "offline_queued", at: "now() - interval '1 minute'",
@@ -1497,6 +1631,63 @@ run("the tests above fail against a deliberately broken complete_sale_v5", () =>
       request: SALES.nullClaim, session: null, register: null,
       source: "offline_queued", at: "now() - interval '1 minute'",
     })).attribution.registerSessionId).toBeNull();
+  });
+
+  it("CONTROL 7: bypassing the snapshot check files the sale under the NEW timezone", () => {
+    // The defect this correction fixes. A past day with no context, a claim
+    // taken under New York, and a business that has since moved to Chicago:
+    // without the comparison, the helper CREATES a Chicago context and
+    // attributes a completed sale to a calendar the till never used.
+    const claim = JSON.parse(asRole(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()::text`)).registerSession.registerSessionId;
+    const at = instantIn(-6, "9 hours");
+    const day = sql(DB, `select ((now() at time zone '${ZONE}')::date - 6)::text`);
+
+    expect(sql(DB, `select business_timezone from public.register_sessions where id='${claim}'`))
+      .toBe(ZONE);
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}' and business_date='${day}'`)).toBe("0");
+
+    sql(DB, `update public.projects set business_timezone='America/Chicago' where id='${PROJECT}'`);
+
+    const observed = broken(
+      [["          if v_daily_claim.business_timezone is distinct from v_current_zone then",
+        "          if false then"]],
+      () => {
+        sale(DB, 1, {
+          request: SALES.snapshot, session, register: claim,
+          source: "offline_queued", at,
+        });
+
+        return sql(DB, `select coalesce(r.business_timezone,'NULL')
+                        from public.orders o
+                        left join public.register_sessions r on r.id = o.register_session_id
+                        where o.sale_request_id='${SALES.snapshot}'`);
+      });
+
+    // Filed under a Chicago context that did not exist before this sale.
+    expect(observed).toBe("America/Chicago");
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}' and business_date='${day}'
+                      and business_timezone='America/Chicago'`)).toBe("1");
+
+    // The real implementation refuses to derive, and creates nothing.
+    sql(DB, `delete from public.order_items where order_id in
+               (select id from public.orders where sale_request_id='${SALES.snapNeg}');
+             delete from public.orders where sale_request_id='${SALES.snapNeg}'`);
+
+    const before = sql(DB, `select count(*) from public.register_sessions
+                            where paired_device_id='${device(1)}'`);
+
+    expect(JSON.parse(sale(DB, 1, {
+      request: SALES.snapNeg, session, register: claim,
+      source: "offline_queued", at: instantIn(-5, "9 hours"),
+    })).attribution.registerSessionId).toBeNull();
+
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}'`)).toBe(before);
+
+    sql(DB, `update public.projects set business_timezone='${ZONE}' where id='${PROJECT}'`);
   });
 
   it("CONTROL 6: dropping the device scope lets another till's daily id authorize a sale", () => {
