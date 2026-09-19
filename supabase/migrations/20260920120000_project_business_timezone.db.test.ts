@@ -558,6 +558,14 @@ run("require_business_timezone, executed", () => {
 // Scope: CP2a adds no register behaviour
 // ===========================================================================
 
+const CP2A_FUNCTIONS = [
+  "public.is_valid_business_timezone(text)",
+  "public.business_day_bounds(date,text)",
+  "public.business_date_of(timestamptz,text)",
+  "public.require_business_timezone(uuid)",
+  "public.projects_validate_business_timezone()",
+] as const;
+
 run("CP2a stays inside its scope", () => {
   const DB = "cp2a_scope";
 
@@ -586,23 +594,44 @@ run("CP2a stays inside its scope", () => {
                     and indexname='register_sessions_one_open_per_device'`)).toBe("1");
   });
 
-  it("every new function is SECURITY DEFINER, locked, and not granted to anon", () => {
-    expect(sql(DB, `
-      select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-      where n.nspname='public'
-        and p.proname in ('is_valid_business_timezone','business_day_bounds',
-                          'business_date_of','require_business_timezone',
-                          'projects_validate_business_timezone')
-        and p.prosecdef
-        and p.proconfig @> array['search_path=public, pg_catalog, pg_temp']`)).toBe("5");
+  it("no CP2a function is executable by ANY client role", () => {
+    // EFFECTIVE privileges, via has_function_privilege — not a substring search
+    // of proacl. The first draft of this suite checked the ACL text for `anon`
+    // and `service_role` and passed while `authenticated` held EXECUTE on all
+    // five, granted by Supabase's ALTER DEFAULT PRIVILEGES rather than by the
+    // migration. A privilege you did not grant is still a privilege.
+    for (const fn of CP2A_FUNCTIONS) {
+      for (const role of ["public", "anon", "authenticated", "service_role"]) {
+        expect(`${role} can execute ${fn}: ${sql(DB, `select has_function_privilege('${role}','${fn}','EXECUTE')::text`)}`)
+          .toBe(`${role} can execute ${fn}: false`);
+      }
+    }
+  });
 
+  it("only the two that need elevation are SECURITY DEFINER", () => {
+    // require_business_timezone reads an RLS-protected table; the trigger body
+    // must run as its owner so it can call the revoked validator.
+    for (const fn of ["require_business_timezone", "projects_validate_business_timezone"]) {
+      expect(`${fn} prosecdef: ${sql(DB, `select p.prosecdef::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='${fn}'`)}`)
+        .toBe(`${fn} prosecdef: true`);
+    }
+
+    // The three pure helpers read only pg_timezone_names, which every role may
+    // read. Elevating them would be a privileged entry point bought for nothing.
+    for (const fn of ["is_valid_business_timezone", "business_day_bounds", "business_date_of"]) {
+      expect(`${fn} prosecdef: ${sql(DB, `select p.prosecdef::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='${fn}'`)}`)
+        .toBe(`${fn} prosecdef: false`);
+    }
+  });
+
+  it("all five still pin their search_path", () => {
     expect(sql(DB, `
       select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
       where n.nspname='public'
         and p.proname in ('is_valid_business_timezone','business_day_bounds',
                           'business_date_of','require_business_timezone',
                           'projects_validate_business_timezone')
-        and array_to_string(p.proacl,',') ~ '(anon|service_role)='`)).toBe("0");
+        and p.proconfig @> array['search_path=public, pg_catalog, pg_temp']`)).toBe("5");
   });
 
   it("projects RLS is untouched — four owner-scoped policies", () => {
@@ -610,5 +639,109 @@ run("CP2a stays inside its scope", () => {
                     where schemaname='public' and tablename='projects'`)).toBe("4");
     expect(sql(DB, `select relrowsecurity::text from pg_class
                     where oid='public.projects'::regclass`)).toBe("true");
+  });
+});
+
+// ===========================================================================
+// Real authorization scenarios, executed as the roles themselves
+// ===========================================================================
+
+run("authorization, executed as an authenticated owner", () => {
+  const DB = "cp2a_authz";
+  const MINE = "aaaa0001-0000-4000-8000-000000000001";
+  const THEIRS = "aaaa0002-0000-4000-8000-000000000001";
+  const ME = "11111111-1111-4111-8111-111111111111";
+  const THEM = "22222222-2222-4222-8222-222222222222";
+
+  /** Runs a statement as the `authenticated` role, with a JWT subject bound. */
+  const asOwner = (who: string, statement: string): string =>
+    sql(DB, `set role authenticated; set request.jwt.claim.sub='${who}'; ${statement}`)
+      .split("\n").filter((l) => l !== "").slice(-1)[0] ?? "";
+
+  const asOwnerExpectingFailure = (who: string, statement: string): string =>
+    sqlExpectingFailure(DB, `set role authenticated; set request.jwt.claim.sub='${who}'; ${statement}`);
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    sql(DB, `
+      insert into auth.users (id) values ('${ME}'), ('${THEM}') on conflict do nothing;
+      insert into public.projects (id, user_id, name, template_id, config) values
+        ('${MINE}', '${ME}', 'Mine', 'cafe', '{}'::jsonb),
+        ('${THEIRS}', '${THEM}', 'Theirs', 'cafe', '{}'::jsonb);
+      grant usage on schema public to authenticated;
+    `);
+    expect(applyMigration(DB).ok).toBe(true);
+  }, 180_000);
+
+  it("1. an owner may set their own project's timezone, NULL -> America/New_York", () => {
+    // Through the ordinary RLS-protected table write. No RPC, and no EXECUTE on
+    // anything: the trigger fires regardless, because firing a trigger does not
+    // check the caller's privilege on the trigger function.
+    asOwner(ME, `update public.projects set business_timezone='America/New_York' where id='${MINE}';`);
+
+    expect(sql(DB, `select business_timezone from public.projects where id='${MINE}'`))
+      .toBe("America/New_York");
+  });
+
+  it("2. an invalid value is refused by the trigger, for that same owner", () => {
+    expect(asOwnerExpectingFailure(ME, `update public.projects set business_timezone='EST' where id='${MINE}';`))
+      .toContain("Invalid business timezone EST");
+
+    // And the previous value survives the refusal.
+    expect(sql(DB, `select business_timezone from public.projects where id='${MINE}'`))
+      .toBe("America/New_York");
+  });
+
+  it("3. an owner may return it to NULL", () => {
+    asOwner(ME, `update public.projects set business_timezone=null where id='${MINE}';`);
+    expect(sql(DB, `select coalesce(business_timezone,'<NULL>') from public.projects where id='${MINE}'`))
+      .toBe("<NULL>");
+
+    asOwner(ME, `update public.projects set business_timezone='America/New_York' where id='${MINE}';`);
+  });
+
+  it("4. one owner cannot touch another owner's timezone", () => {
+    // RLS makes the row invisible to the UPDATE, so it affects nothing at all.
+    asOwner(ME, `update public.projects set business_timezone='Europe/London' where id='${THEIRS}';`);
+
+    expect(sql(DB, `select coalesce(business_timezone,'<NULL>') from public.projects where id='${THEIRS}'`))
+      .toBe("<NULL>");
+  });
+
+  it("5. an authenticated client cannot call require_business_timezone directly", () => {
+    // The whole point of the correction: it is SECURITY DEFINER over an
+    // RLS-protected table and takes a project id as an argument, so EXECUTE
+    // would let any client nominate any project and read past the owner policy.
+    expect(asOwnerExpectingFailure(ME, `select public.require_business_timezone('${THEIRS}');`))
+      .toContain("permission denied for function require_business_timezone");
+  });
+
+  it("6. nor the trigger function, which is not an RPC surface", () => {
+    expect(asOwnerExpectingFailure(ME, `select public.projects_validate_business_timezone();`))
+      .toContain("permission denied for function projects_validate_business_timezone");
+  });
+
+  it("6b. nor any of the pure helpers", () => {
+    for (const [fn, call] of [
+      ["is_valid_business_timezone", `select public.is_valid_business_timezone('America/New_York');`],
+      ["business_date_of", `select public.business_date_of(now(),'America/New_York');`],
+      ["business_day_bounds", `select * from public.business_day_bounds(current_date,'America/New_York');`],
+    ] as const) {
+      expect(asOwnerExpectingFailure(ME, call)).toContain(`permission denied for function ${fn}`);
+    }
+  });
+
+  it("7. internal execution still returns the stored timezone", () => {
+    expect(sql(DB, `select public.require_business_timezone('${MINE}')`)).toBe("America/New_York");
+  });
+
+  it("8. and still raises business_timezone_required for NULL", () => {
+    expect(sqlExpectingFailure(DB, `select public.require_business_timezone('${THEIRS}')`))
+      .toContain("business_timezone_required");
+  });
+
+  it("the calendar is unchanged by the privilege correction", () => {
+    expect(sql(DB, `select (extract(epoch from (ends_at-starts_at))/3600)::numeric(6,2)::text
+                    from public.business_day_bounds(date '2026-03-08','America/New_York')`)).toBe("23.00");
   });
 });

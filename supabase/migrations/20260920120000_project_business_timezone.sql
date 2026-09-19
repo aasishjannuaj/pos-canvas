@@ -72,12 +72,21 @@ comment on column public.projects.business_timezone is
 -- STABLE, not IMMUTABLE: the tz database can change under us between releases.
 -- That is also why this cannot be a CHECK constraint, and why the trigger in
 -- section 3 exists instead.
+--
+-- SECURITY INVOKER, DELIBERATELY. It reads pg_timezone_names, which every role
+-- may read anyway, so elevating it would buy nothing and would hand a caller a
+-- privileged entry point for no reason. The locked search_path stays -- that is
+-- the part that actually matters for a function called from a trigger.
+--
+-- EXECUTE IS GRANTED TO NOBODY. The only callers are the trigger in section 3
+-- and the helpers below it, both of which run as this function's owner. A
+-- browser has no business calling it, and "it would be convenient" is not a
+-- reason to widen a privilege.
 -- ----------------------------------------------------------------------------
 create or replace function public.is_valid_business_timezone(p_timezone text)
 returns boolean
 language sql
 stable
-security definer
 set search_path = public, pg_catalog, pg_temp
 as $function$
   select p_timezone is not null
@@ -88,8 +97,8 @@ $function$;
 
 revoke all on function public.is_valid_business_timezone(text) from public;
 revoke all on function public.is_valid_business_timezone(text) from anon;
+revoke all on function public.is_valid_business_timezone(text) from authenticated;
 revoke all on function public.is_valid_business_timezone(text) from service_role;
-grant execute on function public.is_valid_business_timezone(text) to authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 3. The database is the authority, not the client.
@@ -134,8 +143,18 @@ begin
 end;
 $function$;
 
+-- EXECUTE TO NOBODY, INCLUDING authenticated. It is a trigger body, not an
+-- RPC. Supabase's ALTER DEFAULT PRIVILEGES grants EXECUTE on every new function
+-- to anon, authenticated and service_role, so the authenticated grant has to be
+-- revoked explicitly or it survives by default -- which is exactly how it
+-- survived the first time.
+--
+-- Firing a trigger does NOT check the invoking user's EXECUTE privilege on the
+-- trigger function; that is checked once, when the trigger is created. So an
+-- owner's ordinary UPDATE still validates normally with no privilege at all.
 revoke all on function public.projects_validate_business_timezone() from public;
 revoke all on function public.projects_validate_business_timezone() from anon;
+revoke all on function public.projects_validate_business_timezone() from authenticated;
 revoke all on function public.projects_validate_business_timezone() from service_role;
 
 drop trigger if exists projects_validate_business_timezone on public.projects;
@@ -169,6 +188,8 @@ create trigger projects_validate_business_timezone
 -- whether a missing day is an error, and CP2b's caller will already have
 -- required the timezone through section 5.
 -- ----------------------------------------------------------------------------
+-- SECURITY INVOKER for the same reason as the validator: pure calendar
+-- conversion over its own arguments, reaching nothing a caller could not reach.
 create or replace function public.business_day_bounds(
   p_business_date date,
   p_timezone text
@@ -176,7 +197,6 @@ create or replace function public.business_day_bounds(
 returns table (starts_at timestamptz, ends_at timestamptz)
 language sql
 stable
-security definer
 set search_path = public, pg_catalog, pg_temp
 as $function$
   select
@@ -188,8 +208,8 @@ $function$;
 
 revoke all on function public.business_day_bounds(date, text) from public;
 revoke all on function public.business_day_bounds(date, text) from anon;
+revoke all on function public.business_day_bounds(date, text) from authenticated;
 revoke all on function public.business_day_bounds(date, text) from service_role;
-grant execute on function public.business_day_bounds(date, text) to authenticated;
 
 /**
  * The business date of an instant, in a business's own zone.
@@ -199,6 +219,7 @@ grant execute on function public.business_day_bounds(date, text) to authenticate
  * it syncs. Kept here so both directions of the conversion live together and
  * cannot drift apart.
  */
+-- SECURITY INVOKER, as above.
 create or replace function public.business_date_of(
   p_at timestamptz,
   p_timezone text
@@ -206,7 +227,6 @@ create or replace function public.business_date_of(
 returns date
 language sql
 stable
-security definer
 set search_path = public, pg_catalog, pg_temp
 as $function$
   select case
@@ -217,8 +237,8 @@ $function$;
 
 revoke all on function public.business_date_of(timestamptz, text) from public;
 revoke all on function public.business_date_of(timestamptz, text) from anon;
+revoke all on function public.business_date_of(timestamptz, text) from authenticated;
 revoke all on function public.business_date_of(timestamptz, text) from service_role;
-grant execute on function public.business_date_of(timestamptz, text) to authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 5. The domain failure CP2b needs, established once.
@@ -263,10 +283,22 @@ begin
 end;
 $function$;
 
+-- AN INTERNAL HELPER, CALLABLE BY NO CLIENT ROLE.
+--
+-- It is SECURITY DEFINER over an RLS-protected table and it takes a project id
+-- as an argument, so a client holding EXECUTE could nominate ANY project uuid
+-- and read its timezone straight past the owner policy. Whether a timezone is
+-- sensitive is beside the point: the shape is a privilege-escalation primitive,
+-- and it was granted to `authenticated` in the first draft.
+--
+-- Its only intended caller is a future CP2b RPC that has already derived the
+-- project from the authenticated device's own pairing row. That RPC will be
+-- SECURITY DEFINER and owned by the same role, so it can call this without any
+-- grant existing at all.
 revoke all on function public.require_business_timezone(uuid) from public;
 revoke all on function public.require_business_timezone(uuid) from anon;
+revoke all on function public.require_business_timezone(uuid) from authenticated;
 revoke all on function public.require_business_timezone(uuid) from service_role;
-grant execute on function public.require_business_timezone(uuid) to authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 6. Verification -- fails loudly, and the whole migration rolls back with it.
@@ -277,6 +309,7 @@ declare
   v_bounds record;
   v_hours numeric;
   v_column record;
+  v_role text;
 begin
   -- A1. Nullable, no default. Every existing project stays valid.
   select column_default, is_nullable, data_type into v_column
@@ -392,10 +425,37 @@ begin
     raise exception 'business_date_of answered for a fixed-offset zone.';
   end if;
 
-  -- A9. Every function added here is SECURITY DEFINER with a locked
-  -- search_path, and none is executable by anon or service_role.
+  -- A9. EFFECTIVE PRIVILEGES, not ACL text.
+  --
+  -- The first draft of this block checked prosecdef, the search_path, and
+  -- whether `anon` or `service_role` appeared in proacl. It passed while
+  -- `authenticated` held EXECUTE on every one of these functions -- granted not
+  -- by this migration but by Supabase's ALTER DEFAULT PRIVILEGES, which a
+  -- proacl substring check cannot see the significance of. has_function_privilege
+  -- resolves what a role can ACTUALLY do, including privileges inherited
+  -- through PUBLIC, which is the only question worth asking.
   foreach v_text in array array[
-    'is_valid_business_timezone', 'business_day_bounds', 'business_date_of',
+    'public.is_valid_business_timezone(text)',
+    'public.business_day_bounds(date,text)',
+    'public.business_date_of(timestamptz,text)',
+    'public.require_business_timezone(uuid)',
+    'public.projects_validate_business_timezone()'
+  ]
+  loop
+    if has_function_privilege('public', v_text, 'EXECUTE') then
+      raise exception 'PUBLIC can execute %; no CP2a function may be client-callable.', v_text;
+    end if;
+
+    foreach v_role in array array['anon', 'authenticated', 'service_role']
+    loop
+      if has_function_privilege(v_role, v_text, 'EXECUTE') then
+        raise exception '% can execute %; no CP2a function may be client-callable.', v_role, v_text;
+      end if;
+    end loop;
+  end loop;
+
+  -- A9b. The two that must run as their owner still do, with a locked path.
+  foreach v_text in array array[
     'require_business_timezone', 'projects_validate_business_timezone'
   ]
   loop
@@ -405,15 +465,30 @@ begin
         and p.prosecdef
         and p.proconfig @> array['search_path=public, pg_catalog, pg_temp']
     ) then
-      raise exception '% is not SECURITY DEFINER with a locked search_path.', v_text;
+      raise exception '% must be SECURITY DEFINER with a locked search_path.', v_text;
     end if;
+  end loop;
 
+  -- A9c. The three pure helpers must NOT be elevated. They read only
+  -- pg_timezone_names, which every role may read, so SECURITY DEFINER would be
+  -- a privileged entry point bought for nothing.
+  foreach v_text in array array[
+    'is_valid_business_timezone', 'business_day_bounds', 'business_date_of'
+  ]
+  loop
     if exists (
       select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'public' and p.proname = v_text
-        and array_to_string(p.proacl, ',') ~ '(anon|service_role)='
+      where n.nspname = 'public' and p.proname = v_text and p.prosecdef
     ) then
-      raise exception '% is granted to anon or service_role.', v_text;
+      raise exception '% is SECURITY DEFINER but needs no elevated privilege.', v_text;
+    end if;
+
+    if not exists (
+      select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'public' and p.proname = v_text
+        and p.proconfig @> array['search_path=public, pg_catalog, pg_temp']
+    ) then
+      raise exception '% must still pin its search_path.', v_text;
     end if;
   end loop;
 
