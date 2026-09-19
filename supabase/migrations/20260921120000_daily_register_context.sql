@@ -9,12 +9,19 @@
 --   * conditional integrity replacing three physical rules
 --   * register_sessions_one_daily_per_device_date           (partial unique)
 --   * register_sessions_guard_daily_immutable               (trigger)
+--   * register_sessions_validate_daily_bounds               (trigger)
 --   * ensure_daily_register_context()                       (NEW, device-only)
+--   * close_register_session(uuid)                          (ONE inserted guard)
 --
--- It does NOT redefine open_register_session, get_current_register_session,
--- close_register_session or complete_sale_v5. Not one of them changes, and
--- that is a design claim this file makes on purpose -- see "WHY THE LEGACY
--- RPCS NEED NO CHANGE" below.
+-- It does NOT redefine open_register_session, get_current_register_session or
+-- complete_sale_v5. Those three are byte-identical afterwards and the
+-- verification block proves it against a baseline captured in this same
+-- transaction -- see "WHY THE LEGACY RPCS MOSTLY NEED NO CHANGE" below.
+--
+-- close_register_session is the ONE exception, and it is an INSERTION rather
+-- than an edit: a single contiguous block is added and not one existing line
+-- changes. A9b reconstructs the accepted definition by deleting exactly that
+-- block and requires the result to equal the pre-migration text byte for byte.
 --
 -- Apply manually, as ONE SQL Editor submission (one session): the baseline
 -- temporary tables below are compared against at the end.
@@ -63,7 +70,7 @@
 -- disagreement is reported rather than resolved -- see section 6.
 --
 -- ----------------------------------------------------------------------------
--- WHY THE LEGACY RPCS NEED NO CHANGE
+-- WHY THE LEGACY RPCS MOSTLY NEED NO CHANGE
 -- ----------------------------------------------------------------------------
 -- A DAILY row always has closed_at set, at creation, because its end is known
 -- before its beginning has arrived. Three existing behaviours fall out of that
@@ -75,11 +82,13 @@
 --   register_sessions_one_open_per_device is partial on the same predicate,
 --                                                              -> DAILY rows are not in it
 --
--- And close_register_session, handed a DAILY id, takes its "already closed"
--- branch -- which returns the stored row after nothing but authentication and
--- ownership: no lock, no employee lookup, no write. A manual close of a daily
--- context is therefore a safe no-op that invents no closer, rather than a
--- constraint violation or a corrupted row.
+-- close_register_session is where structure alone was not enough. Handed a
+-- DAILY id it would take its "already closed" branch, which is SAFE -- no lock,
+-- no employee lookup, no write, no invented closer -- but says something untrue:
+-- nobody closed that row. It was never open. So section 7 inserts one guard
+-- ahead of that branch, and a manual close of a calendar fact now returns
+-- `daily_register_not_manually_closable` instead of a success that means
+-- something else. Every LEGACY path through that function is untouched.
 --
 -- The verification block and the sibling test suite both assert these rather
 -- than trusting the reasoning.
@@ -153,6 +162,12 @@ select table_name, column_name, ordinal_position, data_type,
        is_nullable, coalesce(column_default, '') as column_default
 from information_schema.columns
 where table_schema = 'public';
+
+-- The accepted close_register_session, captured verbatim rather than as a
+-- digest: A9b reconstructs it from the corrected function and compares the two
+-- texts, which a digest could not support.
+create temporary table cp2b_close_baseline as
+select pg_get_functiondef('public.close_register_session(uuid)'::regprocedure) as def;
 
 -- NO BACKFILL. Every register_sessions row that exists now must come out of
 -- this migration byte-identical, with business_date and business_timezone null.
@@ -335,7 +350,98 @@ create trigger register_sessions_guard_daily_immutable
   execute function public.register_sessions_guard_daily_immutable();
 
 -- ----------------------------------------------------------------------------
--- 5. ensure_daily_register_context()
+-- 5. A DAILY row's interval must BE the calendar, not merely resemble it.
+--
+-- register_sessions_daily_shape proves a daily row has no opener, no closer, no
+-- request id, no cash and an end. It cannot prove the end is the RIGHT end.
+-- Nothing in it relates opened_at and closed_at back to business_date and
+-- business_timezone, so a row claiming 2026-03-08 in America/New_York with a
+-- flat 24-hour span would be accepted -- and then frozen that way forever by
+-- the immutability trigger, because immutability protects whatever was written,
+-- correct or not. The window between "inserted" and "frozen" is where this has
+-- to be caught.
+--
+-- WHY NOT A CHECK CONSTRAINT. A CHECK must be immutable: PostgreSQL may
+-- re-evaluate it at any time and assumes the answer never changes. This test
+-- reads pg_timezone_names, and CP2a made is_valid_business_timezone STABLE
+-- rather than IMMUTABLE precisely because the tz database CAN change between
+-- releases. Declaring that immutable would be a lie the planner is entitled to
+-- act on, and a tz update could silently invalidate stored rows or, worse,
+-- leave an index built on a false premise. A BEFORE INSERT trigger evaluates
+-- once, at the only moment the answer has to be true: when the row is written.
+--
+-- IT VALIDATES AND REFUSES -- IT NEVER CORRECTS. Nothing is assigned to NEW.
+-- Silently rewriting a caller's timestamps would hide the bug that produced
+-- them and hand back a row the caller did not ask for.
+--
+-- LEGACY IS NOT INVOLVED AT ALL. The WHEN clause means a legacy insert never
+-- invokes this function, so the entire Feature 1B write path is unchanged.
+--
+-- SECURITY INVOKER, and here the distinction matters. CP2a's
+-- projects_validate_business_timezone had to be SECURITY DEFINER because
+-- `projects` is written directly by authenticated owners through RLS, so its
+-- trigger runs as `authenticated` and would hit the revoked validator. No role
+-- holds any privilege on register_sessions -- every write arrives through a
+-- SECURITY DEFINER RPC already running as this function's owner -- so no
+-- elevation is needed here, and taking it anyway would create a privileged
+-- entry point for nothing.
+-- ----------------------------------------------------------------------------
+create or replace function public.register_sessions_validate_daily_bounds()
+returns trigger
+language plpgsql
+set search_path = public, pg_catalog, pg_temp
+as $function$
+declare
+  v_bounds record;
+begin
+  if not public.is_valid_business_timezone(new.business_timezone) then
+    raise exception 'Invalid business timezone % on a daily register context',
+      coalesce(new.business_timezone, '<null>')
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  select b.starts_at, b.ends_at
+  into v_bounds
+  from public.business_day_bounds(new.business_date, new.business_timezone) b;
+
+  if not found then
+    raise exception 'No calendar bounds exist for business date % in %',
+      new.business_date, new.business_timezone
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  if new.opened_at is distinct from v_bounds.starts_at then
+    raise exception 'A daily register context must open at local midnight starting % in % (expected %, got %)',
+      new.business_date, new.business_timezone, v_bounds.starts_at, new.opened_at
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  -- The endpoint is local midnight of the NEXT LOCAL DATE. On a spring-forward
+  -- day that is 23 hours after the start and on a fall-back day 25, so a flat
+  -- 24-hour span is refused on exactly the days where it would matter.
+  if new.closed_at is distinct from v_bounds.ends_at then
+    raise exception 'A daily register context must close at local midnight starting the day after % in % (expected %, got %)',
+      new.business_date, new.business_timezone, v_bounds.ends_at, new.closed_at
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  return new;
+end;
+$function$;
+
+revoke all on function public.register_sessions_validate_daily_bounds() from public;
+revoke all on function public.register_sessions_validate_daily_bounds() from anon;
+revoke all on function public.register_sessions_validate_daily_bounds() from authenticated;
+revoke all on function public.register_sessions_validate_daily_bounds() from service_role;
+
+create trigger register_sessions_validate_daily_bounds
+  before insert on public.register_sessions
+  for each row
+  when (new.business_date is not null)
+  execute function public.register_sessions_validate_daily_bounds();
+
+-- ----------------------------------------------------------------------------
+-- 6. ensure_daily_register_context()
 --
 -- ZERO ARGUMENTS, AND THAT IS THE WHOLE POINT. There is nothing a client could
 -- pass that would not be an authority claim: a project id, a device id, a
@@ -453,8 +559,74 @@ begin
     return jsonb_build_object('ok', false, 'error', 'business_timezone_required');
   end if;
 
-  -- Step 4: an existing context for this till and this date. The device lock
-  -- already excludes a concurrent ensure, so a plain read is authoritative.
+  -- ==========================================================================
+  -- Step 4a: DOES ANY DAILY CONTEXT FOR THIS TILL ALREADY CONTAIN THIS INSTANT?
+  --
+  -- This question has to be asked before the by-date one, because a timezone
+  -- change can move the DATE as well as the bounds, and then a by-date lookup
+  -- finds nothing and happily creates an OVERLAPPING second context.
+  --
+  -- Concretely: it is 00:30 on the 19th in New York, and a context for the 19th
+  -- exists. The owner switches the shop to Los Angeles, where that same instant
+  -- is 21:30 on the 18th. A by-date search looks for the 18th, does not find
+  -- it, and inserts one -- and now two immutable intervals both contain the
+  -- same authoritative instant, and "which day is this sale on" has two
+  -- answers, forever. Uniqueness on (paired_device_id, business_date) cannot
+  -- catch it: the dates genuinely differ.
+  --
+  -- So: if an existing daily interval already covers now, that row IS the
+  -- answer for this instant. It is returned only when it is exactly the context
+  -- this call would have created -- same date, same zone, same endpoints.
+  -- Anything else fails closed. Nothing is rewritten, reinterpreted, or added
+  -- beside it.
+  -- ==========================================================================
+  select r.id, r.business_date, r.business_timezone, r.opened_at, r.closed_at,
+         r.opening_cash
+  into v_register
+  from public.register_sessions r
+  where r.paired_device_id = v_device.id
+    and r.business_date is not null
+    and r.opened_at <= v_now
+    and v_now < r.closed_at;
+
+  if found then
+    if v_register.business_date is distinct from v_business_date
+       or v_register.business_timezone is distinct from v_timezone
+       or v_register.opened_at is distinct from v_bounds.starts_at
+       or v_register.closed_at is distinct from v_bounds.ends_at then
+      return jsonb_build_object('ok', false, 'error', 'daily_register_timezone_conflict');
+    end if;
+
+    return jsonb_build_object(
+      'ok', true,
+      'created', false,
+      'registerSession', jsonb_build_object(
+        'registerSessionId', v_register.id,
+        'businessDate', v_register.business_date,
+        'businessTimezone', v_register.business_timezone,
+        'openedAt', v_register.opened_at,
+        'closedAt', v_register.closed_at,
+        'openedByEmployeeId', null::uuid,
+        'closedByEmployeeId', null::uuid,
+        'openingCash', v_register.opening_cash::text
+      )
+    );
+  end if;
+
+  -- ==========================================================================
+  -- Step 4b: nothing covers this instant, but a row for this DATE may still
+  -- exist -- with bounds that do not contain now, which is only possible if
+  -- they were computed from a different zone.
+  --
+  -- In the ordinary case step 4a would already have returned it, because the
+  -- candidate bounds contain v_now by construction. This is not dead code: in
+  -- a zone where local midnight itself does not exist on some day, the two
+  -- conversions need not agree, and a row found here with matching bounds is
+  -- still the right answer. Everything else is the same refusal as above.
+  --
+  -- (paired_device_id, business_date) remains the identity rule; this is the
+  -- lookup that upholds it.
+  -- ==========================================================================
   select r.id, r.business_date, r.business_timezone, r.opened_at, r.closed_at,
          r.opening_cash
   into v_register
@@ -566,7 +738,280 @@ revoke all on function public.ensure_daily_register_context() from service_role;
 grant execute on function public.ensure_daily_register_context() to authenticated;
 
 -- ----------------------------------------------------------------------------
--- 6. Verification -- fails loudly, and the whole migration rolls back with it.
+-- 7. close_register_session -- ONE inserted guard, nothing else.
+--
+-- THE ONLY LEGACY SEMANTIC CHANGE IN THIS MIGRATION, and it is additive: the
+-- accepted Feature 1B function is reproduced verbatim with a single contiguous
+-- block inserted. Not one existing line is edited, reordered or removed, and
+-- A9b proves that by deleting exactly that block and comparing what remains
+-- against the definition captured before any DDL ran.
+--
+-- WHAT IT FIXES. Handed a daily context's id, the accepted function reached its
+-- already-closed branch and answered `ok: true, alreadyClosed: true`. That
+-- wrote nothing and invented no closer, so it was safe -- but it was not true.
+-- Nobody closed that row. It was never open. A till acting on that answer would
+-- believe a drawer period had been reconciled when no drawer period existed.
+--
+-- WHERE IT SITS. Immediately after the ownership proof and BEFORE the
+-- already-closed interpretation, because a daily row always has closed_at set
+-- and would otherwise be absorbed by it. After the ownership proof, so a caller
+-- who does not own the target still learns only `not_found`.
+--
+-- EVERY LEGACY PATH IS UNTOUCHED: a normal first close, a repeated close, the
+-- target-first ownership rule, the not_found answers, the employee requirement,
+-- the revoked-or-unpaired fallback and the completed-close immutability all run
+-- exactly as they did, because the guard cannot fire on a row whose
+-- business_date is null.
+--
+-- GRANTS ARE UNCHANGED. `create or replace` preserves the existing ACL, so this
+-- is still authenticated-only; A9c asserts that rather than assuming it.
+-- ----------------------------------------------------------------------------
+create or replace function public.close_register_session(
+  p_register_session_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $function$
+declare
+  v_caller uuid;
+  v_device_id uuid;
+  v_project_id uuid;
+  v_device_locked integer;
+  v_employee_session record;
+  v_has_employee boolean;
+  v_register record;
+begin
+  v_caller := auth.uid();
+
+  if v_caller is null then
+    return jsonb_build_object('ok', false, 'error', 'not_authenticated');
+  end if;
+
+  if p_register_session_id is null then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+
+  -- ==========================================================================
+  -- TARGET-FIRST HISTORICAL OWNERSHIP. Unlocked, and deliberately so: this read
+  -- decides only WHOSE row this is, which is immutable. paired_devices.id,
+  -- auth_user_id and project_id are all frozen by
+  -- paired_devices_guard_immutable_columns, and register_sessions.paired_device_id
+  -- has no writer at all, so nothing here can be stale in a way that matters.
+  --
+  -- No revoked_at / unpaired_at filter: those are operational state, not
+  -- ownership, and a completed close must survive both.
+  --
+  -- A target owned by another device, by another project, or one that does not
+  -- exist are ALL the same answer -- the caller learns nothing it did not
+  -- already know.
+  -- ==========================================================================
+  select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+         r.closed_at, r.closed_by_employee_id,
+         d.id as device_id, d.project_id
+  into v_register
+  from public.register_sessions r
+  join public.paired_devices d on d.id = r.paired_device_id
+  where r.id = p_register_session_id
+    and d.auth_user_id = v_caller;
+
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+
+  -- ==========================================================================
+  -- CP2b: A DAILY CONTEXT IS NOT A DRAWER PERIOD AND CANNOT BE CLOSED BY HAND.
+  --
+  -- Placed BEFORE the already-closed interpretation below, because a daily row
+  -- always has closed_at set and would otherwise be answered as "somebody
+  -- already closed this" -- which is safe (it writes nothing) but untrue.
+  -- Nobody closed it; it was never open, and it has an end because its end was
+  -- known before its beginning arrived. The caller gets a domain failure it can
+  -- act on instead of a success that means something else.
+  --
+  -- ITS OWN READ, so that not one line of the accepted Feature 1B function is
+  -- edited: this whole block is an insertion. It runs only after the ownership
+  -- proof above has already succeeded, so it discloses nothing -- a caller that
+  -- does not own the target got not_found and never reaches here.
+  --
+  -- NOTHING IS WRITTEN on this path, as on every path a daily row can reach.
+  -- ==========================================================================
+  if exists (
+    select 1
+    from public.register_sessions r
+    where r.id = p_register_session_id
+      and r.business_date is not null
+  ) then
+    return jsonb_build_object('ok', false, 'error', 'daily_register_not_manually_closable');
+  end if;
+
+  -- ==========================================================================
+  -- ALREADY CLOSED: the stored state, immediately. Nothing below this point
+  -- runs -- no pairing check, no employee, no lock, no write.
+  -- ==========================================================================
+  if v_register.closed_at is not null then
+    return jsonb_build_object(
+      'ok', true,
+      'alreadyClosed', true,
+      'registerSession', jsonb_build_object(
+        'registerSessionId', v_register.id,
+        'openedAt', v_register.opened_at,
+        'openedByEmployeeId', v_register.opened_by_employee_id,
+        'openingCash', v_register.opening_cash::text,
+        'closedAt', v_register.closed_at,
+        'closedByEmployeeId', v_register.closed_by_employee_id
+      )
+    );
+  end if;
+
+  v_device_id := v_register.device_id;
+  v_project_id := v_register.project_id;
+
+  -- ==========================================================================
+  -- FIRST CLOSE -- an operation, with the approved lock order.
+  --
+  -- Step 1: THAT SAME device row, FOR UPDATE. Not "the caller's device": the
+  -- one the target belongs to. The active-pairing rule is re-checked here,
+  -- under the lock, so a revoke or unpair that commits while this call was
+  -- reading is seen rather than missed -- READ COMMITTED re-evaluates this
+  -- WHERE against the updated row, and the row stops qualifying.
+  -- ==========================================================================
+  select 1
+  into v_device_locked
+  from public.paired_devices d
+  where d.id = v_device_id
+    and d.revoked_at is null
+    and d.unpaired_at is null
+  for update;
+
+  if not found then
+    -- ========================================================================
+    -- THE GATE FAILED -- but a close may already have COMMITTED.
+    --
+    -- The interleaving this closes: this call read the target while it was
+    -- open, another valid close then took the device lock and closed it, and
+    -- the revoke or unpair landed after that. Returning not_paired here would
+    -- let an event that happened AFTER a completed close change its retry
+    -- result, which is exactly what a completed close is not allowed to do.
+    --
+    -- SAFE WITHOUT REVERSING ANY LOCK ORDER, because this takes nothing: any
+    -- close that could have won had to hold this same device row FOR UPDATE,
+    -- and the revoke or unpair that just failed the gate could not commit
+    -- until that close released it. So if a winning close exists, this read
+    -- sees it.
+    --
+    -- The ownership proof is repeated rather than assumed: the target's own
+    -- paired_device_id, that exact device row, and its auth_user_id. An
+    -- ownership failure is the same not_found as everywhere else, so this
+    -- fallback cannot be used to probe for register sessions.
+    -- ========================================================================
+    select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+           r.closed_at, r.closed_by_employee_id
+    into v_register
+    from public.register_sessions r
+    join public.paired_devices d on d.id = r.paired_device_id
+    where r.id = p_register_session_id
+      and d.auth_user_id = v_caller;
+
+    if found and v_register.closed_at is not null then
+      return jsonb_build_object(
+        'ok', true,
+        'alreadyClosed', true,
+        'registerSession', jsonb_build_object(
+          'registerSessionId', v_register.id,
+          'openedAt', v_register.opened_at,
+          'openedByEmployeeId', v_register.opened_by_employee_id,
+          'openingCash', v_register.opening_cash::text,
+          'closedAt', v_register.closed_at,
+          'closedByEmployeeId', v_register.closed_by_employee_id
+        )
+      );
+    end if;
+
+    -- Still open, and this device may no longer operate: no first close.
+    return jsonb_build_object('ok', false, 'error', 'not_paired');
+  end if;
+
+  -- Steps 3-4: the signed-in employee, FOR SHARE on the session and the
+  -- employee. Recorded, not yet required: if a concurrent close beat this one,
+  -- the answer below is that close's stored state, not a complaint about who
+  -- is signed in now.
+  select s.id, s.employee_id
+  into v_employee_session
+  from public.employee_pos_sessions s
+  join public.employees e on e.id = s.employee_id
+  where s.paired_device_id = v_device_id
+    and s.ended_at is null
+    and e.active
+    and e.project_id = v_project_id
+    and e.role in ('owner', 'manager', 'cashier')
+  for share of s, e;
+
+  v_has_employee := found;
+
+  -- Step 5: the target, FOR UPDATE, re-read under the lock. The pre-lock read
+  -- above decided ownership only; the state it saw is re-established here
+  -- before anything is written.
+  select r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+         r.closed_at, r.closed_by_employee_id
+  into v_register
+  from public.register_sessions r
+  where r.id = p_register_session_id
+    and r.paired_device_id = v_device_id
+  for update;
+
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+
+  -- Another close committed while this one waited for the lock. Its result is
+  -- the answer, and it is not rewritten.
+  if v_register.closed_at is not null then
+    return jsonb_build_object(
+      'ok', true,
+      'alreadyClosed', true,
+      'registerSession', jsonb_build_object(
+        'registerSessionId', v_register.id,
+        'openedAt', v_register.opened_at,
+        'openedByEmployeeId', v_register.opened_by_employee_id,
+        'openingCash', v_register.opening_cash::text,
+        'closedAt', v_register.closed_at,
+        'closedByEmployeeId', v_register.closed_by_employee_id
+      )
+    );
+  end if;
+
+  if not v_has_employee then
+    return jsonb_build_object('ok', false, 'error', 'employee_session_required');
+  end if;
+
+  update public.register_sessions r
+  set closed_at = clock_timestamp(),
+      closed_by_employee_id = v_employee_session.employee_id
+  where r.id = v_register.id
+    and r.closed_at is null
+  returning r.id, r.opened_at, r.opened_by_employee_id, r.opening_cash,
+            r.closed_at, r.closed_by_employee_id
+  into v_register;
+
+  return jsonb_build_object(
+    'ok', true,
+    'alreadyClosed', false,
+    'registerSession', jsonb_build_object(
+      'registerSessionId', v_register.id,
+      'openedAt', v_register.opened_at,
+      'openedByEmployeeId', v_register.opened_by_employee_id,
+      'openingCash', v_register.opening_cash::text,
+      'closedAt', v_register.closed_at,
+      'closedByEmployeeId', v_register.closed_by_employee_id
+    )
+  );
+end;
+$function$;
+
+-- ----------------------------------------------------------------------------
+-- 8. Verification -- fails loudly, and the whole migration rolls back with it.
 --
 -- The conditional constraints are EVALUATED against probe rows rather than
 -- compared as text: what matters is which rows they accept, not how PostgreSQL
@@ -587,8 +1032,15 @@ declare
   v_next timestamptz;
   v_hours numeric;
   v_col record;
+  v_new text;
+  v_stripped text;
+  v_lines text[];
+  v_from integer;
+  v_to integer;
   v_daily_sig constant text := 'public.ensure_daily_register_context()';
   v_guard_sig constant text := 'public.register_sessions_guard_daily_immutable()';
+  v_bounds_sig constant text := 'public.register_sessions_validate_daily_bounds()';
+  v_close_sig constant text := 'public.close_register_session(uuid)';
 begin
   -- ==========================================================================
   -- A1. The two new columns: nullable, no default, right types.
@@ -793,14 +1245,35 @@ begin
     raise exception 'CP2b: the daily immutability trigger is %', v_text;
   end if;
 
-  -- register_sessions carries exactly one trigger, the one added here.
+  -- A6b. The INSERT validator, and its WHEN clause -- the thing that keeps the
+  -- entire Feature 1B write path out of it.
+  select pg_get_triggerdef(t.oid) into v_text
+  from pg_trigger t
+  where t.tgrelid = 'public.register_sessions'::regclass
+    and t.tgname = 'register_sessions_validate_daily_bounds'
+    and not t.tgisinternal;
+
+  if v_text is null then
+    raise exception 'CP2b: the daily bounds validator trigger does not exist.';
+  end if;
+
+  if v_text !~ 'BEFORE INSERT'
+     or v_text !~ 'FOR EACH ROW'
+     or v_text !~ 'WHEN \(+new\.business_date IS NOT NULL\)+' then
+    raise exception 'CP2b: the daily bounds validator trigger is %', v_text;
+  end if;
+
+  -- register_sessions carries exactly the two triggers added here.
   select array_agg(t.tgname::text order by t.tgname)
   into v_names
   from pg_trigger t
   where t.tgrelid = 'public.register_sessions'::regclass
     and not t.tgisinternal;
 
-  if v_names is distinct from array['register_sessions_guard_daily_immutable'] then
+  if v_names is distinct from array[
+    'register_sessions_guard_daily_immutable',
+    'register_sessions_validate_daily_bounds'
+  ] then
     raise exception 'CP2b: register_sessions triggers are %', v_names;
   end if;
 
@@ -918,6 +1391,37 @@ begin
     end if;
   end loop;
 
+  -- A8b. The bounds validator, on exactly the same terms: a trigger body, not
+  -- an RPC, and no elevation because every writer already runs as its owner.
+  if exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'register_sessions_validate_daily_bounds'
+      and p.prosecdef
+  ) then
+    raise exception 'CP2b: the bounds validator is SECURITY DEFINER but needs no elevated privilege.';
+  end if;
+
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'register_sessions_validate_daily_bounds'
+      and p.proconfig @> array['search_path=public, pg_catalog, pg_temp']
+  ) then
+    raise exception 'CP2b: the bounds validator does not pin its search_path.';
+  end if;
+
+  if has_function_privilege('public', v_bounds_sig, 'EXECUTE') then
+    raise exception 'CP2b: PUBLIC can execute the bounds validator.';
+  end if;
+
+  foreach v_role in array array['anon', 'authenticated', 'service_role']
+  loop
+    if has_function_privilege(v_role, v_bounds_sig, 'EXECUTE') then
+      raise exception 'CP2b: % can execute the bounds validator.', v_role;
+    end if;
+  end loop;
+
   -- ==========================================================================
   -- A9. No new client table access anywhere, and register_sessions in
   -- particular is still zero-grant, RLS-on, zero-policy.
@@ -972,25 +1476,29 @@ begin
   -- A10. Every pre-existing function is byte-identical, including all four
   -- sale functions, complete_sale_v5, and all three legacy register RPCs.
   -- ==========================================================================
+  -- close_register_session is the ONE authorized exception and is proved
+  -- separately, in A9b, by reconstruction rather than by digest.
   if exists (
     select 1
     from cp2b_proc_baseline b
     join pg_proc p on p.oid = b.fn_oid
-    where md5(pg_get_functiondef(p.oid)) is distinct from b.body
+    where p.oid <> v_close_sig::regprocedure::oid
+      and (md5(pg_get_functiondef(p.oid)) is distinct from b.body
        or p.prosecdef is distinct from b.prosecdef
        or p.provolatile::text is distinct from b.volatile
        or coalesce(p.proconfig, array[]::text[]) is distinct from b.config
-       or coalesce(p.proacl::text, 'default') is distinct from b.acl
+       or coalesce(p.proacl::text, 'default') is distinct from b.acl)
   ) then
     select string_agg(b.proname || '(' || b.args || ')', ', ')
     into v_text
     from cp2b_proc_baseline b
     join pg_proc p on p.oid = b.fn_oid
-    where md5(pg_get_functiondef(p.oid)) is distinct from b.body
+    where p.oid <> v_close_sig::regprocedure::oid
+      and (md5(pg_get_functiondef(p.oid)) is distinct from b.body
        or p.prosecdef is distinct from b.prosecdef
        or p.provolatile::text is distinct from b.volatile
        or coalesce(p.proconfig, array[]::text[]) is distinct from b.config
-       or coalesce(p.proacl::text, 'default') is distinct from b.acl;
+       or coalesce(p.proacl::text, 'default') is distinct from b.acl);
 
     raise exception 'CP2b: pre-existing functions were modified: %', v_text;
   end if;
@@ -1005,7 +1513,6 @@ begin
   foreach v_text in array array[
     'public.open_register_session(uuid,numeric)',
     'public.get_current_register_session()',
-    'public.close_register_session(uuid)',
     'public.complete_sale_v5(text,numeric,jsonb,uuid,timestamptz,text,uuid,uuid)'
   ]
   loop
@@ -1017,6 +1524,78 @@ begin
       raise exception 'CP2b: % is not byte-identical to its pre-migration definition.', v_text;
     end if;
   end loop;
+
+  -- ==========================================================================
+  -- A9b. close_register_session DIFFERS BY THE DAILY GUARD AND BY NOTHING ELSE.
+  --
+  -- Not "contains the guard" -- that would pass even if half the function had
+  -- been rewritten around it. The corrected definition has exactly one
+  -- contiguous region removed (the separator line that opens the guard through
+  -- the blank line that follows its `end if;`) and what remains must equal the
+  -- text captured in section 0, before any DDL in this file ran, character for
+  -- character.
+  -- ==========================================================================
+  v_new := pg_get_functiondef(v_close_sig::regprocedure::oid);
+  v_lines := string_to_array(v_new, chr(10));
+
+  select min(i) into v_from
+  from generate_subscripts(v_lines, 1) i
+  where v_lines[i] like '%CP2b: A DAILY CONTEXT IS NOT A DRAWER PERIOD%';
+
+  if v_from is null then
+    raise exception 'CP2b: close_register_session does not carry the daily guard.';
+  end if;
+
+  -- Back to the separator line that opens the block.
+  while v_from > 1 and v_lines[v_from] not like '  -- ==%' loop
+    v_from := v_from - 1;
+  end loop;
+
+  -- Forward to the guard's own `end if;`, and the blank line after it.
+  select min(i) into v_to
+  from generate_subscripts(v_lines, 1) i
+  where i > v_from and v_lines[i] = '  end if;';
+
+  if v_to is null then
+    raise exception 'CP2b: the daily guard in close_register_session is not closed.';
+  end if;
+
+  if v_lines[v_to + 1] = '' then
+    v_to := v_to + 1;
+  end if;
+
+  v_stripped := array_to_string(
+    v_lines[1:v_from - 1] || v_lines[v_to + 1:array_length(v_lines, 1)], chr(10));
+
+  if v_stripped <> (select def from cp2b_close_baseline) then
+    raise exception 'CP2b: close_register_session differs from its accepted definition by more than the daily guard.';
+  end if;
+
+  if v_new !~ 'daily_register_not_manually_closable' then
+    raise exception 'CP2b: close_register_session does not return the daily domain failure.';
+  end if;
+
+  -- A9c. And its grants did not move: create or replace preserves the ACL, and
+  -- this says so rather than assuming it.
+  if not has_function_privilege('authenticated', v_close_sig, 'EXECUTE') then
+    raise exception 'CP2b: authenticated lost EXECUTE on close_register_session.';
+  end if;
+
+  foreach v_role in array array['public', 'anon', 'service_role']
+  loop
+    if has_function_privilege(v_role, v_close_sig, 'EXECUTE') then
+      raise exception 'CP2b: % gained EXECUTE on close_register_session.', v_role;
+    end if;
+  end loop;
+
+  if not exists (
+    select 1 from cp2b_proc_baseline b
+    where b.fn_oid = v_close_sig::regprocedure::oid
+      and b.acl = coalesce((select coalesce(p.proacl::text, 'default')
+                            from pg_proc p where p.oid = v_close_sig::regprocedure::oid), 'default')
+  ) then
+    raise exception 'CP2b: close_register_session''s ACL changed.';
+  end if;
 
   -- ==========================================================================
   -- A11. Policies and RLS across the whole schema are unchanged.
@@ -1128,7 +1707,7 @@ begin
     raise exception 'CP2b: a column changed on a table other than register_sessions.';
   end if;
 
-  raise notice 'CP2b verified: daily register context, conditional integrity, and an unchanged Feature 1B.';
+  raise notice 'CP2b verified: daily register context, database-enforced calendar bounds, and a Feature 1B changed only by the inserted daily guard.';
 end;
 $do$;
 
@@ -1140,3 +1719,4 @@ drop table cp2b_con_baseline;
 drop table cp2b_idx_baseline;
 drop table cp2b_col_baseline;
 drop table cp2b_row_baseline;
+drop table cp2b_close_baseline;

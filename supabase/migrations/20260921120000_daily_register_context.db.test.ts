@@ -246,6 +246,51 @@ function asRole(db: string, who: string, statement: string): string {
   return lines[lines.length - 1] ?? "";
 }
 
+/**
+ * Runs `statement` as the REAL `authenticated` role, with the JWT subject set.
+ *
+ * WHY THIS EXISTS ALONGSIDE asRole. asRole sets the JWT claim but stays
+ * `postgres`, which owns every table and bypasses RLS and every ACL. That is
+ * enough to exercise the RPC's own logic and nothing else: a function that
+ * quietly depended on the caller holding a privilege no client has would pass.
+ * has_function_privilege answers what a role MAY do; this answers what actually
+ * happens when it does it.
+ *
+ * `set local role` and a local set_config, inside an explicit transaction, so
+ * neither can outlive the statement. Each sql() call is its own psql process
+ * and therefore its own connection, so nothing leaks between tests either way
+ * -- the transaction scoping is belt and braces, and the tests below assert the
+ * role really is dropped afterwards.
+ */
+function asAuthenticated(db: string, who: string, statement: string): string {
+  const out = sql(db, `
+    begin;
+    set local role authenticated;
+    select set_config('request.jwt.claim.sub','${who}', true);
+    ${statement};
+    commit;`);
+  const lines = out.split("\n").filter((line) => line !== "");
+
+  return lines[lines.length - 1] ?? "";
+}
+
+/** The same, returning the error text instead of throwing. */
+function asAuthenticatedExpectingFailure(db: string, who: string, statement: string): string {
+  try {
+    asAuthenticated(db, who, statement);
+    return "";
+  } catch (error) {
+    const err = error as { stderr?: string; message?: string };
+    return (err.stderr ?? err.message ?? "").toString();
+  }
+}
+
+/** The exact computed interval for a business date, as an INSERT value list. */
+function exactDaily(date: string, tz = "America/New_York", cash = "0"): string {
+  return `(select starts_at from public.business_day_bounds(date '${date}','${tz}')), ${cash}, ` +
+         `(select ends_at from public.business_day_bounds(date '${date}','${tz}')), '${date}', '${tz}'`;
+}
+
 /** One project, one build, `tills` paired devices and one active employee. */
 function seed(db: string, tills: number): void {
   const users = Array.from({ length: tills }, (_, i) => `('${deviceUser(i + 1)}')`).join(",");
@@ -314,6 +359,8 @@ run("the migration applies to a database holding every accepted predecessor", ()
                       and column_name in ('business_date','business_timezone')`)).toBe("2");
     expect(sql(DB, `select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='public' and p.proname='ensure_daily_register_context'`)).toBe("1");
+    expect(sql(DB, `select count(*) from pg_trigger t
+                    where t.tgrelid='public.register_sessions'::regclass and not t.tgisinternal`)).toBe("2");
   });
 });
 
@@ -332,7 +379,25 @@ run("schema: legacy and daily rows obey different rules", () => {
        values ('${dev}', ${values})`);
     const match = /violates check constraint "([a-z_]+)"|violates not-null constraint/.exec(error);
 
-    return error === "" ? "" : (match?.[1] ?? "refused");
+    if (error === "") return "";
+    // The BEFORE INSERT bounds validator fires ahead of the CHECK constraints,
+    // so a daily row that is BOTH misshapen and miscomputed is refused by the
+    // trigger first. Naming the two layers separately keeps each assertion
+    // honest about which one actually did the refusing.
+    if (/must open at local midnight|must close at local midnight|Invalid business timezone|No calendar bounds/
+      .test(error)) return "daily_bounds";
+
+    return match?.[1] ?? "refused";
+  };
+
+  /** Runs `body` with the bounds validator off, to isolate a CHECK constraint. */
+  const withoutBoundsValidator = (body: () => void): void => {
+    sql(DB, `alter table public.register_sessions disable trigger register_sessions_validate_daily_bounds`);
+    try {
+      body();
+    } finally {
+      sql(DB, `alter table public.register_sessions enable trigger register_sessions_validate_daily_bounds`);
+    }
   };
 
   beforeAll(() => {
@@ -393,39 +458,53 @@ run("schema: legacy and daily rows obey different rules", () => {
   const daily = "opened_at, opening_cash, closed_at, business_date, business_timezone";
 
   it("a daily row may not name an opener", () => {
-    expect(insert(`opened_by_employee_id, ${daily}`,
-      `'${EMPLOYEE}', '2026-05-01', 0, '2026-05-02', '2026-05-01', 'America/New_York'`))
+    // EXACT computed bounds, so the shape rule is the only thing broken and the
+    // bounds validator has nothing to say. Same for the four cases below.
+    expect(insert(`opened_by_employee_id, ${daily}`, `'${EMPLOYEE}', ${exactDaily("2026-05-01")}`))
       .toBe("register_sessions_daily_shape");
   });
 
   it("a daily row may not name a closer", () => {
-    expect(insert(`closed_by_employee_id, ${daily}`,
-      `'${EMPLOYEE}', '2026-05-01', 0, '2026-05-02', '2026-05-01', 'America/New_York'`))
+    expect(insert(`closed_by_employee_id, ${daily}`, `'${EMPLOYEE}', ${exactDaily("2026-05-01")}`))
       .toBe("register_sessions_daily_shape");
   });
 
   it("a daily row may not carry an open_request_id", () => {
-    expect(insert(`open_request_id, ${daily}`,
-      `gen_random_uuid(), '2026-05-01', 0, '2026-05-02', '2026-05-01', 'America/New_York'`))
+    expect(insert(`open_request_id, ${daily}`, `gen_random_uuid(), ${exactDaily("2026-05-01")}`))
       .toBe("register_sessions_daily_shape");
   });
 
   it("a daily row's opening_cash is exactly 0.00 and nothing else", () => {
-    expect(insert(daily, `'2026-05-01', 25, '2026-05-02', '2026-05-01', 'America/New_York'`))
+    expect(insert(daily, exactDaily("2026-05-01", "America/New_York", "25")))
       .toBe("register_sessions_daily_shape");
-    expect(insert(daily, `'2026-05-01', 0.01, '2026-05-02', '2026-05-01', 'America/New_York'`))
+    expect(insert(daily, exactDaily("2026-05-01", "America/New_York", "0.01")))
       .toBe("register_sessions_daily_shape");
-    expect(insert(daily, `'2026-05-01', 0.00, '2026-05-02', '2026-05-01', 'America/New_York'`)).toBe("");
+    expect(insert(daily, exactDaily("2026-05-01", "America/New_York", "0.00"))).toBe("");
   });
 
-  it("a daily row requires a business_timezone", () => {
+  it("a daily row requires a business_timezone — two layers, both proven", () => {
+    // The validator refuses it first, because it cannot compute a calendar
+    // without a zone...
     expect(insert("opened_at, opening_cash, closed_at, business_date",
-      `'2026-06-01', 0, '2026-06-02', '2026-06-01'`)).toBe("register_sessions_daily_shape");
+      `'2026-06-01', 0, '2026-06-02', '2026-06-01'`)).toBe("daily_bounds");
+
+    // ...and the CHECK constraint refuses it underneath, on its own.
+    withoutBoundsValidator(() => {
+      expect(insert("opened_at, opening_cash, closed_at, business_date",
+        `'2026-06-01', 0, '2026-06-02', '2026-06-01'`)).toBe("register_sessions_daily_shape");
+    });
   });
 
   it("a daily row can never be left open — its end is known at creation", () => {
+    // A null closed_at is not the computed endpoint, so the validator speaks
+    // first; the constraint says the same thing independently.
     expect(insert("opened_at, opening_cash, business_date, business_timezone",
-      `'2026-06-01', 0, '2026-06-01', 'America/New_York'`)).toBe("register_sessions_daily_shape");
+      `'2026-06-01', 0, '2026-06-01', 'America/New_York'`)).toBe("daily_bounds");
+
+    withoutBoundsValidator(() => {
+      expect(insert("opened_at, opening_cash, business_date, business_timezone",
+        `'2026-06-01', 0, '2026-06-01', 'America/New_York'`)).toBe("register_sessions_daily_shape");
+    });
   });
 
   it("business_date alone discriminates the two modes, with no is_daily column", () => {
@@ -449,8 +528,7 @@ run("uniqueness: one daily context per till per business date", () => {
     const error = sqlExpectingFailure(DB, `
       insert into public.register_sessions (paired_device_id, opened_at, opening_cash,
                                             closed_at, business_date, business_timezone)
-      values ('${dev}', '${date} 04:00:00+00', 0, '${date} 04:00:00+00'::timestamptz + interval '1 day',
-              '${date}', 'America/New_York')`);
+      values ('${dev}', ${exactDaily(date)})`);
 
     return error === "" ? "" : (/violates unique constraint "([a-z_]+)"/.exec(error)?.[1] ?? "refused");
   };
@@ -913,15 +991,23 @@ run("the Feature 1B register RPCs are untouched, and cannot see a daily row", ()
     expect(current.registerSession.openingCash).toBe("125.50");
   });
 
-  it("closing a DAILY row through the legacy RPC is a safe no-op", () => {
-    // ok, not an error; no closer invented; no constraint violation; no write.
+  it("closing a DAILY row through the legacy RPC is a DOMAIN FAILURE", () => {
+    // Not `alreadyClosed`. That answer wrote nothing and invented no closer, so
+    // it was safe, but it said something untrue: nobody closed this row, and it
+    // was never open. A till acting on it would believe a drawer period had
+    // been reconciled when no drawer period existed.
     const answer = JSON.parse(one(`select public.close_register_session('${daily}')::text`));
 
-    expect(answer.ok).toBe(true);
-    expect(answer.alreadyClosed).toBe(true);
-    expect(answer.registerSession.closedByEmployeeId).toBeNull();
-    expect(answer.registerSession.openedByEmployeeId).toBeNull();
-    expect(answer.registerSession.openingCash).toBe("0.00");
+    expect(answer).toEqual({ ok: false, error: "daily_register_not_manually_closable" });
+    expect(answer.alreadyClosed).toBeUndefined();
+    expect(answer.registerSession).toBeUndefined();
+  });
+
+  it("repeating it is the same failure, and still writes nothing", () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(one(`select public.close_register_session('${daily}')->>'error'`))
+        .toBe("daily_register_not_manually_closable");
+    }
   });
 
   it("and the daily row is unchanged afterwards", () => {
@@ -995,6 +1081,25 @@ run("security: the new surface is one RPC, for authenticated only", () => {
     }
   });
 
+  it("the bounds validator is a trigger body too: no elevation, no grants", () => {
+    expect(sql(DB, `select p.prosecdef::text || ' ' || array_to_string(p.proconfig, ',')
+                    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname='public' and p.proname='register_sessions_validate_daily_bounds'`))
+      .toBe("false search_path=public, pg_catalog, pg_temp");
+
+    for (const role of ROLES) {
+      expect(`${role}: ${canExecute(role, "public.register_sessions_validate_daily_bounds()")}`)
+        .toBe(`${role}: false`);
+    }
+  });
+
+  it("close_register_session is still authenticated-only after the guard", () => {
+    for (const role of ROLES) {
+      expect(`${role}: ${canExecute(role, "public.close_register_session(uuid)")}`)
+        .toBe(`${role}: ${role === "authenticated" ? "true" : "false"}`);
+    }
+  });
+
   it("no role gained any direct access to register_sessions", () => {
     for (const role of ["anon", "authenticated", "service_role"]) {
       for (const priv of ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]) {
@@ -1054,16 +1159,63 @@ run("regression: everything this checkpoint promised not to touch", () => {
     expect(fingerprint(AFTER, sig)).toBe(fingerprint(BEFORE, sig));
   });
 
-  it("so are the three legacy register RPCs and the offline sale contract", () => {
+  it("so are the other legacy register RPCs and the offline sale contract", () => {
     for (const sig of [
       "public.open_register_session(uuid,numeric)",
       "public.get_current_register_session()",
-      "public.close_register_session(uuid)",
       "public.complete_sale_v4(uuid,text,numeric,jsonb,uuid,timestamptz,text)",
       "public.complete_sale_v3(uuid,text,numeric,jsonb,uuid)",
     ]) {
       expect(`${sig}: ${fingerprint(AFTER, sig)}`).toBe(`${sig}: ${fingerprint(BEFORE, sig)}`);
     }
+  });
+
+  it("close_register_session differs from the accepted version by ADDED LINES ONLY", () => {
+    const sig = "public.close_register_session(uuid)";
+    const definition = (db: string): string[] =>
+      sql(db, `select pg_get_functiondef('${sig}'::regprocedure)`).split("\n");
+
+    const before = definition(BEFORE);
+    const after = definition(AFTER);
+
+    // Every line of the accepted definition survives, in order. Walking the two
+    // in step means a single removed or edited line would strand the pointer and
+    // fail -- which is stricter than a set comparison, and is the actual claim.
+    let i = 0;
+    const added: string[] = [];
+
+    for (const line of after) {
+      if (i < before.length && line === before[i]) i += 1;
+      else added.push(line);
+    }
+
+    expect(`${i} of ${before.length} accepted lines matched, in order`)
+      .toBe(`${before.length} of ${before.length} accepted lines matched, in order`);
+    expect(added.length).toBeGreaterThan(0);
+
+    // And every added line belongs to the guard: its comment block, or the
+    // `if exists` that returns the domain failure.
+    expect(added.filter((line) => line.trim() !== "" && !line.trim().startsWith("--")))
+      .toEqual([
+        "  if exists (",
+        "    select 1",
+        "    from public.register_sessions r",
+        "    where r.id = p_register_session_id",
+        "      and r.business_date is not null",
+        "  ) then",
+        "    return jsonb_build_object('ok', false, 'error', 'daily_register_not_manually_closable');",
+        "  end if;",
+      ]);
+  });
+
+  it("and its security posture and grants did not move", () => {
+    const sig = "public.close_register_session(uuid)";
+    const posture = (db: string): string =>
+      sql(db, `select p.prosecdef::text || ' | ' || array_to_string(p.proconfig, ',') || ' | ' ||
+                      coalesce(p.proacl::text,'default')
+               from pg_proc p where p.oid = '${sig}'::regprocedure::oid`);
+
+    expect(posture(AFTER)).toBe(posture(BEFORE));
   });
 
   it("EVERY pre-existing function in public is byte-identical", () => {
@@ -1075,7 +1227,9 @@ run("regression: everything this checkpoint promised not to touch", () => {
                from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                where n.nspname='public' and p.prokind='f'
                  and p.proname not in ('ensure_daily_register_context',
-                                       'register_sessions_guard_daily_immutable')`);
+                                       'register_sessions_guard_daily_immutable',
+                                       'register_sessions_validate_daily_bounds',
+                                       'close_register_session')`);
 
     expect(digest(AFTER)).toBe(digest(BEFORE));
   });
@@ -1134,5 +1288,397 @@ run("regression: everything this checkpoint promised not to touch", () => {
                from pg_policies where schemaname='public'`);
 
     expect(policies(AFTER)).toBe(policies(BEFORE));
+  });
+});
+
+// ===========================================================================
+// MANUAL CLOSE: the one legacy semantic change, and its blast radius
+// ===========================================================================
+
+run("the daily close guard changes daily rows only", () => {
+  const DB = "cp2b_close";
+  const one = (statement: string): string => asRole(DB, deviceUser(1), statement);
+  let daily = "";
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    seed(DB, 2);
+    expect(applyMigration(DB).ok).toBe(true);
+    sql(DB, `update public.projects set business_timezone='America/New_York' where id='${PROJECT}'`);
+    daily = JSON.parse(one(`select public.ensure_daily_register_context()::text`))
+      .registerSession.registerSessionId;
+    one(`select public.employee_login_by_code('001','2222')`);
+  }, 240_000);
+
+  it("a daily id gets the stable domain failure", () => {
+    expect(one(`select public.close_register_session('${daily}')::text`))
+      .toBe('{"ok": false, "error": "daily_register_not_manually_closable"}');
+  });
+
+  it("the daily row is not written to — not one column moves", () => {
+    const before = sql(DB, `select md5(r::text) from public.register_sessions r where r.id='${daily}'`);
+
+    one(`select public.close_register_session('${daily}')`);
+
+    expect(sql(DB, `select md5(r::text) from public.register_sessions r where r.id='${daily}'`))
+      .toBe(before);
+  });
+
+  it("LEGACY: a normal first close still works and records a real closer", () => {
+    const legacy = JSON.parse(one(
+      `select public.open_register_session('77777777-7777-4777-8777-777777777777', 125.50)::text`))
+      .registerSession.registerSessionId;
+    const closed = JSON.parse(one(`select public.close_register_session('${legacy}')::text`));
+
+    expect(closed.ok).toBe(true);
+    expect(closed.alreadyClosed).toBe(false);
+    expect(closed.registerSession.closedByEmployeeId).toBe(EMPLOYEE);
+
+    // LEGACY: repeated close is still idempotent, and still returns the STORED
+    // state rather than re-closing.
+    const again = JSON.parse(one(`select public.close_register_session('${legacy}')::text`));
+
+    expect(again.alreadyClosed).toBe(true);
+    expect(again.registerSession.closedAt).toBe(closed.registerSession.closedAt);
+  });
+
+  it("LEGACY: an unknown id, and another device's row, are both still not_found", () => {
+    expect(one(`select public.close_register_session(gen_random_uuid())->>'error'`)).toBe("not_found");
+    expect(one(`select public.close_register_session(null)->>'error'`)).toBe("not_found");
+
+    // A daily row belonging to a DIFFERENT till: ownership is decided before the
+    // daily guard, so this must be not_found and must NOT leak that it is daily.
+    const theirs = JSON.parse(asRole(DB, deviceUser(2),
+      `select public.ensure_daily_register_context()::text`)).registerSession.registerSessionId;
+
+    expect(one(`select public.close_register_session('${theirs}')->>'error'`)).toBe("not_found");
+  });
+
+  it("LEGACY: the employee requirement is unchanged", () => {
+    const legacy = JSON.parse(one(
+      `select public.open_register_session('66666666-6666-4666-8666-666666666666', 10.00)::text`))
+      .registerSession.registerSessionId;
+
+    // Through the real RPC, not a raw UPDATE: employee_pos_sessions requires an
+    // end_reason alongside ended_at, and inventing one here would be testing a
+    // state the product cannot produce.
+    expect(one(`select public.employee_logout()->>'ok'`)).toBe("true");
+
+    expect(one(`select public.close_register_session('${legacy}')->>'error'`))
+      .toBe("employee_session_required");
+  });
+});
+
+// ===========================================================================
+// TIMEZONE CONFLICT: including the change that moves the DATE
+// ===========================================================================
+
+run("a timezone change can never produce two daily contexts over one instant", () => {
+  const DB = "cp2b_overlap";
+  const setZone = (tz: string): void => {
+    sql(DB, `update public.projects set business_timezone='${tz}' where id='${PROJECT}'`);
+  };
+
+  // 25 hours apart, so their local dates differ at EVERY instant. That is what
+  // makes this deterministic rather than a test that passes for 23 hours a day.
+  const AHEAD = "Pacific/Kiritimati";
+  const BEHIND = "Pacific/Midway";
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    seed(DB, 3);
+    expect(applyMigration(DB).ok).toBe(true);
+  }, 240_000);
+
+  it("the two zones really do disagree about the date right now", () => {
+    expect(sql(DB, `select ((now() at time zone '${AHEAD}')::date
+                          > (now() at time zone '${BEHIND}')::date)::text`)).toBe("true");
+  });
+
+  it("A. a SAME-DATE timezone change fails closed", () => {
+    setZone("America/New_York");
+    expect(asRole(DB, deviceUser(1), `select public.ensure_daily_register_context()->>'created'`))
+      .toBe("true");
+
+    // Chicago is an hour behind New York; at most instants the date is the same
+    // and only the bounds differ. When it is not, the date-shift branch catches
+    // it instead -- either way the answer is the same refusal.
+    setZone("America/Chicago");
+    expect(asRole(DB, deviceUser(1), `select public.ensure_daily_register_context()->>'error'`))
+      .toBe("daily_register_timezone_conflict");
+  });
+
+  it("B. a DATE-SHIFTING timezone change also fails closed", () => {
+    setZone(AHEAD);
+    const made = JSON.parse(asRole(DB, deviceUser(2), `select public.ensure_daily_register_context()::text`));
+
+    expect(made.created).toBe(true);
+
+    // The candidate date is now a DIFFERENT day, so a by-date lookup finds
+    // nothing. Before the current-instant check existed, this inserted a second
+    // immutable interval covering the same instant.
+    setZone(BEHIND);
+    expect(sql(DB, `select (public.business_date_of(now(),'${BEHIND}')
+                         <> date '${made.registerSession.businessDate}')::text`)).toBe("true");
+    expect(asRole(DB, deviceUser(2), `select public.ensure_daily_register_context()->>'error'`))
+      .toBe("daily_register_timezone_conflict");
+  });
+
+  it("C. no second row was created, and no two intervals overlap", () => {
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(2)}'`)).toBe("1");
+
+    // Stated as the invariant rather than as a row count: no till may have two
+    // daily intervals that share any instant.
+    expect(sql(DB, `select count(*) from public.register_sessions a
+                    join public.register_sessions b
+                      on b.paired_device_id = a.paired_device_id and b.id <> a.id
+                    where a.business_date is not null and b.business_date is not null
+                      and a.opened_at < b.closed_at and b.opened_at < a.closed_at`)).toBe("0");
+  });
+
+  it("D. the original immutable row is exactly as it was", () => {
+    expect(sql(DB, `select business_timezone || ' ' || business_date::text || ' ' ||
+                           (opened_at = (select starts_at from public.business_day_bounds(business_date, business_timezone)))::text
+                    from public.register_sessions where paired_device_id='${device(2)}'`))
+      .toMatch(new RegExp(`^${AHEAD} \\d{4}-\\d{2}-\\d{2} true$`));
+  });
+
+  it("E. a till whose daily intervals do NOT cover now still creates today", () => {
+    setZone("America/New_York");
+
+    // A context for a long-past day, with exact computed bounds.
+    sql(DB, `insert into public.register_sessions
+             (paired_device_id, opened_at, opening_cash, closed_at, business_date, business_timezone)
+             values ('${device(3)}', ${exactDaily("2026-01-15")})`);
+
+    const today = JSON.parse(asRole(DB, deviceUser(3), `select public.ensure_daily_register_context()::text`));
+
+    expect(today.ok).toBe(true);
+    expect(today.created).toBe(true);
+    expect(today.registerSession.businessDate).not.toBe("2026-01-15");
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(3)}'`)).toBe("2");
+  });
+
+  it("and asking again, with nothing changed, is still idempotent", () => {
+    const a = JSON.parse(asRole(DB, deviceUser(3), `select public.ensure_daily_register_context()::text`));
+    const b = JSON.parse(asRole(DB, deviceUser(3), `select public.ensure_daily_register_context()::text`));
+
+    expect(b.created).toBe(false);
+    expect(b.registerSession.registerSessionId).toBe(a.registerSession.registerSessionId);
+  });
+});
+
+// ===========================================================================
+// DAILY INSERT VALIDATION
+// ===========================================================================
+
+run("a daily row's interval must BE the calendar, enforced by the database", () => {
+  const DB = "cp2b_bounds";
+  const DEV = device(1);
+
+  /** "" when accepted, otherwise the validator's complaint, classified. */
+  const insertDaily = (values: string): string => {
+    const error = sqlExpectingFailure(DB, `
+      insert into public.register_sessions (paired_device_id, opened_at, opening_cash,
+                                            closed_at, business_date, business_timezone)
+      values ('${DEV}', ${values})`);
+
+    if (error === "") return "";
+    if (/must open at local midnight/.test(error)) return "wrong start";
+    if (/must close at local midnight/.test(error)) return "wrong end";
+    if (/Invalid business timezone/.test(error)) return "invalid timezone";
+    if (/No calendar bounds/.test(error)) return "no bounds";
+
+    return `other: ${error.split("\n")[0]}`;
+  };
+
+  const shifted = (date: string, which: "start" | "end", by: string, tz = "America/New_York"): string =>
+    `(select starts_at ${which === "start" ? by : ""} from public.business_day_bounds(date '${date}','${tz}')), 0, ` +
+    `(select ends_at ${which === "end" ? by : ""} from public.business_day_bounds(date '${date}','${tz}')), ` +
+    `'${date}', '${tz}'`;
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    seed(DB, 1);
+    expect(applyMigration(DB).ok).toBe(true);
+  }, 240_000);
+
+  it("the exact computed interval is accepted, on all three kinds of day", () => {
+    expect(`ordinary: ${insertDaily(exactDaily("2026-06-10"))}`).toBe("ordinary: ");
+    expect(`spring forward: ${insertDaily(exactDaily("2026-03-08"))}`).toBe("spring forward: ");
+    expect(`fall back: ${insertDaily(exactDaily("2026-11-01"))}`).toBe("fall back: ");
+  });
+
+  it("and those rows really are 24, 23 and 25 hours long", () => {
+    expect(sql(DB, `select string_agg(
+                      business_date::text || '=' ||
+                      (extract(epoch from (closed_at - opened_at)) / 3600)::numeric(6,0)::text,
+                      ' ' order by business_date)
+                    from public.register_sessions where business_date is not null`))
+      .toBe("2026-03-08=23 2026-06-10=24 2026-11-01=25");
+  });
+
+  it("an opened_at that is not local midnight is refused", () => {
+    expect(insertDaily(shifted("2026-07-01", "start", "+ interval '1 hour'"))).toBe("wrong start");
+    expect(insertDaily(shifted("2026-07-01", "start", "- interval '1 second'"))).toBe("wrong start");
+  });
+
+  it("a closed_at that is not the next local midnight is refused", () => {
+    expect(insertDaily(shifted("2026-07-02", "end", "+ interval '1 hour'"))).toBe("wrong end");
+    expect(insertDaily(shifted("2026-07-02", "end", "- interval '1 microsecond'"))).toBe("wrong end");
+  });
+
+  it("a flat 24-hour end is refused on a spring-forward day", () => {
+    expect(insertDaily(
+      `(select starts_at from public.business_day_bounds(date '2026-03-08','America/Chicago')), 0,
+       (select starts_at + interval '24 hours' from public.business_day_bounds(date '2026-03-08','America/Chicago')),
+       '2026-03-08', 'America/Chicago'`)).toBe("wrong end");
+  });
+
+  it("a flat 24-hour end is refused on a fall-back day", () => {
+    expect(insertDaily(
+      `(select starts_at from public.business_day_bounds(date '2026-11-01','America/Chicago')), 0,
+       (select starts_at + interval '24 hours' from public.business_day_bounds(date '2026-11-01','America/Chicago')),
+       '2026-11-01', 'America/Chicago'`)).toBe("wrong end");
+  });
+
+  it("an unaccepted timezone is refused, by CP2a's own rule", () => {
+    // Exactly the zones CP2a refuses: fixed offsets, Etc/, and nonsense.
+    for (const tz of ["EST", "Etc/GMT+5", "UTC", "Mars/Olympus", "America/Nowhere"]) {
+      expect(`${tz}: ${insertDaily(
+        `'2026-07-03 05:00:00+00', 0, '2026-07-04 05:00:00+00', '2026-07-03', '${tz}'`)}`)
+        .toBe(`${tz}: invalid timezone`);
+    }
+  });
+
+  it("nothing is silently normalized — a refused row leaves no trace", () => {
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where business_date in ('2026-07-01','2026-07-02','2026-07-03')`)).toBe("0");
+  });
+
+  it("the accepted rows were stored exactly as offered, not corrected", () => {
+    expect(sql(DB, `select count(*) from public.register_sessions r
+                    cross join lateral public.business_day_bounds(r.business_date, r.business_timezone) b
+                    where r.business_date is not null
+                      and (r.opened_at <> b.starts_at or r.closed_at <> b.ends_at)`)).toBe("0");
+  });
+
+  it("LEGACY inserts are completely unaffected — the trigger never runs", () => {
+    expect(sqlExpectingFailure(DB, `
+      insert into public.register_sessions
+        (paired_device_id, opened_by_employee_id, opened_at, opening_cash, open_request_id)
+      values ('${DEV}', '${EMPLOYEE}', '2026-02-01 07:13:29+00', 10, gen_random_uuid())`)).toBe("");
+
+    // An arbitrary opened_at, on no calendar boundary at all, with no timezone:
+    // exactly the row the validator would reject if it applied to legacy rows.
+    expect(sql(DB, `select opened_at::text from public.register_sessions
+                    where business_date is null and opening_cash = 10`))
+      .toBe("2026-02-01 07:13:29+00");
+  });
+
+  it("ensure_daily_register_context's own inserts satisfy the validator", () => {
+    sql(DB, `update public.projects set business_timezone='America/New_York' where id='${PROJECT}'`);
+
+    expect(asRole(DB, deviceUser(1), `select public.ensure_daily_register_context()->>'ok'`)).toBe("true");
+  });
+});
+
+// ===========================================================================
+// EXECUTION AS THE REAL authenticated ROLE
+// ===========================================================================
+
+run("the RPC works for a real `authenticated` caller, not only for its owner", () => {
+  const DB = "cp2b_authrole";
+  const setZone = (tz: string | null): void => {
+    sql(DB, `update public.projects set business_timezone=${tz === null ? "null" : `'${tz}'`}
+             where id='${PROJECT}'`);
+  };
+
+  beforeAll(() => {
+    freshDatabase(DB, false);
+    seed(DB, 2);
+    expect(applyMigration(DB).ok).toBe(true);
+  }, 240_000);
+
+  it("the harness really does drop to `authenticated`", () => {
+    expect(asAuthenticated(DB, deviceUser(1), `select current_user`)).toBe("authenticated");
+  });
+
+  it("and the role does not leak past the statement that set it", () => {
+    asAuthenticated(DB, deviceUser(1), `select 1`);
+    expect(sql(DB, `select current_user`)).toBe("postgres");
+  });
+
+  it("with no timezone set, an authenticated till is refused", () => {
+    expect(asAuthenticated(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()->>'error'`)).toBe("business_timezone_required");
+  });
+
+  it("an unpaired authenticated user gets not_paired", () => {
+    setZone("America/New_York");
+    expect(asAuthenticated(DB, "00000000-0000-4000-8000-000000000000",
+      `select public.ensure_daily_register_context()->>'error'`)).toBe("not_paired");
+  });
+
+  it("a paired authenticated till creates its context", () => {
+    const made = JSON.parse(asAuthenticated(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()::text`));
+
+    expect(made.ok).toBe(true);
+    expect(made.created).toBe(true);
+    expect(made.registerSession.businessTimezone).toBe("America/New_York");
+  });
+
+  it("and asking again is idempotent for it too", () => {
+    const first = JSON.parse(asAuthenticated(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()::text`));
+
+    expect(first.created).toBe(false);
+    expect(sql(DB, `select count(*) from public.register_sessions
+                    where paired_device_id='${device(1)}'`)).toBe("1");
+  });
+
+  it("it sees the timezone conflict too", () => {
+    setZone("America/Chicago");
+    expect(asAuthenticated(DB, deviceUser(1),
+      `select public.ensure_daily_register_context()->>'error'`))
+      .toBe("daily_register_timezone_conflict");
+    setZone("America/New_York");
+  });
+
+  it("it gets the daily close refusal too", () => {
+    const daily = sql(DB, `select id from public.register_sessions
+                           where paired_device_id='${device(1)}' and business_date is not null`);
+
+    expect(asAuthenticated(DB, deviceUser(1),
+      `select public.close_register_session('${daily}')->>'error'`))
+      .toBe("daily_register_not_manually_closable");
+  });
+
+  it("but it has NO direct authority over register_sessions", () => {
+    for (const statement of [
+      `select count(*) from public.register_sessions`,
+      `insert into public.register_sessions (paired_device_id, opened_at, opening_cash, closed_at,
+        business_date, business_timezone) values ('${device(1)}', now(), 0, now(), '2026-01-01', 'America/New_York')`,
+      `update public.register_sessions set opening_cash = 1`,
+      `delete from public.register_sessions`,
+    ]) {
+      expect(asAuthenticatedExpectingFailure(DB, deviceUser(1), statement))
+        .toMatch(/permission denied for table register_sessions/);
+    }
+  });
+
+  it("and cannot reach the CP2a helpers or either trigger body directly", () => {
+    for (const call of [
+      `select public.require_business_timezone('${PROJECT}')`,
+      `select public.business_day_bounds(date '2026-01-01','America/New_York')`,
+      `select public.business_date_of(now(),'America/New_York')`,
+      `select public.is_valid_business_timezone('America/New_York')`,
+    ]) {
+      expect(asAuthenticatedExpectingFailure(DB, deviceUser(1), call))
+        .toMatch(/permission denied for function/);
+    }
   });
 });
