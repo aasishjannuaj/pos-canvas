@@ -223,12 +223,48 @@ export const SALE_REGISTER_CHANGED = "The register session changed";
 export const SALE_EXPECTATIONS_MISSING =
   "This sale must name the signed-in employee and the open register";
 
+/**
+ * v1.3 CP2c — the two DAILY domain failures complete_sale_v5 raises on the
+ * ONLINE path, verbatim.
+ *
+ * They are NOT sentences like the Feature 1B refusals above: CP2c re-raises
+ * whatever `daily_register_context_for_sale` returned in `failure`
+ * (`raise exception '%', v_daily.failure`), so the wire text is the bare
+ * contract code. They arrive here exactly as CP2b minted them.
+ *
+ * WHY THEY LIVE IN THIS FILE AT ALL. CP2c added them to the server and CP2d
+ * built the states that answer them, and nothing connected the two — so a real
+ * timezone conflict refused the sale correctly and then left the cashier
+ * looking at a raw domain code with no way forward. A guard now pins both
+ * against the CP2c migration, exactly as the five above are pinned against
+ * Feature 1B's.
+ */
+export const SALE_DAILY_TIMEZONE_CONFLICT = "daily_register_timezone_conflict";
+export const SALE_DAILY_TIMEZONE_REQUIRED = "business_timezone_required";
+
+/**
+ * DELIBERATELY NOT CLASSIFIED: CP2c's third failure value.
+ *
+ * `daily_register_context_for_sale` can also return `not_paired`, and v5 would
+ * re-raise it the same way. It is unreachable from v5 in practice -- the device
+ * row was resolved two sections earlier, so a sale cannot get that far without
+ * a pairing -- and more importantly there is no useful cashier state for it:
+ * a till that is not paired has no employee to retain, no day to recover and no
+ * setting anyone at the counter can change. It falls through to the generic
+ * failure path on purpose, and a test pins that choice so it reads as a
+ * decision rather than an oversight.
+ */
+export const SALE_DAILY_NOT_PAIRED = "not_paired";
+
 export type SaleAttributionFailure =
   | "employee_missing"
   | "employee_changed"
   | "register_closed"
   | "register_changed"
-  | "expectations_missing";
+  | "expectations_missing"
+  // v1.3 CP2c, routed by CP2d. Neither disproves the OPERATOR -- only the day.
+  | "daily_conflict"
+  | "timezone_required";
 
 /**
  * Classifies a sale refusal, or returns null when it is not about attribution.
@@ -250,7 +286,12 @@ export function classifySaleAttributionFailure(
   if (message.includes(SALE_REGISTER_CHANGED)) return "register_changed";
   if (message.includes(SALE_REGISTER_CLOSED)) return "register_closed";
   if (message.includes(SALE_EXPECTATIONS_MISSING)) return "expectations_missing";
+  if (message.includes(SALE_DAILY_TIMEZONE_CONFLICT)) return "daily_conflict";
+  if (message.includes(SALE_DAILY_TIMEZONE_REQUIRED)) return "timezone_required";
 
+  // Everything else, INCLUDING SALE_DAILY_NOT_PAIRED. A refusal this runtime
+  // has no state for is not an attribution problem it can resolve, and
+  // inventing one would put the operator in a recovery that cannot succeed.
   return null;
 }
 
@@ -285,6 +326,25 @@ export function applySaleAttributionFailure(
       // the context is re-established by an explicit act, never by whatever the
       // next derivation happens to find.
       return { ...state, daily: null, establishedOnline: false, recovery: "daily" };
+    case "daily_conflict":
+      // v1.3 CP2c — the server would not establish a day for this instant,
+      // because the business changed timezone under a context that already
+      // exists. THE OPERATOR WAS NOT DISPROVED, so they stay signed in: this is
+      // the same class as a stale register, and it is the DAY that a person
+      // must re-establish through the explicit recovery, never a login.
+      return { ...state, daily: null, establishedOnline: false, recovery: "daily", setup: null };
+    case "timezone_required":
+      // v1.3 CP2c — the business has not told the server what day it is. No
+      // recovery is raised because there is nothing at this till to recover:
+      // retrying can only fail again until somebody with authority configures
+      // the timezone. The operator stays signed in and the cart stays put.
+      return {
+        ...state,
+        daily: null,
+        establishedOnline: false,
+        recovery: null,
+        setup: "business_timezone",
+      };
   }
 }
 

@@ -419,7 +419,7 @@ describe("recovery is an explicit act", () => {
 });
 
 describe("the runtime's stale-state messages match the server's", () => {
-  it("every classified message exists verbatim in the migration", () => {
+  it("every classified Feature 1B message exists verbatim in the migration", () => {
     const migration = read(
       "supabase/migrations/20260917120000_register_sessions_and_sale_attribution.sql"
     );
@@ -436,5 +436,120 @@ describe("the runtime's stale-state messages match the server's", () => {
       expect(migration).toContain(`raise exception '${constant}'`);
       expect(gate).toContain(constant);
     }
+  });
+
+  it("CP2c's DAILY refusal vocabulary is pinned the same way", () => {
+    // THIS GUARD IS THE ONE THAT WAS MISSING. CP2c added two online refusal
+    // codes and CP2d built the states that answer them, and nothing connected
+    // the two -- so a real timezone conflict refused a sale correctly and then
+    // stranded the cashier on a raw domain code. The Feature 1B vocabulary had
+    // a guard like this from the start; CP2c's did not.
+    const migration = read("supabase/migrations/20260922120000_daily_sale_attribution.sql");
+    const gate = read("lib/posGate.ts");
+
+    for (const code of [
+      "daily_register_timezone_conflict",
+      "business_timezone_required",
+      "not_paired",
+    ]) {
+      // The server can produce it...
+      expect(`${code} in migration`).toBe(
+        migration.includes(`failure := '${code}'`) ? `${code} in migration` : "MISSING"
+      );
+      // ...and the runtime names it, so the two cannot drift apart silently.
+      expect(`${code} in posGate`).toBe(
+        gate.includes(code) ? `${code} in posGate` : "MISSING"
+      );
+    }
+  });
+
+  it("v5 re-raises whatever the helper returned, which is why all three are pinned", () => {
+    const migration = read("supabase/migrations/20260922120000_daily_sale_attribution.sql");
+
+    // Not a fixed list of literals: the online branch raises the `failure`
+    // value verbatim, so any code the helper can return can reach the client.
+    expect(migration).toContain("raise exception '%', v_daily.failure;");
+  });
+
+  it("the two routed codes reach a state; not_paired deliberately does not", () => {
+    const gate = code(read("lib/posGate.ts"));
+
+    expect(gate).toContain('if (message.includes(SALE_DAILY_TIMEZONE_CONFLICT)) return "daily_conflict";');
+    expect(gate).toContain('if (message.includes(SALE_DAILY_TIMEZONE_REQUIRED)) return "timezone_required";');
+    // No branch returns a state for not_paired.
+    expect(gate).not.toContain("SALE_DAILY_NOT_PAIRED)) return");
+  });
+});
+
+describe("CP2c refusal routing — negative controls", () => {
+  const gate = read("lib/posGate.ts");
+
+  /** Applies one deliberate break and returns the mutated source. */
+  const broken = (from: string, to: string): string => {
+    const occurrences = gate.split(from).length - 1;
+
+    expect(`anchor count for ${JSON.stringify(from.slice(0, 44))}`).toBe(
+      occurrences === 1 ? `anchor count for ${JSON.stringify(from.slice(0, 44))}` : `${occurrences}`
+    );
+
+    return gate.replace(from, to);
+  };
+
+  it("CONTROL: removing the conflict branch makes the classifier return null again", () => {
+    const mutated = broken(
+      'if (message.includes(SALE_DAILY_TIMEZONE_CONFLICT)) return "daily_conflict";',
+      ""
+    );
+
+    expect(mutated).not.toContain('return "daily_conflict"');
+  });
+
+  it("CONTROL: routing the conflict to an EMPLOYEE recovery would sign the cashier out", () => {
+    const mutated = broken(
+      '      return { ...state, daily: null, establishedOnline: false, recovery: "daily", setup: null };',
+      '      return { ...EMPTY_POS_GATE_STATE, recovery: "employee" };'
+    );
+
+    // The mutated source no longer keeps the operator on the conflict branch.
+    const branch = mutated.slice(mutated.indexOf('case "daily_conflict":'), mutated.indexOf('case "timezone_required":'));
+
+    expect(branch).not.toContain("...state");
+    expect(branch).toContain("EMPTY_POS_GATE_STATE");
+  });
+
+  it("CONTROL: routing timezone_required into DAILY recovery loses the setup state", () => {
+    const branch = gate.slice(gate.indexOf('case "timezone_required":'), gate.indexOf("\n  }\n}"));
+
+    expect(branch).toContain('setup: "business_timezone"');
+    expect(branch).toContain("recovery: null");
+
+    const mutated = branch.replace('recovery: null', 'recovery: "daily"');
+
+    expect(mutated).toContain('recovery: "daily"');
+    expect(branch).not.toContain('recovery: "daily"');
+  });
+
+  it("CONTROL: giving not_paired a state would be visible here", () => {
+    const mutated = broken(
+      "  // Everything else, INCLUDING SALE_DAILY_NOT_PAIRED.",
+      '  if (message.includes(SALE_DAILY_NOT_PAIRED)) return "daily_conflict";\n  // Everything else, INCLUDING SALE_DAILY_NOT_PAIRED.'
+    );
+
+    expect(mutated).toContain("SALE_DAILY_NOT_PAIRED)) return");
+    expect(gate).not.toContain("SALE_DAILY_NOT_PAIRED)) return");
+  });
+
+  it("the OFFLINE path is untouched by any of this", () => {
+    // complete_sale_v5 only re-raises on the ONLINE branch; offline swallows the
+    // same failures into a NULL register attribution so a paid queued sale is
+    // never lost. Nothing in the classifier can reach that code.
+    const migration = read("supabase/migrations/20260922120000_daily_sale_attribution.sql");
+    const offline = migration.slice(
+      migration.indexOf("THE CLAIM SIGNALS THE MODEL, NEVER THE ATTRIBUTION"),
+      migration.indexOf("LEGACY / MANUAL, or a claim this device cannot own")
+    );
+
+    expect(offline).toContain("v_register_session_id := v_daily.register_session_id;");
+    expect(offline).not.toContain("raise exception");
   });
 });

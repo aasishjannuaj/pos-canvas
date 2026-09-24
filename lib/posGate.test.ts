@@ -8,6 +8,9 @@ import {
   SALE_EMPLOYEE_CHANGED,
   SALE_EMPLOYEE_MISSING,
   SALE_EXPECTATIONS_MISSING,
+  SALE_DAILY_NOT_PAIRED,
+  SALE_DAILY_TIMEZONE_CONFLICT,
+  SALE_DAILY_TIMEZONE_REQUIRED,
   SALE_REGISTER_CHANGED,
   SALE_REGISTER_CLOSED,
   applyDailyRefresh,
@@ -295,6 +298,74 @@ describe("stale-state refusals from complete_sale_v5", () => {
         ...EMPTY_POS_GATE_STATE,
         recovery: "employee",
       });
+    }
+  });
+
+  it("CP2c: a timezone CONFLICT keeps the operator and demands a DAILY recovery", () => {
+    // Driven from the string complete_sale_v5 actually raises, not from a
+    // recovery this test set up for itself. That is the whole point: the defect
+    // CP2e found was that the real refusal never reached a state at all.
+    expect(classifySaleAttributionFailure(SALE_DAILY_TIMEZONE_CONFLICT)).toBe("daily_conflict");
+
+    const refused = applySaleAttributionFailure(established, "daily_conflict");
+
+    expect(refused).toEqual({
+      employee: ADA,
+      daily: null,
+      establishedOnline: false,
+      recovery: "daily",
+      setup: null,
+    });
+    // The operator is NOT signed out and no PIN is demanded for a calendar
+    // problem; the gate is the daily one.
+    expect(refused.employee).toEqual(ADA);
+    expect(resolvePosGate(refused)).toBe("daily");
+    expect(canCheckoutOffline(refused).ok).toBe(false);
+  });
+
+  it("CP2c: a MISSING business timezone is setup, not recovery", () => {
+    expect(classifySaleAttributionFailure(SALE_DAILY_TIMEZONE_REQUIRED)).toBe("timezone_required");
+
+    const refused = applySaleAttributionFailure(established, "timezone_required");
+
+    expect(refused).toEqual({
+      employee: ADA,
+      daily: null,
+      establishedOnline: false,
+      recovery: null,
+      setup: "business_timezone",
+    });
+    // No recovery is raised, because retrying at this till cannot succeed until
+    // somebody configures the business.
+    expect(refused.recovery).toBeNull();
+    expect(resolvePosGate(refused)).toBe("timezone");
+    expect(describePosGateBlock(refused)).toBe("Set this business's timezone before taking a sale.");
+    expect(canCheckoutOffline(refused).ok).toBe(false);
+  });
+
+  it("CP2c: both survive PostgREST's wrapping, as the Feature 1B strings do", () => {
+    expect(classifySaleAttributionFailure(`error running query: ${SALE_DAILY_TIMEZONE_CONFLICT}`))
+      .toBe("daily_conflict");
+    expect(classifySaleAttributionFailure(`error running query: ${SALE_DAILY_TIMEZONE_REQUIRED}`))
+      .toBe("timezone_required");
+  });
+
+  it("CP2c: `not_paired` is DELIBERATELY unclassified", () => {
+    // daily_register_context_for_sale can return it and v5 would re-raise it
+    // the same way. There is no cashier state for a till that is not paired --
+    // no operator to retain, no day to recover, nothing at the counter to
+    // configure -- so it falls through to the generic failure path on purpose.
+    expect(classifySaleAttributionFailure(SALE_DAILY_NOT_PAIRED)).toBeNull();
+    expect(classifySaleAttributionFailure(`error running query: ${SALE_DAILY_NOT_PAIRED}`)).toBeNull();
+  });
+
+  it("an unrecognised refusal still changes nothing", () => {
+    for (const message of [
+      "Insufficient inventory for Coffee",
+      "Menu item foodtruck-1 is not available",
+      "some_future_contract_code",
+    ]) {
+      expect(`${message}: ${classifySaleAttributionFailure(message)}`).toBe(`${message}: null`);
     }
   });
 
