@@ -58,6 +58,7 @@ import {
   toDeviceDisplayConfig,
 } from "@/lib/deviceSession";
 import type { DevicePairing, DeviceState, DeviceUpdateOffer } from "@/lib/deviceSession";
+import { startReconnectProbe } from "@/lib/deviceReconnectProbe";
 import { permitsOfflineFallback, readOnlineHint } from "@/lib/deviceConnectivity";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
@@ -1449,6 +1450,91 @@ export default function DeviceApp() {
       })();
     });
   }, [syncSessionKey, runSync, returnOnlineFromReconnect]);
+
+  /**
+   * v1.3 CP2e follow-up — the automatic reconnect probe.
+   *
+   * THE DEFECT THIS CLOSES. The effect above is the ONLY thing that ever asked
+   * the server again after an outage, and it hangs off the browser's `online`
+   * event. That event fires when the LINK drops and returns; it does not fire
+   * when the link stayed up and only the backend was unreachable — a captive
+   * portal, an ISP outage, a backend that was down. navigator.onLine reported
+   * true throughout, so a till in that state stayed offline forever: every new
+   * sale queued, the queue drained only when a cashier pressed Sync now, and a
+   * changed employee POS-session was never noticed. Validated on staging: with
+   * the link up and the backend blocked, restoring the backend recovered
+   * nothing until an `online` event was synthesised by hand.
+   *
+   * IT SUPPLEMENTS THAT TRIGGER, IT DOES NOT REPLACE IT. A real link drop
+   * still recovers immediately through the event; this only covers the case
+   * the event cannot see. Both converge on returnOnlineFromReconnect, so there
+   * is exactly one reconnect implementation and Sync now still shares it.
+   *
+   * IT DECIDES NOTHING. A probe that succeeds means one thing — the
+   * authoritative backend answered — and the existing path then owns every
+   * consequence: pairing validity, config refresh, exact employee POS-session
+   * revalidation, DAILY reconciliation and the drain. Probe success is NOT
+   * authentication, and a till whose POS-session was replaced still locks and
+   * still demands an Employee ID and PIN. Nothing here consults
+   * navigator.onLine, and there is no new reachability endpoint: the probe IS
+   * returnOnlineFromReconnect, whose first act is the canonical
+   * get_device_pairing_state call the reconnect path already used.
+   *
+   * SINGLE-FLIGHT, TWICE OVER. `inFlight` keeps this effect's own lifecycle
+   * signals from stacking — `focus` and `visibilitychange` both fire on the
+   * same foreground and must produce ONE attempt, not two — and
+   * returnOnlineFromReconnect's `resolving` ref independently excludes a
+   * concurrent cold-start resolve. Neither is redundant: they guard different
+   * collisions.
+   *
+   * PAUSED WHILE HIDDEN. A backgrounded till has no cashier to serve and no
+   * reason to burn a request a minute, so scheduling stops when the document
+   * hides and an attempt fires immediately when it comes back — which is also
+   * the moment a cashier is most likely to be waiting.
+   *
+   * THE EPISODE OWNS THE BACKOFF. The effect is keyed on offline runtime mode,
+   * so leaving offline tears it down and a genuinely new outage mounts it
+   * fresh at the start of the curve. A till that flaps does not inherit the
+   * previous episode's minute-long wait.
+   */
+  useEffect(() => {
+    if (
+      state.status !== "ready" ||
+      getDeviceRuntimeMode(state) !== "offline" ||
+      typeof document === "undefined"
+    ) {
+      return;
+    }
+
+    return startReconnectProbe(
+      {
+        isVisible: () => document.visibilityState === "visible",
+        // BOTH lifecycle signals, collapsed into one. Android's WebView and the
+        // Windows shell deliver these differently and often together; the loop
+        // must not be able to tell them apart, or one foreground becomes two
+        // backend attempts.
+        onForeground: (handler) => {
+          document.addEventListener("visibilitychange", handler);
+          window.addEventListener("focus", handler);
+
+          return () => {
+            document.removeEventListener("visibilitychange", handler);
+            window.removeEventListener("focus", handler);
+          };
+        },
+        setTimer: (run, delayMs) => setTimeout(run, delayMs),
+        clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      },
+      // The EXISTING reconnect episode, in the EXISTING order: authoritative
+      // refresh first so a revocation confirmed during the outage is applied
+      // before anything else, then the drain. Identical to what the `online`
+      // event runs, because it must be the same reconnect, not a second one.
+      async () => {
+        await returnOnlineFromReconnect();
+        await runSync("reconnect");
+      }
+    );
+  }, [state, returnOnlineFromReconnect, runSync]);
 
   /**
    * Feature 24.5F (DEF-02) — wake the engine when a persisted retry falls due.
