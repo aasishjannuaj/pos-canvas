@@ -25,7 +25,7 @@ vi.mock("@/lib/supabase/deviceClient", () => ({
   resetDeviceSupabaseClientCache: () => {},
 }));
 
-const { employeeLogin, employeeLogout, fetchCurrentEmployeeSession, fetchLoginEmployees } =
+const { employeeLogin, endEmployeePosSession, fetchCurrentEmployeeSession, fetchLoginEmployees } =
   await import("@/lib/employee.rpc");
 
 function replies(data: unknown) {
@@ -288,20 +288,50 @@ describe("the zero-argument calls send no arguments", () => {
     expect(rpc.mock.calls[0].length).toBe(1);
   });
 
-  it("employee_logout takes nothing, so no other device can be named", async () => {
-    replies({ ok: true, endedSessionId: SESSION.employeeSessionId });
+  // v1.3 CP3.1 — the till NAMES the session it is ending. The predecessor took
+  // no arguments and closed whatever was open, so a stale till signed out
+  // whoever had since taken over.
+  it("end_employee_pos_session sends the expected session id, and nothing else", async () => {
+    replies({ ok: true, outcome: "ended", endedSessionId: SESSION.employeeSessionId });
 
-    expect(await employeeLogout()).toEqual({
+    expect(await endEmployeePosSession(SESSION.employeeSessionId)).toEqual({
       ok: true,
+      outcome: "ended",
       endedSessionId: SESSION.employeeSessionId,
     });
-    expect(rpc).toHaveBeenCalledWith("employee_logout");
-    expect(rpc.mock.calls[0].length).toBe(1);
+    expect(rpc).toHaveBeenCalledWith("end_employee_pos_session", {
+      p_expected_employee_pos_session_id: SESSION.employeeSessionId,
+    });
+    // No device id, no project id, no employee id: authority is the server's.
+    expect(Object.keys(rpc.mock.calls[0][1])).toEqual([
+      "p_expected_employee_pos_session_id",
+    ]);
   });
 
-  it("logout is idempotent when nobody is signed in", async () => {
-    replies({ ok: true, endedSessionId: null });
+  it("is idempotent when the named session was already closed", async () => {
+    replies({ ok: true, outcome: "already_ended", endedSessionId: null });
 
-    expect(await employeeLogout()).toEqual({ ok: true, endedSessionId: null });
+    expect(await endEmployeePosSession(SESSION.employeeSessionId)).toEqual({
+      ok: true,
+      outcome: "already_ended",
+      endedSessionId: null,
+    });
+  });
+
+  it("reports a replacement rather than ending it", async () => {
+    replies({ ok: false, error: "session_replaced" });
+
+    const result = await endEmployeePosSession(SESSION.employeeSessionId);
+
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ error: "session_replaced" });
+  });
+
+  // NEGATIVE CONTROL: the removed wrapper must not come back. A call with no
+  // arguments is the unsafe contract by definition.
+  it("no zero-argument logout wrapper survives", async () => {
+    const wrappers = await import("@/lib/employee.rpc");
+
+    expect("employeeLogout" in wrappers).toBe(false);
   });
 });

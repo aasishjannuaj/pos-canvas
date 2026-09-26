@@ -75,7 +75,7 @@ describe("the device host owns the gates", () => {
   });
 
   it("uses the Feature 1A wrappers rather than re-issuing their RPCs", () => {
-    for (const wrapper of ["employeeLogin", "employeeLogout", "fetchLoginEmployees"]) {
+    for (const wrapper of ["employeeLogin", "endEmployeePosSession", "fetchLoginEmployees"]) {
       expect(app).toContain(wrapper);
     }
 

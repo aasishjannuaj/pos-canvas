@@ -189,9 +189,36 @@ describe("the device RPC surface is exactly four calls", () => {
         "employee_login",
         "employee_login_by_code",
         "get_current_employee_session",
-        "employee_logout",
+        "end_employee_pos_session",
       ])
     );
+  });
+
+  // v1.3 CP3.1 — the zero-argument logout is gone from device code. It ended
+  // whatever session was open on the paired device, so a till holding a stale
+  // expectation signed out whoever had since taken over. Its replacement
+  // names the session, and the migration revokes ordinary execution of the old
+  // one, so calling it would now fail anyway.
+  it("NEGATIVE CONTROL: device code never calls the unsafe zero-argument logout", () => {
+    expect(source).not.toContain('"employee_logout"');
+    expect(source).not.toContain("employeeLogout");
+  });
+
+  it("the termination call names the expected session and nothing else", () => {
+    // Scoped to the termination wrapper: p_employee_id is legitimately sent by
+    // the secondary employee_login path, so a whole-file ban would assert the
+    // wrong thing.
+    const start = source.indexOf("export async function endEmployeePosSession");
+    expect(start).toBeGreaterThan(-1);
+
+    const call = source.slice(start, source.indexOf("\n}", start));
+
+    expect(call).toContain("p_expected_employee_pos_session_id");
+
+    // Authority is the server's, derived from auth.uid() and the paired row.
+    for (const forbidden of ["p_paired_device_id", "p_project_id", "p_employee_id"]) {
+      expect(call).not.toContain(forbidden);
+    }
   });
 
   it("never calls an owner-management RPC from device code", () => {

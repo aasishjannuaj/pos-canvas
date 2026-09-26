@@ -36,13 +36,14 @@ import {
   getEmployeeLoginErrorMessage,
   parseCurrentEmployeeSessionResult,
   parseEmployeeLoginResult,
-  parseEmployeeLogoutResult,
+  getEmployeeSessionTerminationMessage,
+  parseEndEmployeePosSessionResult,
   parseLoginEmployeesResult,
 } from "@/lib/employeeSession";
 import type {
   CurrentEmployeeSessionResult,
   EmployeeLoginResult,
-  EmployeeLogoutResult,
+  EndEmployeePosSessionResult,
   LoginEmployeesResult,
 } from "@/lib/employeeSession";
 
@@ -263,30 +264,54 @@ export async function fetchCurrentEmployeeSession(): Promise<CurrentEmployeeSess
 }
 
 // ---------------------------------------------------------------------------
-// employee_logout
+// end_employee_pos_session — v1.3 CP3.1
 // ---------------------------------------------------------------------------
 
 /**
- * Signs the current employee out of THIS till.
+ * Ends the employee POS session this till believes it holds.
  *
- * Takes no arguments, which is the point: there is no parameter through which a
- * till could ask to end someone else's session on another register. The server
- * closes only the open session belonging to the device it resolved from the
- * caller.
+ * WHY IT NAMES THE SESSION. The previous call, employee_logout(), took no
+ * arguments and ended whatever was open on the device. A till holding a stale
+ * expectation therefore signed out whoever had since taken over. Naming the
+ * session makes that impossible: the server ends the one named or nothing, and
+ * reports `session_replaced` rather than touching a newer operator's shift.
  *
- * Idempotent — logging out when nobody is signed in succeeds and reports null,
- * so a client that never saw the reply is free to retry.
+ * THE ID IS AN EXPECTATION, NOT AUTHORITY. The server still derives the device
+ * from the caller's own authentication; passing another till's session id
+ * achieves nothing and reveals nothing, because an unknown id and another
+ * device's id return the same `session_not_found`.
+ *
+ * Idempotent — a retry whose first reply was lost gets `already_ended`.
  */
-export async function employeeLogout(): Promise<EmployeeLogoutResult> {
+export async function endEmployeePosSession(
+  expectedEmployeePosSessionId: string
+): Promise<EndEmployeePosSessionResult> {
   try {
-    const { data, error, status } = await getDeviceSupabaseClient().rpc("employee_logout");
+    const { data, error, status } = await getDeviceSupabaseClient().rpc(
+      "end_employee_pos_session",
+      { p_expected_employee_pos_session_id: expectedEmployeePosSessionId }
+    );
 
     if (error) {
-      return failure(unreachedFailure(withStatus(error, status)));
+      return terminationFailure(unreachedFailure(withStatus(error, status)));
     }
 
-    return parseEmployeeLogoutResult(data);
+    return parseEndEmployeePosSessionResult(data);
   } catch (thrown) {
-    return failure(unreachedFailure(thrown));
+    return terminationFailure(unreachedFailure(thrown));
   }
+}
+
+/**
+ * The transport failure shape for a Ring Out.
+ *
+ * Deliberately NOT the shared `failure()` helper the sign-in calls use: its
+ * copy talks about signing in, and by the time this is read the operator has
+ * already been rung out locally. Only the words differ; the `offline` code the
+ * caller branches on is the same one.
+ */
+function terminationFailure(
+  code: "offline" | "unavailable"
+): EndEmployeePosSessionResult {
+  return { ok: false, error: code, message: getEmployeeSessionTerminationMessage(code) };
 }

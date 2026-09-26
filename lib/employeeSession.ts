@@ -211,9 +211,73 @@ export type CurrentEmployeeSessionResult =
   | { ok: true; session: EmployeeSession | null }
   | { ok: false; error: EmployeeLoginErrorCode; message: string };
 
-export type EmployeeLogoutResult =
-  | { ok: true; endedSessionId: string | null }
-  | { ok: false; error: EmployeeLoginErrorCode; message: string };
+/**
+ * v1.3 CP3.1 — what happened to the session the till NAMED.
+ *
+ * `ended` is the ordinary case. `already_ended` is a retry whose first reply
+ * was lost, and means the named session was already closed with nobody on the
+ * till since — so the caller's intention is satisfied and there is nothing to
+ * do. The two are distinguished because only one of them wrote anything, and a
+ * till that cannot tell them apart cannot report honestly.
+ */
+export type EmployeeSessionTerminationOutcome = "ended" | "already_ended";
+
+/**
+ * Why a termination did nothing.
+ *
+ * `session_replaced` is the case the whole contract exists for: the named
+ * session was already closed AND somebody else has signed in since, so ending
+ * "whatever is open" would sign out an operator who is standing at the till.
+ *
+ * `session_not_found` deliberately covers BOTH an id that never existed and a
+ * real id belonging to another till. Telling them apart would turn this call
+ * into a way to discover whether a session id exists.
+ */
+export type EmployeeSessionTerminationErrorCode =
+  | "not_authenticated"
+  | "not_paired"
+  | "session_replaced"
+  | "session_not_found"
+  | "offline"
+  | "unavailable";
+
+export type EndEmployeePosSessionResult =
+  | {
+      ok: true;
+      outcome: EmployeeSessionTerminationOutcome;
+      endedSessionId: string | null;
+    }
+  | { ok: false; error: EmployeeSessionTerminationErrorCode; message: string };
+
+const EMPLOYEE_SESSION_TERMINATION_ERROR_CODES: readonly EmployeeSessionTerminationErrorCode[] = [
+  "not_authenticated",
+  "not_paired",
+  "session_replaced",
+  "session_not_found",
+  "offline",
+  "unavailable",
+];
+
+// Same rule as the login messages: the reader is at a counter, not a console.
+// NONE of these may imply the operator is still signed in, because by the time
+// any of them is shown this till has already rung them out locally.
+const EMPLOYEE_SESSION_TERMINATION_MESSAGES: Record<
+  EmployeeSessionTerminationErrorCode,
+  string
+> = {
+  not_authenticated: "This till is not signed in.",
+  not_paired: "This till is no longer set up for your shop.",
+  session_replaced: "Somebody else has since signed in on this till.",
+  session_not_found: "That shift was already closed on this till.",
+  offline: "This till is offline. Check the connection and try again.",
+  unavailable: "Ringing out could not be confirmed right now.",
+};
+
+export function getEmployeeSessionTerminationMessage(
+  code: EmployeeSessionTerminationErrorCode
+): string {
+  return EMPLOYEE_SESSION_TERMINATION_MESSAGES[code];
+}
 
 // ---------------------------------------------------------------------------
 // Payload parsing
@@ -345,22 +409,50 @@ export function parseCurrentEmployeeSessionResult(
     : { ok: false, error: "unavailable", message: getEmployeeLoginErrorMessage("unavailable") };
 }
 
-export function parseEmployeeLogoutResult(payload: unknown): EmployeeLogoutResult {
+/**
+ * Total, like every parser here: an unrecognised payload becomes a failure
+ * rather than a throw or a half-built result.
+ *
+ * AN UNREADABLE SUCCESS IS NOT A SUCCESS. A payload claiming ok with an
+ * outcome this client does not know is reported as `unavailable`, because the
+ * caller's next decision depends on knowing whether anything was written.
+ */
+export function parseEndEmployeePosSessionResult(
+  payload: unknown
+): EndEmployeePosSessionResult {
   const record = asRecord(payload);
 
   if (!record) {
-    return { ok: false, error: "unavailable", message: getEmployeeLoginErrorMessage("unavailable") };
+    return terminationFailure("unavailable");
   }
 
   if (record.ok !== true) {
-    const code = toLoginErrorCode(record.error);
-
-    return { ok: false, error: code, message: getEmployeeLoginErrorMessage(code) };
+    return terminationFailure(toTerminationErrorCode(record.error));
   }
 
-  // Logging out when nobody was signed in succeeds and reports null. The RPC is
-  // idempotent precisely so a client that never saw the reply can retry.
-  return { ok: true, endedSessionId: asNonEmptyString(record.endedSessionId) };
+  if (record.outcome !== "ended" && record.outcome !== "already_ended") {
+    return terminationFailure("unavailable");
+  }
+
+  return {
+    ok: true,
+    outcome: record.outcome,
+    endedSessionId: asNonEmptyString(record.endedSessionId),
+  };
+}
+
+function toTerminationErrorCode(value: unknown): EmployeeSessionTerminationErrorCode {
+  return EMPLOYEE_SESSION_TERMINATION_ERROR_CODES.includes(
+    value as EmployeeSessionTerminationErrorCode
+  )
+    ? (value as EmployeeSessionTerminationErrorCode)
+    : "unavailable";
+}
+
+function terminationFailure(
+  code: EmployeeSessionTerminationErrorCode
+): EndEmployeePosSessionResult {
+  return { ok: false, error: code, message: getEmployeeSessionTerminationMessage(code) };
 }
 
 // ---------------------------------------------------------------------------

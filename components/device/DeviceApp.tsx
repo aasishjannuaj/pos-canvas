@@ -127,7 +127,7 @@ import {
 import type { UncertainSale } from "@/lib/saleSubmission";
 import {
   employeeLoginByCode,
-  employeeLogout,
+  endEmployeePosSession,
   fetchCurrentEmployeeSession,
   fetchLoginEmployees,
 } from "@/lib/employee.rpc";
@@ -891,6 +891,14 @@ export default function DeviceApp() {
     ringOutInFlightRef.current = true;
 
     try {
+      // CAPTURED FIRST, AND THE ORDER IS LOAD-BEARING. The transition below
+      // clears `employee`, so afterwards there is no identity left to name.
+      // The server contract is expectation-bound precisely so this till can
+      // say WHICH session it means; reading the id after the transition would
+      // send nothing and reinstate the "end whatever is open" behaviour CP3.1
+      // exists to remove.
+      const expectedEmployeePosSessionId = gateRef.current.employee?.employeeSessionId;
+
       const lockedOut = beginEmployeeSwitch(gateRef.current);
 
       // The ref first: it is what checkout consults.
@@ -900,7 +908,14 @@ export default function DeviceApp() {
       setGateError(null);
       setGateBusy(true);
 
-      const result = await employeeLogout();
+      if (expectedEmployeePosSessionId === undefined) {
+        // Nobody was on the till, so there is nothing to end and nothing this
+        // call could name. Staying silent is the point: asking the server to
+        // close "whatever is open" is exactly what CP3.1 removed.
+        return;
+      }
+
+      const result = await endEmployeePosSession(expectedEmployeePosSessionId);
 
       if (!result.ok) {
         if (result.error === "offline") {
@@ -909,10 +924,12 @@ export default function DeviceApp() {
           // transition — which is also what arms the CP2e reconnect probe.
           await enterOfflineRef.current?.();
         } else {
-          // The server answered and refused. Say so plainly on the lock card,
-          // which is already the screen in front of the operator: they ARE
-          // rung out here, and only the server-side record is in doubt.
-          setGateError("Rung out on this till. The server did not confirm it.");
+          // EVERY other answer leaves this operator rung out HERE, including
+          // session_replaced — where somebody has already taken the till and
+          // whose shift this call deliberately did not touch. The server's own
+          // wording is shown; none of these may suggest anyone is still signed
+          // in, and none of them restores local authority.
+          setGateError(result.message);
         }
       }
     } finally {

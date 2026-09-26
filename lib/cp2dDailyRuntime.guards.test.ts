@@ -515,9 +515,27 @@ describe("one DeviceApp, and nothing template-specific", () => {
   });
 
   it("30, 62-65. CP2d added no migration and changed no server contract", () => {
-    const migrations = readdirSync(join(repoRoot, "supabase/migrations")).filter((f) => f.endsWith(".sql"));
+    const migrations = readdirSync(join(repoRoot, "supabase/migrations"))
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
 
-    // The newest migration is still CP2c's. CP2d is runtime only.
-    expect(migrations.sort().at(-1)).toBe("20260922120000_daily_sale_attribution.sql");
+    // CP2d is runtime only: it added nothing after CP2c.
+    //
+    // WHY THIS IS NOT "the newest migration overall". It was, until CP3.1
+    // added one of its own — a later checkpoint doing legitimate server work
+    // must not make CP2d look like it broke its promise. What CP2d actually
+    // promised is that nothing appeared BETWEEN CP2c and whatever came next,
+    // and that no migration is attributable to CP2d. Both are checked.
+    const cp2c = "20260922120000_daily_sale_attribution.sql";
+    const afterCp2c = migrations.filter((f) => f > cp2c);
+
+    expect(migrations).toContain(cp2c);
+
+    // Every later migration belongs to a named later checkpoint, and none of
+    // them is CP2d's.
+    for (const file of afterCp2c) {
+      expect(file > "20260926000000_").toBe(true);
+      expect(read(join("supabase/migrations", file))).not.toMatch(/\bCP2d\b/);
+    }
   });
 });

@@ -12,7 +12,8 @@ import {
   isValidEmployeePinShape,
   parseCurrentEmployeeSessionResult,
   parseEmployeeLoginResult,
-  parseEmployeeLogoutResult,
+  getEmployeeSessionTerminationMessage,
+  parseEndEmployeePosSessionResult,
   parseLoginEmployeesResult,
 } from "@/lib/employeeSession";
 import type { EmployeeLoginErrorCode } from "@/lib/employeeSession";
@@ -392,37 +393,81 @@ describe("parseCurrentEmployeeSessionResult", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Logout payloads
+// Termination payloads -- v1.3 CP3.1
 // ---------------------------------------------------------------------------
 
-describe("parseEmployeeLogoutResult", () => {
+describe("parseEndEmployeePosSessionResult", () => {
   it("reports the session it closed", () => {
-    expect(parseEmployeeLogoutResult({ ok: true, endedSessionId: SUCCESS.employeeSessionId })).toEqual(
-      { ok: true, endedSessionId: SUCCESS.employeeSessionId }
-    );
+    expect(
+      parseEndEmployeePosSessionResult({
+        ok: true,
+        outcome: "ended",
+        endedSessionId: SUCCESS.employeeSessionId,
+      })
+    ).toEqual({ ok: true, outcome: "ended", endedSessionId: SUCCESS.employeeSessionId });
   });
 
-  it("succeeds with null when nobody was signed in", () => {
-    // Idempotence: a client that never saw the first reply may retry.
-    expect(parseEmployeeLogoutResult({ ok: true, endedSessionId: null })).toEqual({
-      ok: true,
-      endedSessionId: null,
-    });
-    expect(parseEmployeeLogoutResult({ ok: true })).toEqual({ ok: true, endedSessionId: null });
+  it("distinguishes an idempotent retry from a real close", () => {
+    // already_ended wrote nothing. A till that cannot tell the two apart
+    // cannot report honestly about its own shift.
+    expect(
+      parseEndEmployeePosSessionResult({
+        ok: true,
+        outcome: "already_ended",
+        endedSessionId: null,
+      })
+    ).toEqual({ ok: true, outcome: "already_ended", endedSessionId: null });
   });
 
-  it("maps failures through the shared table", () => {
-    expect(parseEmployeeLogoutResult({ ok: false, error: "not_authenticated" })).toEqual({
+  it("carries the replacement refusal through", () => {
+    expect(parseEndEmployeePosSessionResult({ ok: false, error: "session_replaced" })).toEqual({
       ok: false,
-      error: "not_authenticated",
-      message: getEmployeeLoginErrorMessage("not_authenticated"),
+      error: "session_replaced",
+      message: getEmployeeSessionTerminationMessage("session_replaced"),
     });
+  });
+
+  it("keeps unknown ids and other tills' ids indistinguishable", () => {
+    expect(parseEndEmployeePosSessionResult({ ok: false, error: "session_not_found" })).toEqual({
+      ok: false,
+      error: "session_not_found",
+      message: getEmployeeSessionTerminationMessage("session_not_found"),
+    });
+  });
+
+  // NEGATIVE CONTROL: a success this client cannot read is not a success. The
+  // caller's next decision depends on knowing whether anything was written.
+  it("refuses an ok payload with an unknown outcome", () => {
+    expect(parseEndEmployeePosSessionResult({ ok: true, outcome: "closed_everything" })).toEqual({
+      ok: false,
+      error: "unavailable",
+      message: getEmployeeSessionTerminationMessage("unavailable"),
+    });
+    expect(parseEndEmployeePosSessionResult({ ok: true }).ok).toBe(false);
+  });
+
+  // NEGATIVE CONTROL: no message may suggest the operator is still on the
+  // till. By the time any of these is read, they have been rung out locally.
+  it("never tells a rung-out operator they are still signed in", () => {
+    for (const code of [
+      "not_authenticated",
+      "not_paired",
+      "session_replaced",
+      "session_not_found",
+      "offline",
+      "unavailable",
+    ] as const) {
+      const message = getEmployeeSessionTerminationMessage(code);
+
+      expect(message).not.toMatch(/still signed in|remain signed in|you are signed in/i);
+      expect(message.trim()).not.toBe("");
+    }
   });
 
   it("never throws", () => {
     for (const payload of [null, undefined, 0, "done", []]) {
-      expect(() => parseEmployeeLogoutResult(payload)).not.toThrow();
-      expect(parseEmployeeLogoutResult(payload).ok).toBe(false);
+      expect(() => parseEndEmployeePosSessionResult(payload)).not.toThrow();
+      expect(parseEndEmployeePosSessionResult(payload).ok).toBe(false);
     }
   });
 });

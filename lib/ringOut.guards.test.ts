@@ -53,7 +53,7 @@ describe("the local transition happens BEFORE any await", () => {
     const body = ringOutCode();
 
     const transition = body.indexOf("beginEmployeeSwitch(gateRef.current)");
-    const logout = body.indexOf("await employeeLogout()");
+    const logout = body.indexOf("await endEmployeePosSession(");
 
     expect(transition).toBeGreaterThan(-1);
     expect(logout).toBeGreaterThan(-1);
@@ -64,7 +64,7 @@ describe("the local transition happens BEFORE any await", () => {
     const body = ringOutCode();
 
     const refWrite = body.indexOf("gateRef.current = lockedOut");
-    const logout = body.indexOf("await employeeLogout()");
+    const logout = body.indexOf("await endEmployeePosSession(");
 
     expect(refWrite).toBeGreaterThan(-1);
     expect(refWrite).toBeLessThan(logout);
@@ -74,7 +74,9 @@ describe("the local transition happens BEFORE any await", () => {
     const body = ringOutCode();
 
     expect(body.indexOf("setGate(lockedOut)")).toBeGreaterThan(-1);
-    expect(body.indexOf("setGate(lockedOut)")).toBeLessThan(body.indexOf("await employeeLogout()"));
+    expect(body.indexOf("setGate(lockedOut)")).toBeLessThan(
+      body.indexOf("await endEmployeePosSession(")
+    );
   });
 
   it("clears the employee-selection residue before the await", () => {
@@ -82,7 +84,7 @@ describe("the local transition happens BEFORE any await", () => {
 
     expect(body.indexOf("setSelectedEmployee(null)")).toBeGreaterThan(-1);
     expect(body.indexOf("setSelectedEmployee(null)")).toBeLessThan(
-      body.indexOf("await employeeLogout()")
+      body.indexOf("await endEmployeePosSession(")
     );
   });
 
@@ -93,6 +95,57 @@ describe("the local transition happens BEFORE any await", () => {
     const transition = body.indexOf("beginEmployeeSwitch(gateRef.current)");
 
     expect(body.slice(0, transition)).not.toContain("await ");
+  });
+});
+
+describe("v1.3 CP3.1 — the till names the session it ends", () => {
+  it("captures the expected session id BEFORE local authority is cleared", () => {
+    const body = ringOutCode();
+
+    const capture = body.indexOf(
+      "const expectedEmployeePosSessionId = gateRef.current.employee?.employeeSessionId"
+    );
+    const transition = body.indexOf("beginEmployeeSwitch(gateRef.current)");
+
+    expect(capture).toBeGreaterThan(-1);
+    // NEGATIVE CONTROL for the whole feature: after the transition `employee`
+    // is null, so a capture placed later would send nothing and silently
+    // restore the "end whatever is open" behaviour CP3.1 removed.
+    expect(capture).toBeLessThan(transition);
+  });
+
+  it("passes that captured id to the termination call", () => {
+    expect(ringOutCode()).toContain(
+      "await endEmployeePosSession(expectedEmployeePosSessionId)"
+    );
+  });
+
+  it("issues no request at all when nobody was signed in", () => {
+    const body = ringOutCode();
+
+    expect(body).toContain("if (expectedEmployeePosSessionId === undefined)");
+    expect(body.indexOf("if (expectedEmployeePosSessionId === undefined)")).toBeLessThan(
+      body.indexOf("await endEmployeePosSession(")
+    );
+  });
+
+  // NEGATIVE CONTROL: the unsafe predecessor must not survive anywhere in
+  // device code, by either name.
+  it("never calls the zero-argument logout", () => {
+    const body = ringOutCode();
+
+    expect(body).not.toContain("employeeLogout");
+    expect(read(DEVICE_APP)).not.toContain("employeeLogout");
+  });
+
+  it("stays locked on every non-transport outcome, including a replacement", () => {
+    const body = ringOutCode();
+
+    // One branch for transport, one for everything else; no branch anywhere
+    // writes an employee back into the gate.
+    expect(body).toContain("setGateError(result.message)");
+    expect(body).not.toContain("applyEmployeeAuthenticated");
+    expect(body).not.toContain("deriveGateState");
   });
 });
 
@@ -125,7 +178,7 @@ describe("the server answer can never restore authority", () => {
 
     // The result is READ -- the old code discarded it -- but only to branch on
     // how it failed, never to rebuild state from.
-    expect(body).toContain("const result = await employeeLogout()");
+    expect(body).toContain("const result = await endEmployeePosSession(");
     expect(body).toContain("if (!result.ok)");
   });
 });
