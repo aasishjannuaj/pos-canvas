@@ -34,10 +34,16 @@ const stripComments = (source: string) =>
 const DEVICE_APP = "components/device/DeviceApp.tsx";
 const POS_GATES = "components/device/PosGates.tsx";
 
-/** The Ring Out handler body, isolated from a 3000-line component. */
+/**
+ * The Ring Out path's body, isolated from a 3000-line component.
+ *
+ * v1.3 CP4 renamed this to `lockOperatorOut` when Auto-Lock began sharing it:
+ * one primitive, two reasons. Every assertion below is unchanged and still
+ * applies — Ring Out simply is this function, called with "ring_out".
+ */
 function ringOutBody(): string {
   const source = read(DEVICE_APP);
-  const start = source.indexOf("const handleEmployeeLogout = useCallback");
+  const start = source.indexOf("const lockOperatorOut = useCallback");
   expect(start).toBeGreaterThan(-1);
 
   const end = source.indexOf("  }, []);", start);
@@ -329,7 +335,7 @@ describe("the operator-facing control", () => {
     const source = read(DEVICE_APP);
 
     expect(source).toContain("<DailyRegisterStatus");
-    expect(source).toContain("onLogout={() => void handleEmployeeLogout()}");
+    expect(source).toContain('onLogout={() => void lockOperatorOut("ring_out")}');
   });
 
   it("disappears once the till is locked, because the strip needs an employee", () => {

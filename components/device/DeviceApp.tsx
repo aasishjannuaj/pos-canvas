@@ -59,6 +59,21 @@ import {
 } from "@/lib/deviceSession";
 import type { DevicePairing, DeviceState, DeviceUpdateOffer } from "@/lib/deviceSession";
 import { startReconnectProbe } from "@/lib/deviceReconnectProbe";
+import {
+  AUTO_LOCK_ACTIVITY_EVENTS,
+  AUTO_LOCK_MESSAGE,
+  startAutoLock,
+} from "@/lib/autoLock";
+
+/**
+ * v1.3 CP4 — the two ways an operator stops being trusted on this till.
+ *
+ * They differ in exactly one thing: whether a person decided. Everything after
+ * that decision — capture the session id, clear local authority, lock, then
+ * terminate the server session — is identical, and is shared rather than
+ * copied so the ordering that makes it safe cannot drift between them.
+ */
+type OperatorLockReason = "ring_out" | "auto_lock";
 import { permitsOfflineFallback, readOnlineHint } from "@/lib/deviceConnectivity";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
@@ -881,9 +896,11 @@ export default function DeviceApp() {
    * therefore the login's instant rather than this one; that is accepted
    * reporting debt, not something to fix here by inventing a logout locally.
    */
-  const handleEmployeeLogout = useCallback(async () => {
-    // Same-tick guard. A second press must not fire a second logout, and must
-    // not re-run the transition over a gate the first press already changed.
+  const lockOperatorOut = useCallback(async (reason: OperatorLockReason) => {
+    // Same-tick guard, SHARED BY BOTH CALLERS. A second press must not fire a
+    // second termination, and neither must a timeout that expires while a
+    // press is already in flight: whichever arrives first owns the episode and
+    // the other observes the till already locked.
     if (ringOutInFlightRef.current) {
       return;
     }
@@ -905,7 +922,10 @@ export default function DeviceApp() {
       gateRef.current = lockedOut;
       setGate(lockedOut);
       setSelectedEmployee(null);
-      setGateError(null);
+      // Ring Out needs no explanation -- the operator pressed it. A till that
+      // locked itself does: otherwise the next person finds a PIN prompt and
+      // no reason for it.
+      setGateError(reason === "auto_lock" ? AUTO_LOCK_MESSAGE : null);
       setGateBusy(true);
 
       if (expectedEmployeePosSessionId === undefined) {
@@ -937,6 +957,77 @@ export default function DeviceApp() {
       ringOutInFlightRef.current = false;
     }
   }, []);
+
+  /**
+   * v1.3 CP4 — a till that nobody has touched for ten minutes locks itself.
+   *
+   * KEYED ON THE SESSION ID, WHICH IS WHY IT NEEDS NO SPECIAL CASES. The
+   * episode begins when an employee actually holds authority -- not when a
+   * login RPC returned, because a login whose revalidation failed leaves the
+   * till locked and must not arm anything. It ends when authority ends, by any
+   * route: Ring Out, this timer, a stale-session lock, a reconnect that found
+   * the session replaced. React tears the effect down and the deadline goes
+   * with it. A re-login is a new session id, so it is simply a new episode
+   * with a fresh ten minutes.
+   *
+   * THE LISTENERS LIVE HERE, NOT IN PosRuntime. The runtime tree is kept free
+   * of document listeners on purpose -- that is what makes the `inert`
+   * boundary trustworthy, and an accepted guard pins it. Listening at the host
+   * covers the runtime's subtree anyway, and capture phase means a template
+   * that stops propagation cannot blind the till to a real person.
+   *
+   * RESUME IS A CHECK, NOT A RESET. Coming back to the foreground never
+   * extends anything; it compares the clock to the deadline and locks on the
+   * spot if the till slept through it.
+   */
+  useEffect(() => {
+    const employeeSessionId = gate.employee?.employeeSessionId;
+
+    if (employeeSessionId === undefined || typeof document === "undefined") {
+      return;
+    }
+
+    return startAutoLock(
+      {
+        now: () => Date.now(),
+        setTimer: (run, delayMs) => setTimeout(run, delayMs),
+        clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+        onActivity: (handler) => {
+          const listener = (event: Event) => handler(event);
+
+          for (const type of AUTO_LOCK_ACTIVITY_EVENTS) {
+            document.addEventListener(type, listener, { capture: true, passive: true });
+          }
+
+          return () => {
+            for (const type of AUTO_LOCK_ACTIVITY_EVENTS) {
+              document.removeEventListener(type, listener, { capture: true });
+            }
+          };
+        },
+        onResume: (handler) => {
+          const listener = () => {
+            if (document.visibilityState !== "visible") {
+              return;
+            }
+
+            handler();
+          };
+
+          document.addEventListener("visibilitychange", listener);
+          window.addEventListener("focus", listener);
+
+          return () => {
+            document.removeEventListener("visibilitychange", listener);
+            window.removeEventListener("focus", listener);
+          };
+        },
+      },
+      () => {
+        void lockOperatorOut("auto_lock");
+      }
+    );
+  }, [gate.employee?.employeeSessionId, lockOperatorOut]);
 
   /**
    * Loads the roster the selector offers. Names and ids only; the server reads
@@ -2965,7 +3056,7 @@ export default function DeviceApp() {
                 setSelectedEmployee(null);
                 setGate(beginEmployeeSwitch(gateRef.current));
               }}
-              onLogout={() => void handleEmployeeLogout()}
+              onLogout={() => void lockOperatorOut("ring_out")}
             />
           )}
 

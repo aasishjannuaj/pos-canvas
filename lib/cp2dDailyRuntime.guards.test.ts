@@ -411,7 +411,10 @@ describe("reconnect and resume compare POS SESSION IDENTITY, never the person", 
     // fork is who the operator is and which business day it is.
     const dailyRegions = [
       app.slice(app.indexOf("const acquireDaily"), app.indexOf("const deriveGateState")),
-      app.slice(app.indexOf("const handleEmployeeCodeLogin"), app.indexOf("const handleEmployeeLogout")),
+      // v1.3 CP4 renamed the lock handler to `lockOperatorOut` when Auto-Lock
+      // began sharing it. Same region, same rule: nothing between the login
+      // handler and the lock handler may fork on platform.
+      app.slice(app.indexOf("const handleEmployeeCodeLogin"), app.indexOf("const lockOperatorOut")),
       app.slice(
         app.indexOf("    if (!gateDerivationAllowed || !gate.establishedOnline || gate.daily === null) {"),
         app.indexOf("document.removeEventListener")
