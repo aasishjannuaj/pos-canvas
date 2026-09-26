@@ -17,7 +17,8 @@
 // broken — the expectation dropped from the UPDATE, and the device FOR UPDATE
 // removed — and the tests are re-run to prove they FAIL. A test that passes
 // against a broken implementation was not testing anything.
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -482,41 +483,13 @@ maybe("callers without standing get nothing", () => {
 // ---------------------------------------------------------------------------
 
 maybe("termination and replacement serialize through the paired-device row", () => {
-  /**
-   * Holds the device row FOR UPDATE in one real connection while a second
-   * connection tries to act, then releases. `psql` per call means these are
-   * genuinely separate backends, not one session pretending.
-   */
-  function whileDeviceLocked(n: number, other: () => string): { blocked: boolean; result: string } {
-    const holder = execFile(
-      join(PG_BIN as string, "psql"),
-      [...psqlArgs(DB), "-Atq", "-c",
-       `begin; select id from public.paired_devices where id='${device(n)}' for update;
-        select pg_sleep(2); commit;`],
-      { encoding: "utf8" }
-    );
-
-    const started = Date.now();
-    let result = "";
-    try {
-      result = other();
-    } finally {
-      holder.kill();
-    }
-
-    return { blocked: Date.now() - started > 900, result };
-  }
-
-  it("10a. termination waits while another backend holds the device row", () => {
-    const a = signIn(DB, 1);
-
-    const { blocked, result } = whileDeviceLocked(1, () => endSession(DB, 1, a));
-
-    // If it did not wait, it never took the lock -- and the classification
-    // below would be reading a world another transaction could still change.
-    expect(blocked).toBe(true);
-    expect(field(result, "outcome")).toBe("ended");
-  });
+  // 10a WAS a stopwatch: it held the device row from another backend and
+  // inferred blocking from elapsed milliseconds. That is precisely the shape
+  // that turns into a flake on a loaded laptop, and it did. The two tests at
+  // the end of this file replace it with the real thing -- the actual login
+  // and the actual termination, contending, with pg_blocking_pids() naming who
+  // waits for whom. What remains here is the sequential classification, which
+  // is deterministic and worth keeping on its own.
 
   it("10b. a login replacing A commits FIRST, and the stale termination then refuses", () => {
     const a = signIn(DB, 1);
@@ -713,4 +686,235 @@ maybe("the tests above fail against a broken implementation", () => {
                    where n.nspname='public' and p.proname='end_employee_pos_session'`)
     ).toBe("0");
   });
+});
+
+// ---------------------------------------------------------------------------
+// REAL CONCURRENCY — the two actual functions, racing
+//
+// The sequential cases above show the classification is right once the dust
+// settles. They do NOT show that the device lock is what settles it, because
+// nothing in them ever contends: each call had the row to itself.
+//
+// These do. Two long-lived psql backends hold open transactions, so the loser
+// is genuinely parked on the winner's row lock, and the proof of that is
+// pg_blocking_pids() naming the winner — not elapsed time, which would make
+// the test a stopwatch and eventually a flake.
+// ---------------------------------------------------------------------------
+
+type Conn = { proc: ChildProcessWithoutNullStreams; buffer: string };
+
+const DONE = "__CP31_DONE__";
+
+/**
+ * A psql backend that stays up, so a transaction can be held open across steps.
+ *
+ * The caller is bound once, at SESSION scope, exactly as PostgREST binds it per
+ * request: these functions derive every bit of authority from auth.uid(), so a
+ * connection without it is simply not_authenticated.
+ */
+function open(db: string): Conn {
+  const proc = spawn(
+    join(PG_BIN as string, "psql"),
+    ["-h", "127.0.0.1", "-p", String(PORT), "-U", "postgres", "-d", db, "-At", "-q"],
+    { env: { ...process.env, LC_ALL: "en_US.UTF-8", PGTZ: "UTC" } }
+  );
+  const conn: Conn = { proc, buffer: "" };
+
+  proc.stdout.on("data", (chunk: Buffer) => { conn.buffer += chunk.toString(); });
+  proc.stderr.on("data", (chunk: Buffer) => { conn.buffer += chunk.toString(); });
+
+  return conn;
+}
+
+/** Binds auth.uid() for the life of this connection. */
+async function authenticate(conn: Conn, who: string): Promise<void> {
+  await run(conn, `select set_config('request.jwt.claim.sub','${who}', false);`);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Sends SQL and waits for it to finish, returning what it printed. */
+async function run(conn: Conn, statement: string, timeoutMs = 20_000): Promise<string> {
+  const mark = conn.buffer.length;
+  conn.proc.stdin.write(`${statement}\n\\echo ${DONE}\n`);
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tail = conn.buffer.slice(mark);
+    if (tail.includes(DONE)) return tail.slice(0, tail.indexOf(DONE)).trim();
+    await sleep(25);
+  }
+
+  throw new Error(`statement did not finish in ${timeoutMs}ms: ${statement}`);
+}
+
+/** Sends SQL and does NOT wait — for the call that is meant to block. */
+function fire(conn: Conn, statement: string): number {
+  const mark = conn.buffer.length;
+  conn.proc.stdin.write(`${statement}\n\\echo ${DONE}\n`);
+  return mark;
+}
+
+/** Whatever the fired statement eventually printed. */
+async function collect(conn: Conn, mark: number, timeoutMs = 20_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tail = conn.buffer.slice(mark);
+    if (tail.includes(DONE)) return tail.slice(0, tail.indexOf(DONE)).trim();
+    await sleep(25);
+  }
+  throw new Error(`fired statement never finished in ${timeoutMs}ms`);
+}
+
+function close(conn: Conn): void {
+  try { conn.proc.stdin.end("\\q\n"); } catch { /* already gone */ }
+  conn.proc.kill();
+}
+
+/**
+ * Waits until `pid` is genuinely parked on a lock held by `blocker`.
+ *
+ * THE ASSERTION IS pg_blocking_pids, NOT THE CLOCK. The loop only decides how
+ * long to keep looking; what it returns is Postgres's own answer about who is
+ * waiting for whom.
+ */
+async function waitUntilBlockedBy(pid: string, blocker: string, timeoutMs = 15_000): Promise<{
+  blocked: boolean; blockers: string; waitEvent: string;
+}> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const row = sql(DB, `select coalesce(pg_blocking_pids(${pid})::text,'{}')
+                                || '|' || coalesce((select wait_event_type from pg_stat_activity where pid=${pid}),'-')
+                         from pg_stat_activity where pid=${pid}`);
+    const [blockers = "{}", waitEvent = "-"] = row.split("|");
+
+    if (blockers.includes(blocker) && waitEvent === "Lock") {
+      return { blocked: true, blockers, waitEvent };
+    }
+    await sleep(50);
+  }
+
+  return { blocked: false, blockers: "", waitEvent: "" };
+}
+
+/** Ends everything open on till n, then signs Amy in. Returns session A. */
+function resetTill(db: string, n: number): string {
+  sql(db, `update public.employee_pos_sessions set ended_at = now(), end_reason='logout'
+           where paired_device_id='${device(n)}' and ended_at is null`);
+  return signIn(db, n);
+}
+
+const openCount = (db: string, n: number): string =>
+  sql(db, `select count(*)::text from public.employee_pos_sessions
+           where paired_device_id='${device(n)}' and ended_at is null`);
+
+maybe("the real functions serialize on the paired-device row", () => {
+  it("A. termination holds the lock; a real login for B waits, then opens a NEW session", async () => {
+    const a = resetTill(DB, 1);
+    const terminator = open(DB);
+    const login = open(DB);
+
+    try {
+      await authenticate(terminator, deviceUser(1));
+      await authenticate(login, deviceUser(1));
+
+      const tPid = await run(terminator, `select pg_backend_pid();`);
+      const lPid = await run(login, `select pg_backend_pid();`);
+
+      // Termination runs for real and keeps the device row locked by not
+      // committing yet.
+      await run(terminator, `begin;`);
+      const terminated = await run(
+        terminator,
+        `select public.end_employee_pos_session('${a}'::uuid)::text;`
+      );
+
+      expect(field(terminated, "outcome")).toBe("ended");
+
+      // The REAL login, concurrently. It must not proceed.
+      const mark = fire(login, `begin; select public.employee_login_by_code('002','3333')::text;`);
+      const blocked = await waitUntilBlockedBy(lPid, tPid);
+
+      expect(blocked.blocked).toBe(true);
+      expect(blocked.blockers).toContain(tPid);
+      expect(blocked.waitEvent).toBe("Lock");
+
+      // Read from a THIRD backend, so this is the committed world: the
+      // terminator has not committed, so A still reads as open, and the login
+      // has not run at all, so B does not exist. The open session is still A.
+      expect(
+        sql(DB, `select id::text from public.employee_pos_sessions
+                 where paired_device_id='${device(1)}' and ended_at is null`)
+      ).toBe(a);
+
+      await run(terminator, `commit;`);
+
+      const loggedIn = await collect(login, mark);
+      expect(field(loggedIn, "ok")).toBe("true");
+      await run(login, `commit;`);
+
+      const b = sql(DB, `select id::text from public.employee_pos_sessions
+                         where paired_device_id='${device(1)}' and ended_at is null`);
+
+      expect(b).not.toBe(a);
+      expect(sessionRow(DB, a)).toMatch(/\|logout$/); // ONLY A, and as a logout
+      expect(sessionRow(DB, b)).toBe("OPEN|-");
+      expect(openCount(DB, 1)).toBe("1");
+    } finally {
+      close(terminator);
+      close(login);
+    }
+  }, 120_000);
+
+  it("B. a real login holds the lock; termination of A waits, then refuses", async () => {
+    const a = resetTill(DB, 1);
+    const login = open(DB);
+    const terminator = open(DB);
+
+    try {
+      await authenticate(login, deviceUser(1));
+      await authenticate(terminator, deviceUser(1));
+
+      const lPid = await run(login, `select pg_backend_pid();`);
+      const tPid = await run(terminator, `select pg_backend_pid();`);
+
+      // The REAL login replaces A with B and holds the device row.
+      await run(login, `begin;`);
+      const loggedIn = await run(login, `select public.employee_login_by_code('002','3333')::text;`);
+      expect(field(loggedIn, "ok")).toBe("true");
+
+      // Termination of the now-stale A, concurrently.
+      const mark = fire(terminator, `begin; select public.end_employee_pos_session('${a}'::uuid)::text;`);
+      const blocked = await waitUntilBlockedBy(tPid, lPid);
+
+      expect(blocked.blocked).toBe(true);
+      expect(blocked.blockers).toContain(lPid);
+      expect(blocked.waitEvent).toBe("Lock");
+
+      await run(login, `commit;`);
+
+      const terminated = await collect(terminator, mark);
+      await run(terminator, `commit;`);
+
+      // THE WHOLE POINT: it woke into a world where A was already replaced,
+      // and refused rather than closing whoever is on the till now.
+      expect(field(terminated, "ok")).toBe("false");
+      expect(field(terminated, "error")).toBe("session_replaced");
+
+      const b = sql(DB, `select id::text from public.employee_pos_sessions
+                         where paired_device_id='${device(1)}' and ended_at is null`);
+
+      expect(b).not.toBe(a);
+      expect(sessionRow(DB, a)).toMatch(/\|switched$/); // A untouched by the termination
+      expect(
+        sql(DB, `select coalesce(ended_at::text,'NULL') || '|' || coalesce(end_reason,'NULL')
+                 from public.employee_pos_sessions where id='${b}'`)
+      ).toBe("NULL|NULL"); // B: both columns still null
+      expect(openCount(DB, 1)).toBe("1");
+    } finally {
+      close(login);
+      close(terminator);
+    }
+  }, 120_000);
 });
