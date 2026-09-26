@@ -429,7 +429,7 @@ export function RegisterStatus({
             disabled={busy}
             onClick={onLogout}
           >
-            Sign out
+            Ring Out
           </button>
           <button
             type="button"
@@ -626,7 +626,7 @@ export function DailyRegisterStatus({
             disabled={busy}
             onClick={onLogout}
           >
-            Sign out
+            Ring Out
           </button>
         </span>
       </div>

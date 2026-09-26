@@ -418,6 +418,32 @@ export default function DeviceApp() {
    * next effect run until the render lands; this ref is.
    */
   const rosterInFlightRef = useRef(false);
+
+  /**
+   * v1.3 CP3 — closes the double-press window on Ring Out.
+   *
+   * `gateBusy` cannot do this job. It is React state, so it is not visible to a
+   * second click that lands before the render commits — and Ring Out's first
+   * act is a security transition, which must happen exactly once and must not
+   * be followed by a second logout call. A ref is readable in the same tick.
+   */
+  const ringOutInFlightRef = useRef(false);
+
+  /**
+   * v1.3 CP3 — the accepted transport-failure transition, reachable from above.
+   *
+   * WHY A REF AND NOT A DIRECT CALL. Ring Out lives beside the login handler,
+   * which is where it belongs and where the accepted CP2d and employee-lock
+   * guards expect to find it. enterOfflineFromTransportFailure is declared far
+   * below, beside the sale path that already uses it. Moving either to satisfy
+   * the other would drag an unrelated region across a guard's boundary — the
+   * Windows update handling, or the sale-rejection path — and those guards are
+   * pinning real invariants, not accidents of layout.
+   *
+   * So this holds the SAME function, assigned once it exists. Ring Out reaches
+   * the one accepted transition instead of growing a second one.
+   */
+  const enterOfflineRef = useRef<(() => Promise<void>) | null>(null);
   const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
@@ -823,22 +849,77 @@ export default function DeviceApp() {
   }, [acquireDaily, readEmployeeSession, describeDailyOutcome]);
 
   /**
-   * Signs the current employee out.
+   * v1.3 CP3 — Ring Out. The operator hands the till back.
    *
-   * The DAILY context is left exactly as it is, deliberately: a business day is
-   * not a drawer period and nobody closes one. The next person to sign in gets
-   * the same day back from the server.
+   * LOCAL SECURITY ACTION FIRST, AND IT IS NOT A REQUEST. Ring Out ends this
+   * person's authority to operate this POS. That is a decision made at the
+   * till, so it is applied here BEFORE anything is awaited, and no answer the
+   * server gives afterwards can undo it. The previous implementation did the
+   * opposite: it called employee_logout, discarded the result, and then let a
+   * re-derivation decide. That worked only because the derivation happens to be
+   * fail-closed — so a logout that failed while the SESSION READ still
+   * succeeded left the rung-out employee holding a live, unlocked till.
+   *
+   * THE REF IS WRITTEN BEFORE THE AWAIT, NOT JUST THE STATE. Checkout reads
+   * `gateRef.current` directly and does not wait for React to commit, so the
+   * ref is what actually closes the window in which a new sale could begin
+   * under the employee who just rang out. Writing only through setGate would
+   * leave that window open for a render.
+   *
+   * WHAT SURVIVES, DELIBERATELY. beginEmployeeSwitch clears the employee and
+   * keeps everything else: the DAILY context, because a business day is not a
+   * drawer period and nobody closes one; the cart, because the next operator
+   * finishes the order the last one started; PosRuntime, because the gate is an
+   * overlay and never an unmount; and every queued paid sale, which is money
+   * already taken and owes nothing to who is signed in.
+   *
+   * THE STALE SERVER SESSION IS NOT THIS FUNCTION'S PROBLEM. If the logout
+   * cannot be delivered, the server session stays open — and stays powerless,
+   * because authority is local and complete_sale_v5 is told which session to
+   * expect by a client that no longer has one. The next successful login ends
+   * it atomically with end_reason 'switched'. Its recorded ended_at is
+   * therefore the login's instant rather than this one; that is accepted
+   * reporting debt, not something to fix here by inventing a logout locally.
    */
   const handleEmployeeLogout = useCallback(async () => {
-    setGateBusy(true);
-    setGateError(null);
+    // Same-tick guard. A second press must not fire a second logout, and must
+    // not re-run the transition over a gate the first press already changed.
+    if (ringOutInFlightRef.current) {
+      return;
+    }
 
-    await employeeLogout();
-    await deriveGateState();
+    ringOutInFlightRef.current = true;
 
-    setGateBusy(false);
-    setSelectedEmployee(null);
-  }, [deriveGateState]);
+    try {
+      const lockedOut = beginEmployeeSwitch(gateRef.current);
+
+      // The ref first: it is what checkout consults.
+      gateRef.current = lockedOut;
+      setGate(lockedOut);
+      setSelectedEmployee(null);
+      setGateError(null);
+      setGateBusy(true);
+
+      const result = await employeeLogout();
+
+      if (!result.ok) {
+        if (result.error === "offline") {
+          // The request never reached the server. That is the same fact the
+          // sale path already acts on, so it takes the same accepted
+          // transition — which is also what arms the CP2e reconnect probe.
+          await enterOfflineRef.current?.();
+        } else {
+          // The server answered and refused. Say so plainly on the lock card,
+          // which is already the screen in front of the operator: they ARE
+          // rung out here, and only the server-side record is in doubt.
+          setGateError("Rung out on this till. The server did not confirm it.");
+        }
+      }
+    } finally {
+      setGateBusy(false);
+      ringOutInFlightRef.current = false;
+    }
+  }, []);
 
   /**
    * Loads the roster the selector offers. Names and ids only; the server reads
@@ -2416,6 +2497,15 @@ export default function DeviceApp() {
       };
     });
   }, []);
+
+  /**
+   * Hands Ring Out the transition above. One function, two callers: the sale
+   * rejection path calls it directly, Ring Out through the ref.
+   */
+  useEffect(() => {
+    enterOfflineRef.current = enterOfflineFromTransportFailure;
+  }, [enterOfflineFromTransportFailure]);
+
 
   /**
    * Feature 24.5F — make an outbound sale identity durable before it is sent.
