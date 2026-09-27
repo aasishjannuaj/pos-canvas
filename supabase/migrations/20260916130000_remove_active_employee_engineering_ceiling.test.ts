@@ -639,7 +639,14 @@ describe("selector and single-hash login are untouched", () => {
     // employee_login_by_code is the new primary path and verifies one real
     // hash; its two extra calls are the fixed-dummy verification that stops an
     // unknown Employee ID answering measurably faster than a wrong PIN.
+    // v1.3 Feature 1C — the Time Clock joins this set, deliberately. Clock In
+    // and Clock Out authenticate an employee by Employee ID and PIN, and were
+    // required to reuse this exact bcrypt path rather than grow a second,
+    // weaker one. The property this guard protects is unchanged: the ONLY
+    // functions that verify a PIN are the ones whose job is authentication.
     expect(verifiers.sort()).toEqual([
+      "clock_in_employee(text,text,uuid)",
+      "clock_out_employee(text,text,uuid)",
       "employee_login(uuid,text)",
       "employee_login_by_code(text,text)",
     ]);

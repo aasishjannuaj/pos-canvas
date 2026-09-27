@@ -79,7 +79,8 @@ describe("opening a till screen must not destroy the cart", () => {
     // reaches the DOM changed, and the property this guard protects is
     // strictly stronger than before.
     expect(r).toContain("const overlay =");
-    expect(r).toContain("const activeOverlay = gateOverlay ?? overlay;");
+    // v1.3 Feature 1C — one more term in the same chain, same slot.
+    expect(r).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
     expect(r).toContain("{activeOverlay !== null && (");
     expect(r).toContain("<PosRuntime");
   });

@@ -425,7 +425,14 @@ describe("employee_login verifies exactly one hash", () => {
     // employee_login_by_code joins it as the new primary path. Its extra calls
     // are the fixed-dummy verification that keeps an unknown Employee ID from
     // answering measurably faster than a wrong PIN.
+    // v1.3 Feature 1C — the Time Clock joins this set, deliberately. Clock In
+    // and Clock Out authenticate an employee by Employee ID and PIN, and were
+    // required to reuse this exact bcrypt path rather than grow a second,
+    // weaker one. The property this guard protects is unchanged: the ONLY
+    // functions that verify a PIN are the ones whose job is authentication.
     expect(verifiers.sort()).toEqual([
+      "clock_in_employee(text,text,uuid)",
+      "clock_out_employee(text,text,uuid)",
       "employee_login(uuid,text)",
       "employee_login_by_code(text,text)",
     ]);
@@ -1028,7 +1035,13 @@ describe("lock order", () => {
 
     // Both login paths write the limiters, and nothing else does. That is the
     // property: the failure counters stay private to authentication.
+    // v1.3 Feature 1C — the Time Clock writes the limiters for the same reason
+    // it verifies the hash: it is a PIN door, and a door that did not feed the
+    // counters would be the weak one. The property is unchanged: the failure
+    // counters stay private to authentication.
     expect(callers.sort()).toEqual([
+      "clock_in_employee(text,text,uuid)",
+      "clock_out_employee(text,text,uuid)",
       "employee_login(uuid,text)",
       "employee_login_by_code(text,text)",
     ]);

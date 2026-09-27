@@ -21,6 +21,8 @@ import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employe
 import type { RegisterSession } from "@/lib/registerSession";
 import type { DailyRegisterContext } from "@/lib/dailyRegister";
 import { getOpeningCashMessage, validateOpeningCash } from "@/lib/registerSession";
+import { isValidTimeClockCode, isValidTimeClockPin } from "@/lib/timeClock";
+import type { TimeClockAction, TimeClockResult } from "@/lib/timeClock";
 
 const PANEL = "mx-auto flex w-full max-w-sm flex-col gap-4 rounded-2xl bg-white p-6 shadow-sm";
 const SCREEN = "flex min-h-0 flex-1 items-center justify-center bg-neutral-50 p-4";
@@ -55,12 +57,15 @@ export function EmployeeLockCard({
   error,
   recovery,
   onSubmit,
+  onTimeClock,
 }: {
   busy: boolean;
   error: string | null;
   /** Set when a refused sale sent the operator back here. */
   recovery: boolean;
   onSubmit: (employeeCode: string, pin: string) => void;
+  /** Opens the Time Clock. Never unlocks the POS. */
+  onTimeClock?: () => void;
 }) {
   const [employeeCode, setEmployeeCode] = useState("");
   const [pin, setPin] = useState("");
@@ -131,6 +136,22 @@ export function EmployeeLockCard({
         <button type="submit" className={PRIMARY} disabled={busy || !ready}>
           {busy ? "Signing in…" : "Sign In"}
         </button>
+
+        {/* v1.3 Feature 1C — a SECOND, smaller door.
+            Somebody arriving for their shift has to be able to clock in before
+            anyone has signed the till in, and on a till they are not about to
+            operate. It sits under the login rather than beside it because it is
+            the rarer act, and pressing it never unlocks the POS. */}
+        {onTimeClock !== undefined && (
+          <button
+            type="button"
+            className={SECONDARY}
+            disabled={busy}
+            onClick={onTimeClock}
+          >
+            Time Clock
+          </button>
+        )}
       </form>
     </div>
   );
@@ -591,6 +612,7 @@ export function DailyRegisterStatus({
   error,
   onSwitchEmployee,
   onLogout,
+  onTimeClock,
 }: {
   employee: EmployeeSession;
   daily: DailyRegisterContext;
@@ -598,6 +620,13 @@ export function DailyRegisterStatus({
   error: string | null;
   onSwitchEmployee: () => void;
   onLogout: () => void;
+  /**
+   * v1.3 Feature 1C — a colleague's shift, while this operator keeps the till.
+   *
+   * Employee B must be able to clock in or out without Employee A being rung
+   * out, switched, or losing the cart they are part way through.
+   */
+  onTimeClock?: () => void;
 }) {
   return (
     <div className="flex flex-col gap-2 rounded-xl bg-white p-3 text-sm shadow-sm">
@@ -628,10 +657,162 @@ export function DailyRegisterStatus({
           >
             Ring Out
           </button>
+          {onTimeClock !== undefined && (
+            <button
+              type="button"
+              className="rounded-lg border border-neutral-300 px-3 py-1.5"
+              disabled={busy}
+              onClick={onTimeClock}
+            >
+              Time Clock
+            </button>
+          )}
         </span>
       </div>
 
       {error !== null && <p className="text-red-600">{error}</p>}
+    </div>
+  );
+}
+
+/**
+ * v1.3 Feature 1C — the Time Clock panel.
+ *
+ * EXPLICIT INTENT, NOT A TOGGLE. The employee says whether they are arriving or
+ * leaving before they authenticate. A single button that let the server decide
+ * would, for anyone who forgot to clock out yesterday, perform the opposite of
+ * what they came to do — and a punch nobody meant is exactly the record a
+ * timesheet cannot afford. A wrong choice here is refused and says so.
+ *
+ * IT OPENS NOTHING. Using this panel never signs anybody into the POS, never
+ * rings the current operator out, never touches the cart. It sits over
+ * whatever was on screen and goes away again.
+ */
+export function TimeClockPanel({
+  busy,
+  result,
+  onSubmit,
+  onDismiss,
+}: {
+  busy: boolean;
+  /** The server's answer, success or refusal. Nothing is computed locally. */
+  result: TimeClockResult | null;
+  onSubmit: (action: TimeClockAction, employeeCode: string, pin: string) => void;
+  onDismiss: () => void;
+}) {
+  const [action, setAction] = useState<TimeClockAction | null>(null);
+  const [employeeCode, setEmployeeCode] = useState("");
+  const [pin, setPin] = useState("");
+
+  const ready = isValidTimeClockCode(employeeCode) && isValidTimeClockPin(pin);
+
+  if (result !== null && result.ok) {
+    return (
+      <div className={SCREEN}>
+        <div className={PANEL}>
+          <h1 className="text-lg font-semibold text-neutral-900">
+            {result.outcome === "clocked_in" ? "Clocked in" : "Clocked out"}
+          </h1>
+          {/* The SERVER's instant, shown as it answered. Nothing here reads a
+              device clock, so what an employee is told matches what payroll
+              will see. */}
+          <p className="text-sm text-neutral-600">
+            {result.outcome === "clocked_in" ? result.clockedInAt : result.clockedOutAt}
+          </p>
+          <button type="button" className={PRIMARY} onClick={onDismiss}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={SCREEN}>
+      <form
+        className={PANEL}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!busy && ready && action !== null) onSubmit(action, employeeCode, pin);
+        }}
+      >
+        <h1 className="text-lg font-semibold text-neutral-900">Time Clock</h1>
+
+        <span className="flex gap-2">
+          <button
+            type="button"
+            className={`flex-1 rounded-xl border px-4 py-3 text-base ${
+              action === "clock_in"
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-neutral-300 text-neutral-700"
+            }`}
+            disabled={busy}
+            onClick={() => setAction("clock_in")}
+          >
+            Clock In
+          </button>
+          <button
+            type="button"
+            className={`flex-1 rounded-xl border px-4 py-3 text-base ${
+              action === "clock_out"
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-neutral-300 text-neutral-700"
+            }`}
+            disabled={busy}
+            onClick={() => setAction("clock_out")}
+          >
+            Clock Out
+          </button>
+        </span>
+
+        <label className="text-sm text-neutral-700" htmlFor="time-clock-code">
+          Employee ID
+        </label>
+        <input
+          id="time-clock-code"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={3}
+          placeholder="000"
+          value={employeeCode}
+          disabled={busy}
+          onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        <label className="text-sm text-neutral-700" htmlFor="time-clock-pin">
+          PIN
+        </label>
+        <input
+          id="time-clock-pin"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          type="password"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={4}
+          placeholder="••••"
+          value={pin}
+          disabled={busy}
+          onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        {/* The server's wording, verbatim -- including the one generic answer
+            that covers an unknown ID, a wrong PIN and a deactivated employee,
+            so this panel cannot be used to find out who works here. */}
+        {result !== null && !result.ok && (
+          <p className="text-sm text-red-600">{result.message}</p>
+        )}
+
+        <button type="submit" className={PRIMARY} disabled={busy || !ready || action === null}>
+          {busy ? "Sending…" : "Confirm"}
+        </button>
+
+        <button type="button" className={SECONDARY} disabled={busy} onClick={onDismiss}>
+          Cancel
+        </button>
+      </form>
     </div>
   );
 }

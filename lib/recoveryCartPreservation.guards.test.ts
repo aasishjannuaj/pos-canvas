@@ -109,7 +109,12 @@ describe("1 + 2. a refusal cannot unmount the runtime", () => {
   });
 
   it("the gates render through the same overlay slot Feature 25.3 established", () => {
-    expect(app).toContain("const activeOverlay = gateOverlay ?? overlay;");
+    // v1.3 Feature 1C — the Time Clock joins the SAME slot rather than
+    // opening a second one, so the chain grew by one term. The property is
+    // unchanged and now covers one more overlay: everything that covers the
+    // POS arrives through `activeOverlay`, above a PosRuntime that stays
+    // mounted.
+    expect(app).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
     expect(app).toContain('<div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{activeOverlay}</div>');
   });
 

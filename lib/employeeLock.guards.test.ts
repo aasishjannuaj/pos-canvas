@@ -230,7 +230,12 @@ describe("the POS underneath stays mounted and inert", () => {
   it("the lock is an overlay, not a replacement tree", () => {
     expect(readyArm.match(/\n {6}return \(/g)).toHaveLength(1);
     expect(tree).toContain("<PosRuntime");
-    expect(app).toContain("const activeOverlay = gateOverlay ?? overlay;");
+    // v1.3 Feature 1C — the Time Clock joins the SAME slot rather than
+    // opening a second one, so the chain grew by one term. The property is
+    // unchanged and now covers one more overlay: everything that covers the
+    // POS arrives through `activeOverlay`, above a PosRuntime that stays
+    // mounted.
+    expect(app).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
   });
 
   it("the POS subtree is inert whenever the lock is up", () => {

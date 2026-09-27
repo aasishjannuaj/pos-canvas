@@ -31,7 +31,10 @@ import {
   DailyContextRecoveryCard,
   DailyRegisterStatus,
   EmployeeLockCard,
+  TimeClockPanel,
 } from "@/components/device/PosGates";
+import { clockInEmployee, clockOutEmployee, newTimeClockRequestId } from "@/lib/timeClock.rpc";
+import type { TimeClockAction, TimeClockResult } from "@/lib/timeClock";
 import {
   applyDeviceConfigUpdate,
   completeDeviceSaleV5,
@@ -462,6 +465,19 @@ export default function DeviceApp() {
   const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
+
+  /**
+   * v1.3 Feature 1C — the Time Clock, which is a guest on this screen.
+   *
+   * It is separate state on purpose. Opening it, using it and closing it must
+   * leave `gate` untouched: the same operator is on the till afterwards, with
+   * the same cart and the same business day. Nothing here is allowed to
+   * reach into employee authority.
+   */
+  const [timeClockOpen, setTimeClockOpen] = useState(false);
+  const [timeClockBusy, setTimeClockBusy] = useState(false);
+  const [timeClockResult, setTimeClockResult] = useState<TimeClockResult | null>(null);
+  const timeClockInFlightRef = useRef(false);
 
   useEffect(() => {
     gateRef.current = gate;
@@ -1028,6 +1044,51 @@ export default function DeviceApp() {
       }
     );
   }, [gate.employee?.employeeSessionId, lockOperatorOut]);
+
+  /**
+   * v1.3 Feature 1C — send one punch, and change nothing else.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT TOUCH: `gate`, `gateRef`, the cart, the
+   * DAILY context and the sale queue. An employee clocking in on a till their
+   * colleague is operating must leave that colleague exactly where they were,
+   * mid-order if need be. So this writes only its own three pieces of state.
+   *
+   * ONE REQUEST ID PER ATTEMPT. A lost reply can be retried by pressing again,
+   * and the server answers the repeat with the original record rather than
+   * opening a second shift. Nothing is stored locally and nothing is retried
+   * automatically — a punch must never appear without a person making it.
+   */
+  const handleTimeClock = useCallback(
+    async (action: TimeClockAction, employeeCode: string, pin: string) => {
+      if (timeClockInFlightRef.current) {
+        return;
+      }
+
+      timeClockInFlightRef.current = true;
+      setTimeClockBusy(true);
+      setTimeClockResult(null);
+
+      try {
+        const requestId = newTimeClockRequestId();
+        const result =
+          action === "clock_in"
+            ? await clockInEmployee(employeeCode, pin, requestId)
+            : await clockOutEmployee(employeeCode, pin, requestId);
+
+        setTimeClockResult(result);
+      } finally {
+        setTimeClockBusy(false);
+        timeClockInFlightRef.current = false;
+      }
+    },
+    []
+  );
+
+  /** Closes the panel and forgets the answer. Authority is untouched either way. */
+  const dismissTimeClock = useCallback(() => {
+    setTimeClockOpen(false);
+    setTimeClockResult(null);
+  }, []);
 
   /**
    * Loads the roster the selector offers. Names and ids only; the server reads
@@ -2962,6 +3023,10 @@ export default function DeviceApp() {
             error={gateError}
             recovery={gate.recovery === "employee"}
             onSubmit={(employeeCode, pin) => void handleEmployeeCodeLogin(employeeCode, pin)}
+            onTimeClock={() => {
+              setTimeClockResult(null);
+              setTimeClockOpen(true);
+            }}
           />
         ) : posGate === "timezone" ? (
           // THE ONE SETUP PROBLEM A CASHIER MUST NOT WORK AROUND. No timezone
@@ -2999,7 +3064,21 @@ export default function DeviceApp() {
        * in has no business showing sales history, and this is the behaviour the
        * gates already had when they replaced the tree.
        */
-      const activeOverlay = gateOverlay ?? overlay;
+      // The Time Clock sits ABOVE whatever was showing -- the employee lock
+      // card, a recovery card, or nothing at all -- and dismissing it puts the
+      // screen back exactly as it was. It never replaces the login form.
+      const timeClockOverlay = timeClockOpen ? (
+        <TimeClockPanel
+          busy={timeClockBusy}
+          result={timeClockResult}
+          onSubmit={(action, employeeCode, pin) => {
+            void handleTimeClock(action, employeeCode, pin);
+          }}
+          onDismiss={dismissTimeClock}
+        />
+      ) : null;
+
+      const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;
 
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
@@ -3057,6 +3136,10 @@ export default function DeviceApp() {
                 setGate(beginEmployeeSwitch(gateRef.current));
               }}
               onLogout={() => void lockOperatorOut("ring_out")}
+              onTimeClock={() => {
+                setTimeClockResult(null);
+                setTimeClockOpen(true);
+              }}
             />
           )}
 
