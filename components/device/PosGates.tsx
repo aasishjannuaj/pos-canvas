@@ -23,6 +23,17 @@ import type { DailyRegisterContext } from "@/lib/dailyRegister";
 import { getOpeningCashMessage, validateOpeningCash } from "@/lib/registerSession";
 import { isValidTimeClockCode, isValidTimeClockPin } from "@/lib/timeClock";
 import type { TimeClockAction, TimeClockResult } from "@/lib/timeClock";
+import {
+  CASH_MOVEMENT_TYPES,
+  getCashAmountMessage,
+  getCashMovementLabel,
+  getCashMovementMessage,
+  getCashNoteMessage,
+  isCashMovementNoteRequired,
+  validateCashAmount,
+  validateCashNote,
+} from "@/lib/cashMovement";
+import type { CashMovementResult, CashMovementType } from "@/lib/cashMovement";
 
 const PANEL = "mx-auto flex w-full max-w-sm flex-col gap-4 rounded-2xl bg-white p-6 shadow-sm";
 const SCREEN = "flex min-h-0 flex-1 items-center justify-center bg-neutral-50 p-4";
@@ -58,6 +69,7 @@ export function EmployeeLockCard({
   recovery,
   onSubmit,
   onTimeClock,
+  onCashMovement,
 }: {
   busy: boolean;
   error: string | null;
@@ -66,6 +78,7 @@ export function EmployeeLockCard({
   onSubmit: (employeeCode: string, pin: string) => void;
   /** Opens the Time Clock. Never unlocks the POS. */
   onTimeClock?: () => void;
+  onCashMovement?: () => void;
 }) {
   const [employeeCode, setEmployeeCode] = useState("");
   const [pin, setPin] = useState("");
@@ -150,6 +163,21 @@ export function EmployeeLockCard({
             onClick={onTimeClock}
           >
             Time Clock
+          </button>
+        )}
+
+        {/* v1.3 Feature 1D -- a THIRD door, and the same reasoning as the Time
+            Clock's: a till may need cash dropped to the safe before anybody has
+            signed it in, and the employee who authorizes that is not necessarily
+            about to operate it. Pressing this never unlocks the POS. */}
+        {onCashMovement !== undefined && (
+          <button
+            type="button"
+            className={SECONDARY}
+            disabled={busy}
+            onClick={onCashMovement}
+          >
+            Cash Movement
           </button>
         )}
       </form>
@@ -613,6 +641,7 @@ export function DailyRegisterStatus({
   onSwitchEmployee,
   onLogout,
   onTimeClock,
+  onCashMovement,
 }: {
   employee: EmployeeSession;
   daily: DailyRegisterContext;
@@ -627,6 +656,13 @@ export function DailyRegisterStatus({
    * out, switched, or losing the cart they are part way through.
    */
   onTimeClock?: () => void;
+  /**
+   * v1.3 Feature 1D — a movement authorized over this operator's shoulder.
+   *
+   * A manager may record a paid-out on this till without Employee A being rung
+   * out, switched, or losing the cart they are part way through.
+   */
+  onCashMovement?: () => void;
 }) {
   return (
     <div className="flex flex-col gap-2 rounded-xl bg-white p-3 text-sm shadow-sm">
@@ -665,6 +701,16 @@ export function DailyRegisterStatus({
               onClick={onTimeClock}
             >
               Time Clock
+            </button>
+          )}
+          {onCashMovement !== undefined && (
+            <button
+              type="button"
+              className="rounded-lg border border-neutral-300 px-3 py-1.5"
+              disabled={busy}
+              onClick={onCashMovement}
+            >
+              Cash Movement
             </button>
           )}
         </span>
@@ -807,6 +853,268 @@ export function TimeClockPanel({
 
         <button type="submit" className={PRIMARY} disabled={busy || !ready || action === null}>
           {busy ? "Sending…" : "Confirm"}
+        </button>
+
+        <button type="button" className={SECONDARY} disabled={busy} onClick={onDismiss}>
+          Cancel
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * v1.3 Feature 1D — the Cash Movement panel.
+ *
+ * FOUR DELIBERATE STEPS. Choose the kind, authenticate, enter the money, then
+ * REVIEW before anything is sent. The review screen exists because these records
+ * are permanent and this checkpoint builds no correction path: the cost of a
+ * mistyped amount is forever, and the cost of one more tap is nothing. Reaching
+ * the review screen sends nothing -- only the final Confirm does.
+ *
+ * IT SHOWS WHAT HAPPENED, NOT WHAT THE DRAWER HOLDS. No expected cash, no
+ * resulting balance, no "the drawer should contain". Feature 1D records source
+ * events, and a till that displayed drawer arithmetic would be doing it against a
+ * starting figure nobody ever counted.
+ *
+ * IT OPENS NOTHING. Using this panel signs nobody into the POS, rings the current
+ * operator out, or touches the cart. A manager may authorize a paid-out over a
+ * cashier's shoulder and hand the till straight back.
+ */
+export function CashMovementPanel({
+  busy,
+  result,
+  noDailyContext,
+  onSubmit,
+  onDismiss,
+}: {
+  busy: boolean;
+  /** The server's answer, success or refusal. Nothing is computed locally. */
+  result: CashMovementResult | null;
+  /**
+   * This till has no authoritative business day yet, so there is nothing for a
+   * movement to belong to -- and a movement may not start one. Refused here, and
+   * refused again by the server.
+   */
+  noDailyContext: boolean;
+  onSubmit: (
+    type: CashMovementType,
+    employeeCode: string,
+    pin: string,
+    amount: string,
+    note: string | null
+  ) => void;
+  onDismiss: () => void;
+}) {
+  const [type, setType] = useState<CashMovementType | null>(null);
+  const [employeeCode, setEmployeeCode] = useState("");
+  const [pin, setPin] = useState("");
+  const [amountText, setAmountText] = useState("");
+  const [noteText, setNoteText] = useState("");
+  const [reviewing, setReviewing] = useState(false);
+
+  // THE SERVER'S ANSWER, SHOWN AS IT CAME. The amount and the instant are the
+  // ones that were stored, so what the employee reads matches the record.
+  if (result !== null && result.ok) {
+    return (
+      <div className={SCREEN}>
+        <div className={PANEL}>
+          <h1 className="text-lg font-semibold text-neutral-900">
+            {getCashMovementLabel(result.movementType)} recorded
+          </h1>
+          <p className="text-2xl font-semibold text-neutral-900">{result.amount}</p>
+          {result.note !== null && <p className="text-sm text-neutral-600">{result.note}</p>}
+          <p className="text-sm text-neutral-600">{result.employeeName}</p>
+          <p className="text-sm text-neutral-600">{result.occurredAt}</p>
+          <button type="button" className={PRIMARY} onClick={onDismiss}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // No business day on this till yet. The only useful thing to say is how to get
+  // one, and it is not through this panel.
+  if (noDailyContext) {
+    return (
+      <div className={SCREEN}>
+        <div className={PANEL}>
+          <h1 className="text-lg font-semibold text-neutral-900">Cash Movement</h1>
+          <p className="text-sm text-red-600">{getCashMovementMessage("no_daily_context")}</p>
+          <button type="button" className={SECONDARY} onClick={onDismiss}>
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (type === null) {
+    return (
+      <div className={SCREEN}>
+        <div className={PANEL}>
+          <h1 className="text-lg font-semibold text-neutral-900">Cash Movement</h1>
+          {CASH_MOVEMENT_TYPES.map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={SECONDARY}
+              disabled={busy}
+              onClick={() => setType(option)}
+            >
+              {getCashMovementLabel(option)}
+            </button>
+          ))}
+          <button type="button" className={SECONDARY} disabled={busy} onClick={onDismiss}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const amount = validateCashAmount(amountText);
+  const note = validateCashNote(noteText, type);
+  const ready =
+    isValidEmployeeCodeShape(employeeCode) &&
+    isValidEmployeePinShape(pin) &&
+    amount.ok &&
+    note.ok;
+
+  // THE REVIEW STEP. Nothing has been sent to reach this screen, and nothing is
+  // sent until Confirm.
+  if (reviewing && amount.ok && note.ok) {
+    return (
+      <div className={SCREEN}>
+        <div className={PANEL}>
+          <h1 className="text-lg font-semibold text-neutral-900">Confirm</h1>
+          <p className="text-sm text-neutral-600">{getCashMovementLabel(type)}</p>
+          {/* The exact amount, rendered by the same money formatter the rest of
+              the POS uses -- not the raw keystrokes. */}
+          <p className="text-2xl font-semibold text-neutral-900">{amount.canonical}</p>
+          {note.note !== null && <p className="text-sm text-neutral-600">{note.note}</p>}
+
+          {result !== null && !result.ok && (
+            <p className="text-sm text-red-600">{result.message}</p>
+          )}
+
+          <button
+            type="button"
+            className={PRIMARY}
+            disabled={busy}
+            onClick={() => onSubmit(type, employeeCode, pin, amount.canonical, note.note)}
+          >
+            {busy ? "Recording…" : "Confirm"}
+          </button>
+          <button
+            type="button"
+            className={SECONDARY}
+            disabled={busy}
+            onClick={() => setReviewing(false)}
+          >
+            Back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={SCREEN}>
+      <form
+        className={PANEL}
+        onSubmit={(event) => {
+          event.preventDefault();
+          // TO THE REVIEW SCREEN, NOT TO THE SERVER.
+          if (!busy && ready) setReviewing(true);
+        }}
+      >
+        <h1 className="text-lg font-semibold text-neutral-900">
+          {getCashMovementLabel(type)}
+        </h1>
+
+        <label className="text-sm text-neutral-700" htmlFor="cash-movement-code">
+          Employee ID
+        </label>
+        <input
+          id="cash-movement-code"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={3}
+          placeholder="000"
+          value={employeeCode}
+          disabled={busy}
+          onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        <label className="text-sm text-neutral-700" htmlFor="cash-movement-pin">
+          PIN
+        </label>
+        <input
+          id="cash-movement-pin"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          type="password"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          maxLength={4}
+          placeholder="••••"
+          value={pin}
+          disabled={busy}
+          onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
+        />
+
+        <label className="text-sm text-neutral-700" htmlFor="cash-movement-amount">
+          Amount
+        </label>
+        {/* TEXT, NOT number. The typed digits are what decide the precision, and
+            a number input would hand this a float. inputMode gets the numeric
+            keypad on a till without changing what the value is. */}
+        <input
+          id="cash-movement-amount"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          placeholder="0.00"
+          value={amountText}
+          disabled={busy}
+          onChange={(event) => setAmountText(event.target.value)}
+        />
+        {amountText.trim() !== "" && !amount.ok && (
+          <p className="text-sm text-red-600">{getCashAmountMessage(amount.problem)}</p>
+        )}
+
+        <label className="text-sm text-neutral-700" htmlFor="cash-movement-note">
+          {isCashMovementNoteRequired(type) ? "Reason" : "Reason (optional)"}
+        </label>
+        {/* NO maxLength. Truncating as somebody types hides that their reason was
+            too long; the rule is stated, and an over-length note is refused with
+            a message rather than silently shortened. */}
+        <textarea
+          id="cash-movement-note"
+          className="rounded-xl border border-neutral-300 px-4 py-3 text-base"
+          rows={2}
+          autoComplete="off"
+          value={noteText}
+          disabled={busy}
+          onChange={(event) => setNoteText(event.target.value)}
+        />
+        {!note.ok && noteText.trim() !== "" && (
+          <p className="text-sm text-red-600">{getCashNoteMessage(note.problem)}</p>
+        )}
+
+        {/* The server's wording, verbatim -- including the one generic answer
+            covering an unknown ID, a wrong PIN and a deactivated employee. */}
+        {result !== null && !result.ok && (
+          <p className="text-sm text-red-600">{result.message}</p>
+        )}
+
+        <button type="submit" className={PRIMARY} disabled={busy || !ready}>
+          Review
         </button>
 
         <button type="button" className={SECONDARY} disabled={busy} onClick={onDismiss}>

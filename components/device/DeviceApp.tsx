@@ -32,9 +32,13 @@ import {
   DailyRegisterStatus,
   EmployeeLockCard,
   TimeClockPanel,
+  CashMovementPanel,
 } from "@/components/device/PosGates";
 import { clockInEmployee, clockOutEmployee, newTimeClockRequestId } from "@/lib/timeClock.rpc";
 import type { TimeClockAction, TimeClockResult } from "@/lib/timeClock";
+import { newCashMovementRequestId, recordCashMovement } from "@/lib/cashMovement.rpc";
+import { cashMovementFailure } from "@/lib/cashMovement";
+import type { CashMovementResult, CashMovementType } from "@/lib/cashMovement";
 import {
   applyDeviceConfigUpdate,
   completeDeviceSaleV5,
@@ -478,6 +482,14 @@ export default function DeviceApp() {
   const [timeClockBusy, setTimeClockBusy] = useState(false);
   const [timeClockResult, setTimeClockResult] = useState<TimeClockResult | null>(null);
   const timeClockInFlightRef = useRef(false);
+
+  // v1.3 Feature 1D — the Cash Movement panel's own state, kept entirely apart
+  // from the gate's. Opening it changes no authority, and closing it restores
+  // whatever was on screen.
+  const [cashMovementOpen, setCashMovementOpen] = useState(false);
+  const [cashMovementBusy, setCashMovementBusy] = useState(false);
+  const [cashMovementResult, setCashMovementResult] = useState<CashMovementResult | null>(null);
+  const cashMovementInFlightRef = useRef(false);
 
   useEffect(() => {
     gateRef.current = gate;
@@ -1088,6 +1100,77 @@ export default function DeviceApp() {
   const dismissTimeClock = useCallback(() => {
     setTimeClockOpen(false);
     setTimeClockResult(null);
+  }, []);
+
+  /**
+   * v1.3 Feature 1D — records one cash movement the employee has just confirmed.
+   *
+   * IT TOUCHES NO AUTHORITY. No POS session is created, switched or ended, the
+   * current operator is untouched, the cart is untouched, and no clock is
+   * punched. The employee who authorized this may not be the one operating the
+   * till, and after it lands they still are not.
+   *
+   * THE BUSINESS DAY IS AN EXPECTATION, NOT A CLAIM. The register session id is
+   * the one this till last heard from the server, sent so the server can refuse a
+   * movement whose day changed underneath it — the 23:59:59 case. The server
+   * derives the real one itself and this never overrides it.
+   *
+   * ONE REQUEST ID PER CONFIRMED ATTEMPT. A lost reply can be retried by pressing
+   * Confirm again, and the server answers the repeat with the original record
+   * rather than moving the money twice. Nothing is stored locally and nothing is
+   * retried automatically — a cash record must never appear without a person
+   * confirming it.
+   */
+  const handleCashMovement = useCallback(
+    async (
+      type: CashMovementType,
+      employeeCode: string,
+      pin: string,
+      amount: string,
+      note: string | null
+    ) => {
+      if (cashMovementInFlightRef.current) {
+        return;
+      }
+
+      // No business day on this till, so there is nothing for this money to
+      // belong to — and a movement may not start one. The panel already refuses
+      // this, and refusing again here is what makes that a rule rather than a
+      // screen.
+      const expectedRegisterSessionId = gateRef.current.daily?.registerSessionId;
+
+      if (expectedRegisterSessionId === undefined) {
+        setCashMovementResult(cashMovementFailure("no_daily_context"));
+        return;
+      }
+
+      cashMovementInFlightRef.current = true;
+      setCashMovementBusy(true);
+      setCashMovementResult(null);
+
+      try {
+        const result = await recordCashMovement(type, {
+          employeeCode,
+          pin,
+          amount,
+          note,
+          expectedRegisterSessionId,
+          requestId: newCashMovementRequestId(),
+        });
+
+        setCashMovementResult(result);
+      } finally {
+        setCashMovementBusy(false);
+        cashMovementInFlightRef.current = false;
+      }
+    },
+    []
+  );
+
+  /** Closes the panel and forgets the answer. Authority is untouched either way. */
+  const dismissCashMovement = useCallback(() => {
+    setCashMovementOpen(false);
+    setCashMovementResult(null);
   }, []);
 
   /**
@@ -3027,6 +3110,10 @@ export default function DeviceApp() {
               setTimeClockResult(null);
               setTimeClockOpen(true);
             }}
+            onCashMovement={() => {
+              setCashMovementResult(null);
+              setCashMovementOpen(true);
+            }}
           />
         ) : posGate === "timezone" ? (
           // THE ONE SETUP PROBLEM A CASHIER MUST NOT WORK AROUND. No timezone
@@ -3078,7 +3165,27 @@ export default function DeviceApp() {
         />
       ) : null;
 
-      const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;
+      // v1.3 Feature 1D — the same layering as the Time Clock: it sits ABOVE
+      // whatever was showing, including the employee lock card, and dismissing it
+      // puts the screen back exactly as it was. It never replaces the login form,
+      // and opening it unlocks nothing.
+      //
+      // The DAILY comes from the gate, not from this panel: a movement may not
+      // bring a business day into existence, so with no daily context the panel
+      // says so and offers nothing else.
+      const cashMovementOverlay = cashMovementOpen ? (
+        <CashMovementPanel
+          busy={cashMovementBusy}
+          result={cashMovementResult}
+          noDailyContext={gate.daily === null}
+          onSubmit={(type, employeeCode, pin, amount, note) => {
+            void handleCashMovement(type, employeeCode, pin, amount, note);
+          }}
+          onDismiss={dismissCashMovement}
+        />
+      ) : null;
+
+      const activeOverlay = cashMovementOverlay ?? timeClockOverlay ?? gateOverlay ?? overlay;
 
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
@@ -3139,6 +3246,10 @@ export default function DeviceApp() {
               onTimeClock={() => {
                 setTimeClockResult(null);
                 setTimeClockOpen(true);
+              }}
+              onCashMovement={() => {
+                setCashMovementResult(null);
+                setCashMovementOpen(true);
               }}
             />
           )}

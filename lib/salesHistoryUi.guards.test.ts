@@ -80,7 +80,9 @@ describe("opening a till screen must not destroy the cart", () => {
     // strictly stronger than before.
     expect(r).toContain("const overlay =");
     // v1.3 Feature 1C — one more term in the same chain, same slot.
-    expect(r).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
+        // v1.3 Feature 1D added a fourth layer. The property is unchanged: ONE
+    // covering slot, and the POS underneath stays mounted.
+    expect(r).toContain("const activeOverlay = cashMovementOverlay ?? timeClockOverlay ?? gateOverlay ?? overlay;");
     expect(r).toContain("{activeOverlay !== null && (");
     expect(r).toContain("<PosRuntime");
   });

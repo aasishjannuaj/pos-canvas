@@ -235,7 +235,9 @@ describe("the POS underneath stays mounted and inert", () => {
     // unchanged and now covers one more overlay: everything that covers the
     // POS arrives through `activeOverlay`, above a PosRuntime that stays
     // mounted.
-    expect(app).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
+        // v1.3 Feature 1D added a fourth layer. The property is unchanged: ONE
+    // covering slot, and the POS underneath stays mounted.
+    expect(app).toContain("const activeOverlay = cashMovementOverlay ?? timeClockOverlay ?? gateOverlay ?? overlay;");
   });
 
   it("the POS subtree is inert whenever the lock is up", () => {

@@ -366,7 +366,9 @@ describe("using the Time Clock changes no POS authority", () => {
   it("the panel overlays the gates rather than replacing the login form", () => {
     const source = read(DEVICE_APP);
 
-    expect(source).toContain("const activeOverlay = timeClockOverlay ?? gateOverlay ?? overlay;");
+        // v1.3 Feature 1D added a fourth layer. The property is unchanged: ONE
+    // covering slot, and the POS underneath stays mounted.
+    expect(source).toContain("const activeOverlay = cashMovementOverlay ?? timeClockOverlay ?? gateOverlay ?? overlay;");
     // The lock card keeps its own form and gains only a secondary action.
     expect(read(POS_GATES)).toContain("Sign In");
     expect(read(POS_GATES)).toContain("Time Clock");
@@ -421,12 +423,25 @@ describe("the rest of the product is unaware", () => {
     }
   });
 
-  it("no accepted Feature 1B migration mentions the Time Clock", () => {
+  it("no other migration touches the Time Clock's table", () => {
+    // READS CODE, NOT PROSE OR PATTERNS. v1.3 Feature 1D's migration NAMES this
+    // table in its own verification block -- inside a quoted regex, to raise if
+    // its cash-movement contract ever referenced the Time Clock. That is the
+    // opposite of touching it, and a mention test would report the guard as the
+    // violation. Comments and single-quoted literals are dropped, so what remains
+    // is DDL and DML: a real `insert into public.employee_time_sessions` or an
+    // `alter table` is still caught, which is the property that matters.
     for (const file of readdirSync(join(repoRoot, "supabase/migrations"))) {
       if (!file.endsWith(".sql") || file.startsWith("20260927120000")) continue;
 
+      const code = read(join("supabase/migrations", file))
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("--"))
+        .join("\n")
+        .replace(/'(?:[^']|'')*'/g, "''");
+
       expect(`${file}: employee_time_sessions`).toBe(`${file}: employee_time_sessions`);
-      expect(read(join("supabase/migrations", file))).not.toContain("employee_time_sessions");
+      expect(code).not.toContain("employee_time_sessions");
     }
   });
 

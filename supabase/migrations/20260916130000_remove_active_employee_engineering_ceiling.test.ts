@@ -644,7 +644,14 @@ describe("selector and single-hash login are untouched", () => {
     // required to reuse this exact bcrypt path rather than grow a second,
     // weaker one. The property this guard protects is unchanged: the ONLY
     // functions that verify a PIN are the ones whose job is authentication.
+    // v1.3 Feature 1D — the cash-movement contract verifies the hash and writes
+    // the limiters for the same reason the Time Clock does: authorizing a drop or
+    // a paid-out IS a PIN door, and a door that did not feed the counters would be
+    // the weak one. The property is unchanged — the functions that verify a PIN
+    // and touch the limiters are still exactly the ones whose job is
+    // authentication.
     expect(verifiers.sort()).toEqual([
+      "cash_movement_append(text,text,text,numeric,text,uuid,uuid)",
       "clock_in_employee(text,text,uuid)",
       "clock_out_employee(text,text,uuid)",
       "employee_login(uuid,text)",
