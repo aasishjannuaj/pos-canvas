@@ -42,6 +42,7 @@ export type TimeClockErrorCode =
   | "already_clocked_in"
   | "not_clocked_in"
   | "request_required"
+  | "request_conflict"
   | "offline"
   | "unavailable";
 
@@ -72,6 +73,7 @@ const TIME_CLOCK_ERROR_CODES: readonly TimeClockErrorCode[] = [
   "already_clocked_in",
   "not_clocked_in",
   "request_required",
+  "request_conflict",
   "offline",
   "unavailable",
 ];
@@ -86,6 +88,11 @@ const TIME_CLOCK_MESSAGES: Record<TimeClockErrorCode, string> = {
   already_clocked_in: "You are already clocked in.",
   not_clocked_in: "You are not clocked in.",
   request_required: "That did not go through. Try again.",
+  // DELIBERATELY BLAND. This means the request id already belongs to somebody
+  // else's punch. Saying so would confirm that another employee used this till
+  // and when -- and the person reading it can do nothing with that. They press
+  // the button again and get a fresh id.
+  request_conflict: "Please try again.",
   offline: "This till is offline. Time Clock needs a connection.",
   unavailable: "The Time Clock is unavailable right now.",
 };

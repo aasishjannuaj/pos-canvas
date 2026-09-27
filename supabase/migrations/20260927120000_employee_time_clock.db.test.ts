@@ -13,7 +13,7 @@
 // the proof is Postgres's own pg_blocking_pids() rather than a stopwatch.
 import { execFileSync, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -894,5 +894,151 @@ maybe("only the two functions can reach the table", () => {
       (select count(*) from public.register_sessions)::text || '|' ||
       (select count(*) from public.orders)::text || '|' ||
       (select count(*) from public.inventory_transactions)::text`)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Replay ownership: a request id identifies a row, never a person
+// ---------------------------------------------------------------------------
+//
+// THE DEFECT THIS PINS. The first cut resolved a replay by project and request
+// id alone. A request id is unique per business, so it found the right row —
+// but said nothing about whose it was. The next employee to authenticate could
+// present a uuid they happened to hold and be handed somebody else's session
+// id and punch times as their own success. Ownership is now part of the replay.
+
+maybe("a replay must belong to the employee who just authenticated", () => {
+  it("1-2. Ada's Clock In replays for Ada", () => {
+    resetClock(DB);
+    const first = clockIn(DB, 1, "001", "2222", uuid(70));
+    const again = clockIn(DB, 1, "001", "2222", uuid(70));
+
+    expect(field(first, "ok")).toBe("true");
+    expect(field(again, "ok")).toBe("true");
+    expect(field(again, "timeSessionId")).toBe(field(first, "timeSessionId"));
+    expect(field(again, "replayed")).toBe("true");
+  });
+
+  it("3. Bo presenting Ada's Clock In request gets a conflict, and nothing moves", () => {
+    resetClock(DB);
+    const ada = clockIn(DB, 1, "001", "2222", uuid(71));
+    const adaRow = sessionRow(DB, field(ada, "timeSessionId"));
+
+    const bo = clockIn(DB, 2, "002", "3333", uuid(71));
+
+    expect(field(bo, "ok")).toBe("false");
+    expect(field(bo, "error")).toBe("request_conflict");
+
+    // 6. Bo learns NOTHING about Ada's shift.
+    expect(field(bo, "timeSessionId")).toBe("");
+    expect(field(bo, "clockedInAt")).toBe("");
+    expect(field(bo, "clockedOutAt")).toBe("");
+
+    // Ada's row is untouched, and Bo has no shift at all.
+    expect(sessionRow(DB, field(ada, "timeSessionId"))).toBe(adaRow);
+    expect(openCount(DB, EMPLOYEE)).toBe("1");
+    expect(openCount(DB, EMPLOYEE_B)).toBe("0");
+    expect(sql(DB, `select count(*)::text from public.employee_time_sessions
+                    where employee_id='${EMPLOYEE_B}'`)).toBe("0");
+  });
+
+  it("4. the same ownership rule holds for Clock Out", () => {
+    resetClock(DB);
+    clockIn(DB, 1, "001", "2222", uuid(72));
+    clockIn(DB, 2, "002", "3333", uuid(73));
+
+    const adaOut = clockOut(DB, 1, "001", "2222", uuid(74));
+    expect(field(adaOut, "ok")).toBe("true");
+    const adaRow = sessionRow(DB, field(adaOut, "timeSessionId"));
+    const boOpen = sql(DB, `select id::text from public.employee_time_sessions
+                            where employee_id='${EMPLOYEE_B}' and clocked_out_at is null`);
+
+    // Ada replays her own close: original answer, no re-stamp.
+    const adaAgain = clockOut(DB, 1, "001", "2222", uuid(74));
+    expect(field(adaAgain, "replayed")).toBe("true");
+    expect(field(adaAgain, "clockedOutAt")).toBe(field(adaOut, "clockedOutAt"));
+
+    // Bo presents Ada's close id.
+    const bo = clockOut(DB, 2, "002", "3333", uuid(74));
+
+    expect(field(bo, "error")).toBe("request_conflict");
+    expect(field(bo, "timeSessionId")).toBe("");
+    expect(field(bo, "clockedInAt")).toBe("");
+    expect(field(bo, "clockedOutAt")).toBe("");
+
+    // Ada's row unchanged; Bo is still clocked in.
+    expect(sessionRow(DB, field(adaOut, "timeSessionId"))).toBe(adaRow);
+    expect(sql(DB, `select coalesce(clocked_out_at::text,'OPEN')
+                    from public.employee_time_sessions where id='${boOpen}'`)).toBe("OPEN");
+    expect(openCount(DB, EMPLOYEE_B)).toBe("1");
+  });
+
+  it("5. the same uuid in ANOTHER business is a separate record entirely", () => {
+    resetClock(DB);
+    sql(DB, `delete from public.employee_time_sessions`);
+
+    const shared = uuid(75);
+    const here = clockIn(DB, 1, "001", "2222", shared);
+    const there = asRole(DB, OTHER_USER,
+      `select public.clock_in_employee('001','4444','${shared}'::uuid)::text`);
+
+    expect(field(here, "ok")).toBe("true");
+    expect(field(there, "ok")).toBe("true");
+    // Two different shifts, for two different people, in two different shops.
+    expect(field(there, "timeSessionId")).not.toBe(field(here, "timeSessionId"));
+    expect(sql(DB, `select count(*)::text from public.employee_time_sessions
+                    where clock_in_request_id='${shared}'`)).toBe("2");
+    expect(sql(DB, `select count(distinct project_id)::text from public.employee_time_sessions
+                    where clock_in_request_id='${shared}'`)).toBe("2");
+
+    sql(DB, `delete from public.employee_time_sessions`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NEGATIVE CONTROL: remove the ownership comparison and watch the leak return
+// ---------------------------------------------------------------------------
+
+maybe("the ownership check is what stops the cross-employee replay", () => {
+  const BROKEN = "tc_broken";
+
+  it("NC. without it, Bo receives Ada's session id as his own success", () => {
+    const original = readFileSync(join(migrationsDir, MIGRATION), "utf8");
+
+    // Exactly the first cut: resolve a replay by request id alone.
+    const mutated = original.replaceAll(
+      `    if v_existing.employee_id is distinct from v_employee.id then
+      return jsonb_build_object('ok', false, 'error', 'request_conflict');
+    end if;
+
+`,
+      ""
+    );
+
+    expect(mutated).not.toBe(original);
+
+    freshDatabase(BROKEN, false);
+    // Its own verification block would catch this, so that is disabled too —
+    // which is itself evidence the block is load-bearing.
+    const withoutGuard = mutated.replace(
+      "raise exception '1C: a Time Clock replay does not prove row ownership.';",
+      "raise notice 'ownership guard disabled for this control';"
+    );
+    pg("psql", [...psqlArgs(BROKEN), "--single-transaction", "-q", "-c", withoutGuard]);
+    seed(BROKEN);
+
+    const ada = clockIn(BROKEN, 1, "001", "2222", uuid(80));
+    const bo = clockIn(BROKEN, 2, "002", "3333", uuid(80));
+
+    // THE LEAK, REPRODUCED: Bo is told he clocked in, and handed Ada's row.
+    expect(field(bo, "ok")).toBe("true");
+    expect(field(bo, "timeSessionId")).toBe(field(ada, "timeSessionId"));
+    expect(field(bo, "clockedInAt")).toBe(field(ada, "clockedInAt"));
+
+    // Which is exactly what the corrected tests above forbid.
+    expect(
+      sql(BROKEN, `select count(*)::text from public.employee_time_sessions
+                   where employee_id='${EMPLOYEE_B}'`)
+    ).toBe("0");
   });
 });

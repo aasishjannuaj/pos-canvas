@@ -150,6 +150,18 @@ describe("refusals", () => {
     expect(result.ok === false && result.message).toContain("2 minutes");
   });
 
+  it("carries a replay-ownership conflict through, saying nothing else", () => {
+    const result = parseTimeClockResult({ ok: false, error: "request_conflict" });
+
+    expect(result).toMatchObject({ ok: false, error: "request_conflict" });
+    // Deliberately bland: confirming that somebody else used this till, and
+    // when, is information the reader cannot act on and should not have.
+    expect(result.ok === false && result.message).toBe("Please try again.");
+    expect(result.ok === false && result.message).not.toMatch(
+      /employee|another|already|someone|shift/i
+    );
+  });
+
   it("maps an unrecognised error to unavailable rather than trusting it", () => {
     expect(parseTimeClockResult({ ok: false, error: "kaboom" })).toMatchObject({
       error: "unavailable",
@@ -173,6 +185,7 @@ describe("the messages an employee reads", () => {
     "already_clocked_in",
     "not_clocked_in",
     "request_required",
+    "request_conflict",
     "offline",
     "unavailable",
   ];

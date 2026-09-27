@@ -254,14 +254,26 @@ begin
   end if;
 
   -- A retry whose first reply was lost gets its ORIGINAL answer, not a second
-  -- shift. Scoped to the project so no business can resolve another's request.
-  select s.id, s.clocked_in_at
+  -- shift.
+  --
+  -- OWNERSHIP IS PART OF THE REPLAY, NOT AN AFTERTHOUGHT. A request id is
+  -- unique per business, so it identifies a row -- but it says nothing about
+  -- WHOSE row. Matching on the id alone would hand the next employee to
+  -- authenticate somebody else's session id and punch times as their own
+  -- success, simply for presenting a uuid they happened to have. So the row
+  -- must also belong to the employee who just proved who they are; anything
+  -- else is a conflict that changes nothing and reveals nothing.
+  select s.id, s.employee_id, s.clocked_in_at
     into v_existing
   from public.employee_time_sessions s
   where s.project_id = v_device.project_id
     and s.clock_in_request_id = p_request_id;
 
   if found then
+    if v_existing.employee_id is distinct from v_employee.id then
+      return jsonb_build_object('ok', false, 'error', 'request_conflict');
+    end if;
+
     return jsonb_build_object(
       'ok', true,
       'outcome', 'clocked_in',
@@ -291,13 +303,44 @@ begin
   -- offer its own.
   v_started_at := clock_timestamp();
 
-  insert into public.employee_time_sessions (
-    project_id, employee_id, clocked_in_at, clock_in_paired_device_id, clock_in_request_id
-  )
-  values (
-    v_device.project_id, v_employee.id, v_started_at, v_device.id, p_request_id
-  )
-  returning id into v_session_id;
+  -- THE INDEXES ARE THE LAST WORD. The employee row lock serialises the
+  -- ordinary case, but a request that arrived against a different employee row
+  -- -- somebody else's id, replayed -- never took this lock at all. Catching
+  -- the violation re-resolves it rather than letting a raw constraint error
+  -- reach a till.
+  begin
+    insert into public.employee_time_sessions (
+      project_id, employee_id, clocked_in_at, clock_in_paired_device_id, clock_in_request_id
+    )
+    values (
+      v_device.project_id, v_employee.id, v_started_at, v_device.id, p_request_id
+    )
+    returning id into v_session_id;
+  exception
+    when unique_violation then
+      select s.id, s.employee_id, s.clocked_in_at
+        into v_existing
+      from public.employee_time_sessions s
+      where s.project_id = v_device.project_id
+        and s.clock_in_request_id = p_request_id;
+
+      if found then
+        if v_existing.employee_id is distinct from v_employee.id then
+          return jsonb_build_object('ok', false, 'error', 'request_conflict');
+        end if;
+
+        return jsonb_build_object(
+          'ok', true,
+          'outcome', 'clocked_in',
+          'timeSessionId', v_existing.id,
+          'clockedInAt', v_existing.clocked_in_at,
+          'replayed', true
+        );
+      end if;
+
+      -- The other index, then: this employee already has an open shift.
+      return jsonb_build_object('ok', false, 'error', 'already_clocked_in');
+  end;
 
   return jsonb_build_object(
     'ok', true,
@@ -442,13 +485,22 @@ begin
 
   -- A replayed close returns the ORIGINAL close. It must never re-stamp
   -- clocked_out_at: the second answer would move somebody's recorded hours.
-  select s.id, s.clocked_in_at, s.clocked_out_at
+  --
+  -- AND IT MUST BE THIS EMPLOYEE'S CLOSE. The request id identifies a row
+  -- within the business; it does not prove whose. Without the ownership check
+  -- the next person to authenticate could present somebody else's uuid and be
+  -- handed their shift times as a successful clock-out of their own.
+  select s.id, s.employee_id, s.clocked_in_at, s.clocked_out_at
     into v_existing
   from public.employee_time_sessions s
   where s.project_id = v_device.project_id
     and s.clock_out_request_id = p_request_id;
 
   if found then
+    if v_existing.employee_id is distinct from v_employee.id then
+      return jsonb_build_object('ok', false, 'error', 'request_conflict');
+    end if;
+
     return jsonb_build_object(
       'ok', true,
       'outcome', 'clocked_out',
@@ -475,12 +527,19 @@ begin
 
   v_ended_at := clock_timestamp();
 
-  update public.employee_time_sessions s
-  set clocked_out_at             = v_ended_at,
-      clock_out_paired_device_id = v_device.id,
-      clock_out_request_id       = p_request_id
-  where s.id = v_open.id
-    and s.clocked_out_at is null;
+  -- Same last word as the insert: a request id already spent by another
+  -- employee's close must not become this one's, even in a race.
+  begin
+    update public.employee_time_sessions s
+    set clocked_out_at             = v_ended_at,
+        clock_out_paired_device_id = v_device.id,
+        clock_out_request_id       = p_request_id
+    where s.id = v_open.id
+      and s.clocked_out_at is null;
+  exception
+    when unique_violation then
+      return jsonb_build_object('ok', false, 'error', 'request_conflict');
+  end;
 
   return jsonb_build_object(
     'ok', true,
@@ -609,6 +668,15 @@ begin
        where n.nspname = 'public' and p.proname = 'complete_sale_v5'
          and p.prosrc ~ 'employee_time_sessions') <> 0 then
     raise exception '1C: complete_sale_v5 was made aware of the Time Clock.';
+  end if;
+
+  -- THE REPLAY OWNERSHIP RULE, asserted rather than trusted to review: both
+  -- functions must compare the replayed row's employee against the caller.
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.proname in ('clock_in_employee', 'clock_out_employee')
+         and p.prosrc ~ 'v_existing\.employee_id is distinct from v_employee\.id') <> 2 then
+    raise exception '1C: a Time Clock replay does not prove row ownership.';
   end if;
 
   raise notice '1C verified: employee_time_sessions plus two Time Clock functions, and nothing else moved.';

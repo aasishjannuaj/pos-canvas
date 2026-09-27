@@ -150,6 +150,48 @@ describe("the Time Clock functions stay in their own lane", () => {
     });
   }
 
+  it("a replay proves the row belongs to the caller before returning it", () => {
+    // A request id is unique per business, so it identifies a row -- but not
+    // whose. Matching on it alone would hand the next employee to authenticate
+    // somebody else's session id and punch times as their own success.
+    for (const fn of ["clock_in_employee", "clock_out_employee"]) {
+      const body = sqlFunction(fn);
+
+      expect(body).toContain("v_existing.employee_id is distinct from v_employee.id");
+      expect(body).toContain("'error', 'request_conflict'");
+
+      // The ownership test must come BEFORE the success is built.
+      const check = body.indexOf("v_existing.employee_id is distinct from v_employee.id");
+      const success = body.indexOf("'replayed', true");
+      expect(check).toBeLessThan(success);
+    }
+  });
+
+  it("a conflicting replay reveals nothing about the other employee", () => {
+    for (const fn of ["clock_in_employee", "clock_out_employee"]) {
+      const body = sqlFunction(fn);
+      const conflict = body.indexOf("'error', 'request_conflict'");
+      const line = body.slice(body.lastIndexOf("return", conflict), body.indexOf(";", conflict));
+
+      // NEGATIVE CONTROL: the refusal carries the code and nothing else.
+      for (const leaked of ["timeSessionId", "clockedInAt", "clockedOutAt", "employee_id"]) {
+        expect(`${fn}: ${leaked}`).toBe(`${fn}: ${leaked}`);
+        expect(line).not.toContain(leaked);
+      }
+    }
+  });
+
+  it("the replay keys stay project-scoped rather than per employee", () => {
+    const sql = sqlCode();
+
+    // Widening these to include employee_id would let one uuid create separate
+    // punches for different people inside one business.
+    expect(sql).toContain("on public.employee_time_sessions (project_id, clock_in_request_id)");
+    expect(sql).toContain("on public.employee_time_sessions (project_id, clock_out_request_id)");
+    expect(sql).not.toContain("(project_id, employee_id, clock_in_request_id)");
+    expect(sql).not.toContain("(project_id, employee_id, clock_out_request_id)");
+  });
+
   it("clock out finds the BUSINESS open shift, not this till's", () => {
     const body = sqlFunction("clock_out_employee");
     const lookup = body.slice(body.indexOf("into v_open"));
