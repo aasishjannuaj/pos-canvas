@@ -24,6 +24,11 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
+// v1.3 Feature 1E-A — the shared activation decision. The stock rule it applies
+// is lib/cart.ts's own `canAddItemQuantity`, so this replaces a local
+// re-derivation of that rule rather than adding a second policy beside it.
+import { canActivateItem } from "@/lib/itemActivation";
+import type { ItemActivationResult } from "@/lib/itemActivation";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
@@ -353,19 +358,35 @@ export default function PosRuntime({
   // same product with two different modifier selections stays two independent
   // lines. Stock, by contrast, is held against the PRODUCT, so the quantity
   // checks below count every line carrying that itemId.
-  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []) {
+  //
+  // v1.3 Feature 1E-A — this now REPORTS what it did, and the stock rule it
+  // enforces is the shared one.
+  //
+  // ONE RULE, ASKED TWICE, NEVER TWO RULES. The enforcing call still happens
+  // inside the updater against `prev`, because `prev` is the authoritative cart
+  // and moving the guard outside would let two adds batched into one tick both
+  // pass a check made against the same stale snapshot. The second call, before
+  // the dispatch, exists only to give the caller an answer, and it invokes the
+  // identical `canActivateItem` — so the two can disagree about freshness but
+  // never about policy, and the one that controls the mutation is the fresh one.
+  //
+  // `selectionsResolved` is true because this function runs AFTER the modifier
+  // selector: either the product never needed one, or one has been completed.
+  // Stock is therefore the only thing left to decide here.
+  function addToCart(
+    menuItem: MenuItem,
+    selections: CartModifierSelection[] = []
+  ): ItemActivationResult {
+    const reported: ItemActivationResult = canActivateItem(menuItem, cart)
+      ? { status: "added" }
+      : { status: "refused-stock" };
+
     setCart((prev) => {
       const line = createCartItem(menuItem, selections);
       const existing = prev.find((cartItem) => cartItem.lineKey === line.lineKey);
 
-      if (
-        !canAddItemQuantity({
-          item: menuItem,
-          // Across ALL lines of this product, not just this one.
-          currentQuantity: getItemQuantityInCart(prev, menuItem.id),
-          addQuantity: 1,
-        })
-      ) {
+      // The authoritative check, against the cart as it actually is.
+      if (!canActivateItem(menuItem, prev)) {
         return prev;
       }
 
@@ -379,6 +400,8 @@ export default function PosRuntime({
 
       return [...prev, line];
     });
+
+    return reported;
   }
 
   function increaseQuantity(lineKey: string) {

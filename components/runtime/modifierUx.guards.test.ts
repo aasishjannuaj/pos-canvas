@@ -161,7 +161,18 @@ describe("cart identity and rendering", () => {
     const submission = code(read("lib/saleSubmission.ts"));
     expect(submission).toContain("getItemQuantityInCart(cart, itemId)");
     expect(submission).toContain("currentQuantity: 0");
-    expect(runtime).toContain("getItemQuantityInCart(prev, menuItem.id)");
+
+    // v1.3 Feature 1E-A — the runtime's add path still counts PER PRODUCT
+    // against the authoritative `prev` cart; that counting simply moved behind
+    // the shared activation predicate, so a tap and a later barcode cannot end
+    // up applying two different stock rules. Pinned in both halves rather than
+    // by one literal, which keeps the property asserted wherever the call
+    // lives: the runtime must hand `prev` to the shared predicate, and the
+    // shared predicate must aggregate by item id.
+    expect(runtime).toContain("canActivateItem(menuItem, prev)");
+    expect(code(read("lib/itemActivation.ts"))).toContain(
+      "getItemQuantityInCart(cart, item.id)"
+    );
   });
 });
 

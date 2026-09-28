@@ -6,6 +6,13 @@ import type { ModifierGroup } from "@/lib/modifiers";
 // make the two modules import each other.
 import { cloneBrandingLogo, normalizeBrandingLogo } from "@/lib/logoUpload";
 import type { BrandingLogo } from "@/lib/logoUpload";
+// v1.3 Feature 1E-A — the project's optional capabilities live in their own
+// module for the same reason ModifierGroup and BrandingLogo do: normalizing one
+// needs that module's rules, and declaring the type here too would make the two
+// import each other.
+import { normalizeProjectFeatures } from "@/lib/projectFeatures";
+import type { ProjectFeatures } from "@/lib/projectFeatures";
+import { normalizeOptionalBarcode } from "@/lib/barcode";
 
 // Feature 12.1 — the neutral home for ProjectConfig and its nested types,
 // plus the single shared default/starter configuration value. This module
@@ -34,6 +41,17 @@ export type MenuItem = {
   // as Feature 7.5 did for trackInventory/stockQuantity. Absent or empty means
   // the item sells exactly as it always has.
   modifierGroups?: ModifierGroup[];
+  // v1.3 Feature 1E-A — optional and additive, exactly like modifierGroups
+  // above and branding.logo below. A project saved before barcodes existed has
+  // no such key, and normalizeMenuItem resolves that to ABSENT rather than to
+  // "" — "this item has no barcode" must have one spelling, and omitting the
+  // key is what keeps an existing project's canonical generated config (and
+  // therefore its config hash) byte-identical to what it was before this type
+  // gained a field.
+  //
+  // A STRING, ALWAYS. "012345678905" is a UPC-A; as a number it loses its
+  // leading zero and stops scanning. See lib/barcode.ts.
+  barcode?: string;
 };
 
 export type Currency = "USD" | "CAD" | "EUR" | "GBP";
@@ -109,6 +127,11 @@ export type ProjectConfig = {
   businessProfile: BusinessProfile;
   tax: TaxSettings;
   receipt: ReceiptSettings;
+  // v1.3 Feature 1E-A — optional project capabilities. OPTIONAL AND LEFT
+  // ABSENT when nothing was ever configured: absence already means "every
+  // default", so writing a defaults block would change existing projects'
+  // generated-config hashes to say what their silence already said.
+  features?: ProjectFeatures;
 };
 
 const defaultMenuItems: MenuItem[] = [
@@ -256,6 +279,23 @@ export function cloneProjectConfig(config: ProjectConfig): ProjectConfig {
     businessProfile: { ...config.businessProfile },
     tax: { ...config.tax },
     receipt: { ...config.receipt },
+    // v1.3 Feature 1E-A — same shape as the logo above, for both of its
+    // reasons: `features` is a nested object that would otherwise stay shared
+    // by reference between two editor sessions, and the key is re-added ONLY
+    // when present, so a project that configured nothing still clones to a
+    // config with no `features` key at all.
+    //
+    // menuItems are spread individually above, so `barcode` needs nothing here.
+    ...(config.features
+      ? {
+          features: {
+            ...config.features,
+            ...(config.features.barcodeScanning
+              ? { barcodeScanning: { ...config.features.barcodeScanning } }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -313,7 +353,10 @@ export function normalizeCategory(category: unknown): string {
 // Feature 7.5 — normalize menu items loaded from older saved projects that
 // predate stockQuantity/trackInventory, so the app never crashes on missing fields.
 export function normalizeMenuItem(item: MenuItem): MenuItem {
-  return {
+  // v1.3 Feature 1E-A — resolved once, then attached only if it survived.
+  const barcode = normalizeOptionalBarcode(item.barcode);
+
+  const normalized: MenuItem = {
     ...item,
     category: normalizeCategory(item.category),
     trackInventory:
@@ -328,6 +371,19 @@ export function normalizeMenuItem(item: MenuItem): MenuItem {
     // drops any group or option that could not be sold safely.
     modifierGroups: normalizeModifierGroups(item.modifierGroups),
   };
+
+  // v1.3 Feature 1E-A — the key is DELETED rather than set to undefined when
+  // there is no usable barcode. `...item` above would otherwise carry a blank
+  // or malformed stored value straight through, and an explicit
+  // `barcode: undefined` still counts as a key to a canonical serializer — both
+  // of which would change the config hash of a project that has no barcodes.
+  if (barcode === undefined) {
+    delete normalized.barcode;
+  } else {
+    normalized.barcode = barcode;
+  }
+
+  return normalized;
 }
 
 // Feature 11.1 — normalize receipt settings loaded from older saved projects
@@ -454,11 +510,26 @@ export function normalizeBusinessProfile(config: ProjectConfig): BusinessProfile
 }
 
 export function normalizeProjectConfig(config: ProjectConfig): ProjectConfig {
-  return {
+  // v1.3 Feature 1E-A — undefined when nothing was ever configured.
+  const features = normalizeProjectFeatures(config.features);
+
+  const normalized: ProjectConfig = {
     ...config,
     menuItems: config.menuItems.map(normalizeMenuItem),
     branding: normalizeBranding(config.branding),
     businessProfile: normalizeBusinessProfile(config),
     receipt: normalizeReceiptSettings(config.receipt),
   };
+
+  // Same omission rule as barcode above, and it matters for the same reason:
+  // a project that never configured a capability must keep having no `features`
+  // key, so its generated configuration — and that configuration's hash —
+  // stays exactly what it was before this feature existed.
+  if (features === undefined) {
+    delete normalized.features;
+  } else {
+    normalized.features = features;
+  }
+
+  return normalized;
 }
