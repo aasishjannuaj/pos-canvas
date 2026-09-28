@@ -429,10 +429,42 @@ describe("the rest of the product is unaware", () => {
     // its cash-movement contract ever referenced the Time Clock. That is the
     // opposite of touching it, and a mention test would report the guard as the
     // violation. Comments and single-quoted literals are dropped, so what remains
-    // is DDL and DML: a real `insert into public.employee_time_sessions` or an
-    // `alter table` is still caught, which is the property that matters.
+    // is DDL and DML.
+    //
+    // v1.3 Feature 1F -- AN EXPLICIT ALLOW-LIST, NOT A PERMISSION TO READ.
+    //
+    // The original rule was "no later migration may mention this table at all",
+    // which became stale the moment an owner reporting read was authorised. The
+    // fix is NOT "reads are fine": that would let any future migration introduce
+    // another reader of a table whose access is deliberately funnelled through
+    // named contracts. What Control Room authorised is one contract, by name.
+    //
+    // So: a migration is either the table's OWNER, or an AUTHORISED READER that
+    // may name the table only inside the one function it was approved for, or it
+    // may not name the table at all -- the original rule, unchanged. Adding a
+    // reader is a Control Room checkpoint that edits this list, not something a
+    // migration can do by being written.
+    const OWNS_THE_TABLE = "20260927120000";
+
+    /** migration file -> the ONLY functions in it that may name the table. */
+    const AUTHORISED_READERS = new Map<string, readonly string[]>([
+      ["20260928120000_owner_reporting_contracts.sql", ["list_employee_time_sessions"]],
+    ]);
+
+    /** Every write and DDL form. Forbidden in EVERY file, readers included. */
+    const WRITES = [
+      "insert into public.employee_time_sessions",
+      "update public.employee_time_sessions",
+      "delete from public.employee_time_sessions",
+      "truncate public.employee_time_sessions",
+      "alter table public.employee_time_sessions",
+      "drop table public.employee_time_sessions",
+      "create table public.employee_time_sessions",
+      "create table if not exists public.employee_time_sessions",
+    ];
+
     for (const file of readdirSync(join(repoRoot, "supabase/migrations"))) {
-      if (!file.endsWith(".sql") || file.startsWith("20260927120000")) continue;
+      if (!file.endsWith(".sql") || file.startsWith(OWNS_THE_TABLE)) continue;
 
       const code = read(join("supabase/migrations", file))
         .split("\n")
@@ -440,26 +472,46 @@ describe("the rest of the product is unaware", () => {
         .join("\n")
         .replace(/'(?:[^']|'')*'/g, "''");
 
-      // v1.3 Feature 1F — this was a blanket ban on the substring. The property
-      // this test's own comment says "matters" is that no other migration WRITES
-      // to or RESHAPES the table, and that is what is asserted now, form by form.
-      // An owner READ contract (select ... from public.employee_time_sessions,
-      // added by 20260928120000) does not reshape anything and is not the risk
-      // this guard exists for; a write or a DDL still fails here.
       expect(`${file}: employee_time_sessions`).toBe(`${file}: employee_time_sessions`);
 
-      for (const write of [
-        "insert into public.employee_time_sessions",
-        "update public.employee_time_sessions",
-        "delete from public.employee_time_sessions",
-        "truncate public.employee_time_sessions",
-        "alter table public.employee_time_sessions",
-        "drop table public.employee_time_sessions",
-        "create table public.employee_time_sessions",
-        "create table if not exists public.employee_time_sessions",
-      ]) {
+      // No file, authorised or not, may write to or reshape the table.
+      for (const write of WRITES) {
         expect(code.toLowerCase()).not.toContain(write);
       }
+
+      const authorised = AUTHORISED_READERS.get(file);
+
+      if (authorised === undefined) {
+        // The original rule, untouched: not so much as a mention.
+        expect(code).not.toContain("employee_time_sessions");
+        continue;
+      }
+
+      // An authorised reader may name the table ONLY inside the approved
+      // function(s). The file is segmented at each function definition, so a
+      // second function quietly added beside the approved one is caught by name
+      // rather than waved through because the file is on the list.
+      const boundaries = [...code.matchAll(/create or replace function public\.(\w+)/g)];
+
+      // Anything before the first function -- stray DDL, a verification block --
+      // is nobody's approved contract.
+      const preamble = code.slice(0, boundaries[0]?.index ?? code.length);
+      expect(`${file} preamble: employee_time_sessions`)
+        .toBe(`${file} preamble: employee_time_sessions`);
+      expect(preamble).not.toContain("employee_time_sessions");
+
+      boundaries.forEach((match, index) => {
+        const from = match.index as number;
+        const to = (boundaries[index + 1]?.index as number | undefined) ?? code.length;
+        const body = code.slice(from, to);
+
+        if (!body.includes("employee_time_sessions")) return;
+
+        const fn = match[1];
+        expect(`${file}: ${fn} may name employee_time_sessions`)
+          .toBe(`${file}: ${fn} may name employee_time_sessions`);
+        expect(authorised).toContain(fn);
+      });
     }
   });
 
