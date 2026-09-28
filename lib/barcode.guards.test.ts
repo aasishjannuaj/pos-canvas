@@ -207,6 +207,73 @@ describe("nothing is implemented twice", () => {
     expect(addToCart).not.toContain("canAddItemQuantity");
   });
 
+  // v1.3 Feature 1E-A correction — the preflight must never claim a mutation.
+  it("the activation contract states no committed-mutation outcome", () => {
+    const source = stripComments(read(ACTIVATION));
+
+    expect(source).toContain('"ready"');
+    expect(source).not.toContain('"added"');
+    expect(source).toContain("ItemActivationDecision");
+    expect(source).not.toContain("ItemActivationResult");
+
+    // None of the machinery that would be needed to report a real mutation.
+    for (const banned of ["cartRef", "mirror", "useRef", "committed", "receipt"]) {
+      expect(`${ACTIVATION}: ${banned}`).toBe(`${ACTIVATION}: ${banned}`);
+      expect(source).not.toContain(banned);
+    }
+  });
+
+  it("the runtime add path returns void and keeps the authoritative prev check", () => {
+    const runtime = stripComments(read(POS_RUNTIME));
+    const addToCart = runtime.slice(
+      runtime.indexOf("function addToCart"),
+      runtime.indexOf("function increaseQuantity")
+    );
+
+    expect(addToCart).toContain("): void {");
+    expect(addToCart).toContain("canActivateItem(menuItem, prev)");
+    // NEGATIVE CONTROL: the removed prediction, in any of its shapes.
+    for (const banned of ['status: "added"', "return reported", "const reported"]) {
+      expect(`${POS_RUNTIME}: ${banned}`).toBe(`${POS_RUNTIME}: ${banned}`);
+      expect(addToCart).not.toContain(banned);
+    }
+  });
+
+  // The fail-open compatibility default is scoped to one benign capability. It
+  // must not become a framework that grants money, identity or access
+  // capabilities on unreadable config.
+  it("fail-open is scoped to barcodeScanning and is not generalized", () => {
+    const source = stripComments(read(FEATURES));
+
+    // One accessor, naming the one capability it answers for.
+    expect(source.match(/export function is\w+Enabled/g) ?? []).toEqual([
+      "export function isBarcodeScanningEnabled",
+    ]);
+    expect(source).toContain("features?.barcodeScanning?.enabled !== false");
+
+    // No generic resolver that would apply this default to a future capability.
+    // Names a generic, default-granting feature resolver would carry. NOT a
+    // blanket ban on `Record<string, unknown>`, which is the ordinary shape of
+    // the plain-object type guard this module legitimately uses.
+    for (const banned of [
+      "isFeatureEnabled",
+      "resolveFeature",
+      "featureDefaults",
+      "DEFAULT_FEATURES",
+      "Record<string, boolean>",
+      "[featureName",
+      "features[",
+    ]) {
+      expect(`${FEATURES}: ${banned}`).toBe(`${FEATURES}: ${banned}`);
+      expect(source).not.toContain(banned);
+    }
+
+    // And no coercion of truthy/falsy values into the boolean.
+    for (const banned of ["Boolean(", "!!", '=== "false"', "JSON.parse"]) {
+      expect(source).not.toContain(banned);
+    }
+  });
+
   it("the shared activation module owns no rule of its own", () => {
     const source = stripComments(read(ACTIVATION));
 

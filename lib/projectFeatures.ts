@@ -81,9 +81,28 @@ export function normalizeProjectFeatures(value: unknown): ProjectFeatures | unde
 /**
  * May this project use barcode scanning?
  *
- * ONLY AN EXPLICIT `false` DISABLES IT. Missing `features`, missing
- * `barcodeScanning`, and a malformed value all mean yes — which is what makes
- * every pre-1E project work without being migrated or rewritten.
+ * ONLY THE LITERAL BOOLEAN `false` DISABLES IT. Missing `features`, missing
+ * `barcodeScanning`, and any unreadable value all mean yes. So do `"false"` and
+ * `0`: this does not coerce, because turning the STRING "false" into the
+ * boolean false would be inventing a parser for a field whose schema says
+ * boolean, and guessing intent from a value the schema does not define.
+ *
+ * WHY FAIL-OPEN. A till that quietly stopped scanning because of a config typo
+ * presents to a shop as broken hardware — an expensive, hard-to-diagnose
+ * failure. A till that keeps scanning when a malformed flag meant to stop it
+ * costs nothing: scanning adds a product the cashier chose to scan. Between a
+ * silent capability loss and a harmless capability retention, this picks the
+ * second. It also matches how every other normalizer in this codebase treats
+ * malformed input — normalizeCategory falls back to "General",
+ * normalizeModifierGroups to [] — rather than crashing or rejecting a project.
+ *
+ * THIS POLICY IS SCOPED TO BARCODE SCANNING IN v1.3, AND MUST NOT BE
+ * GENERALIZED. It is safe here precisely because the capability is benign.
+ * Fail-open is the WRONG default for anything that gates money, identity or
+ * access — subscriptions, pricing entitlements, employee authorization,
+ * payments — where an unreadable flag must never grant a capability. A future
+ * Features checkpoint that adds such a capability owns its own rule, and must
+ * not inherit this one by putting a member next to `barcodeScanning`.
  *
  * Takes the features value, never a template id and never a whole config, so
  * nothing downstream can accidentally make the answer depend on presentation.

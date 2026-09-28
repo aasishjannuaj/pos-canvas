@@ -1,9 +1,10 @@
 // v1.3 Feature 1E-A — the shared activation decision.
 //
-// WHAT THIS REPLACES. The cart's add path used to return nothing and refuse a
-// stock-exhausted item by silently handing back the previous cart. "The cart
-// did not change" is not evidence of why, so any caller that needed to report a
-// reason had to guess. These tests pin the three outcomes it can now state.
+// WHAT THIS IS. A PREFLIGHT: "on the snapshot you gave me, may this add be
+// attempted, and if not, why". It is explicitly NOT a mutation receipt —
+// `ready` never means the cart changed, because a synchronous answer cannot
+// observe a functional state update. lib/itemActivationRace.test.ts holds the
+// regressions proving why that distinction had to be drawn.
 //
 // AND WHAT IT MUST NOT BECOME. Every rule here is an existing rule called, not
 // restated. If this module ever disagreed with lib/cart.ts about stock, or with
@@ -59,7 +60,7 @@ describe("modifiers come first", () => {
 
     expect(
       resolveItemActivation({ item: product, cart: [], selectionsResolved: true })
-    ).toEqual({ status: "added" });
+    ).toEqual({ status: "ready" });
   });
 
   // NEGATIVE CONTROL ON THE MODIFIER RULE. The live product path decides on
@@ -74,13 +75,13 @@ describe("modifiers come first", () => {
       ],
     } as never);
 
-    expect(resolveItemActivation({ item: malformed, cart: [] })).toEqual({ status: "added" });
+    expect(resolveItemActivation({ item: malformed, cart: [] })).toEqual({ status: "ready" });
   });
 
   it("an item with no groups at all sells directly", () => {
-    expect(resolveItemActivation({ item: item(), cart: [] })).toEqual({ status: "added" });
+    expect(resolveItemActivation({ item: item(), cart: [] })).toEqual({ status: "ready" });
     expect(resolveItemActivation({ item: item({ modifierGroups: [] }), cart: [] })).toEqual({
-      status: "added",
+      status: "ready",
     });
   });
 });
@@ -96,7 +97,7 @@ describe("the stock decision is the cart's own", () => {
     const product = item({ trackInventory: true, stockQuantity: 2 });
 
     expect(resolveItemActivation({ item: product, cart: cartOf(product, 1) })).toEqual({
-      status: "added",
+      status: "ready",
     });
     expect(resolveItemActivation({ item: product, cart: cartOf(product, 2) })).toEqual({
       status: "refused-stock",

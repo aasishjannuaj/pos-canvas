@@ -7,13 +7,20 @@
  * the two paths will drift and a scanned item will eventually behave unlike a
  * tapped one.
  *
- * WHY THIS EXISTS AT ALL: THE CALLER COULD NOT TELL WHAT HAPPENED. Until now
- * the cart's add path returned nothing and refused a stock-exhausted item by
- * silently returning the previous cart. That is defensible for a tap — the
- * cashier watched the card not respond — and indefensible for anything that
- * needs to report, because "the cart did not change" is not evidence of why.
- * Inferring a reason from an unchanged cart is exactly the guess this module
- * exists to remove.
+ * IT IS A PREFLIGHT, NOT A RECEIPT. This module answers "should this add be
+ * attempted, and if not, why" against a cart snapshot the caller hands it. It
+ * does not — and cannot — report whether a mutation committed: the cart is
+ * React state, the authoritative decision happens later inside
+ * `setCart(prev => ...)` against a `prev` this module never sees, and no
+ * synchronous answer can observe it.
+ *
+ * AN EARLIER VERSION OF THIS CONTRACT SAID `added`, AND THAT WAS A LIE. With a
+ * stock ceiling of one, two adds dispatched in the same tick both read the same
+ * render snapshot: the first committed, the second was refused by the updater,
+ * and both were told `added`. The reverse was reachable too — a remove and an
+ * add in one tick produced `refused-stock` from a stale snapshot while the
+ * updater went on to add. Naming the outcome `ready` is the correction: it says
+ * what a preflight can actually know, and nothing beyond it.
  *
  * IT DECIDES NOTHING OF ITS OWN. Every rule here is an existing rule, called
  * rather than restated: `normalizeModifierGroups` from lib/modifiers.ts owns
@@ -40,20 +47,29 @@ import { normalizeModifierGroups } from "@/lib/modifiers";
 import type { MenuItem } from "@/lib/projectConfig";
 
 /**
- * The outcome of asking for one unit of a product.
+ * What a caller should do next with this product.
  *
- * `modifiers-required` is not a refusal — it means the request is legitimate
- * and cannot complete until somebody chooses options. The existing
- * ModifierSelector is what resolves it; activation resumes afterwards with the
- * chosen selections.
+ * `ready` MEANS EXACTLY ONE THING: on the snapshot supplied, this item is
+ * eligible to go through the ordinary add path. It does NOT mean the cart
+ * changed, that the item entered the cart, that stock was committed, or that a
+ * caller may show an "added" message. The add path's own check against a fresh
+ * `prev` decides that, and it may still refuse.
  *
- * `refused-stock` is the only refusal this version can state truthfully,
- * because the stock ceiling is the only rule that can turn a valid request
- * away.
+ * `modifiers-required` is not a refusal — the request is legitimate and cannot
+ * complete until somebody chooses options. The existing ModifierSelector
+ * resolves it; activation resumes afterwards with the chosen selections.
+ *
+ * `refused-stock` means do not issue this add attempt at all. It is the only
+ * refusal this version can state, because the stock ceiling is the only rule
+ * that turns an otherwise-valid request away.
+ *
+ * THERE IS DELIBERATELY NO `added` MEMBER, and adding one back would reinstate
+ * a claim this module cannot support. See the module note.
  */
-export type ItemActivationStatus = "added" | "modifiers-required" | "refused-stock";
+export type ItemActivationStatus = "ready" | "modifiers-required" | "refused-stock";
 
-export type ItemActivationResult = { status: ItemActivationStatus };
+/** The preflight answer. Called a decision, not a result, on purpose. */
+export type ItemActivationDecision = { status: ItemActivationStatus };
 
 /**
  * Would adding one unit of this product succeed right now?
@@ -73,7 +89,12 @@ export function canActivateItem(item: MenuItem, cart: readonly CartItem[]): bool
 }
 
 /**
- * The full activation decision for a product against the current cart.
+ * The preflight decision for a product against a supplied cart snapshot.
+ *
+ * THE SNAPSHOT IS THE CALLER'S, AND IT MAY BE STALE. Measured against queued
+ * but unapplied React updates this answer can be wrong in both directions. That
+ * is accepted, and it is precisely why `ready` is not `added`: the authoritative
+ * guard lives in the add path's own updater, which sees a cart this cannot.
  *
  * ORDER MATTERS, AND MODIFIERS COME FIRST. An item whose options have not been
  * chosen yet is not refused for stock, because the cashier has not finished
@@ -89,7 +110,7 @@ export function resolveItemActivation(input: {
   item: MenuItem;
   cart: readonly CartItem[];
   selectionsResolved?: boolean;
-}): ItemActivationResult {
+}): ItemActivationDecision {
   const { item, cart } = input;
 
   if (
@@ -99,5 +120,5 @@ export function resolveItemActivation(input: {
     return { status: "modifiers-required" };
   }
 
-  return canActivateItem(item, cart) ? { status: "added" } : { status: "refused-stock" };
+  return canActivateItem(item, cart) ? { status: "ready" } : { status: "refused-stock" };
 }

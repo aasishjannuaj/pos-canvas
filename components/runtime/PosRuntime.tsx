@@ -24,11 +24,12 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
-// v1.3 Feature 1E-A — the shared activation decision. The stock rule it applies
-// is lib/cart.ts's own `canAddItemQuantity`, so this replaces a local
+// v1.3 Feature 1E-A — the shared stock predicate. The rule it applies is
+// lib/cart.ts's own `canAddItemQuantity`, so this replaces a local
 // re-derivation of that rule rather than adding a second policy beside it.
+// Only the predicate is imported: this component reports no activation status,
+// because it cannot know one (see addToCart).
 import { canActivateItem } from "@/lib/itemActivation";
-import type { ItemActivationResult } from "@/lib/itemActivation";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
@@ -359,28 +360,23 @@ export default function PosRuntime({
   // lines. Stock, by contrast, is held against the PRODUCT, so the quantity
   // checks below count every line carrying that itemId.
   //
-  // v1.3 Feature 1E-A — this now REPORTS what it did, and the stock rule it
-  // enforces is the shared one.
+  // v1.3 Feature 1E-A — RETURNS NOTHING, DELIBERATELY. An earlier pass had this
+  // report whether the item was added, predicted from the render-time `cart`
+  // before dispatching. That prediction was reachably wrong in both directions:
+  // with a stock ceiling of one, two adds in the same tick both read the same
+  // snapshot and were both told "added" while the updater committed only the
+  // first; and a remove followed by an add in one tick predicted a stock refusal
+  // while the updater went on to add. A synchronous function that dispatches a
+  // functional update cannot observe that update's outcome, so it must not claim
+  // to — and lib/itemActivation.ts is the preflight for callers that need to
+  // decide BEFORE attempting an add.
   //
-  // ONE RULE, ASKED TWICE, NEVER TWO RULES. The enforcing call still happens
-  // inside the updater against `prev`, because `prev` is the authoritative cart
-  // and moving the guard outside would let two adds batched into one tick both
-  // pass a check made against the same stale snapshot. The second call, before
-  // the dispatch, exists only to give the caller an answer, and it invokes the
-  // identical `canActivateItem` — so the two can disagree about freshness but
-  // never about policy, and the one that controls the mutation is the fresh one.
-  //
-  // `selectionsResolved` is true because this function runs AFTER the modifier
-  // selector: either the product never needed one, or one has been completed.
-  // Stock is therefore the only thing left to decide here.
-  function addToCart(
-    menuItem: MenuItem,
-    selections: CartModifierSelection[] = []
-  ): ItemActivationResult {
-    const reported: ItemActivationResult = canActivateItem(menuItem, cart)
-      ? { status: "added" }
-      : { status: "refused-stock" };
-
+  // The check below is the ONE authoritative stock decision, and it stays inside
+  // the updater against `prev` for exactly the reason the prediction failed:
+  // `prev` is the cart as it actually is, including updates queued in this tick.
+  // It calls the same shared predicate the preflight does, so there is one stock
+  // policy, applied at two moments, with the fresh one deciding the mutation.
+  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []): void {
     setCart((prev) => {
       const line = createCartItem(menuItem, selections);
       const existing = prev.find((cartItem) => cartItem.lineKey === line.lineKey);
@@ -400,8 +396,6 @@ export default function PosRuntime({
 
       return [...prev, line];
     });
-
-    return reported;
   }
 
   function increaseQuantity(lineKey: string) {

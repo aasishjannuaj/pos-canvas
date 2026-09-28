@@ -9,6 +9,7 @@ import {
   isBarcodeScanningEnabled,
   normalizeProjectFeatures,
 } from "@/lib/projectFeatures";
+import { defaultProjectConfig, isProjectConfig } from "@/lib/projectConfig";
 
 describe("the compatibility default", () => {
   it("treats a project with no features at all as enabled", () => {
@@ -27,17 +28,71 @@ describe("the compatibility default", () => {
     expect(isBarcodeScanningEnabled({ barcodeScanning: { enabled: true } })).toBe(true);
   });
 
-  // NEGATIVE CONTROL: only an explicit false may disable. Anything unreadable
-  // must fall back to working, never to silently-off — a till that stopped
-  // scanning because of a malformed config would look like broken hardware.
-  it("falls back to enabled for anything it cannot read", () => {
-    for (const features of [
-      { barcodeScanning: {} },
-      { barcodeScanning: { enabled: "false" } },
-      { barcodeScanning: { enabled: 0 } },
-      { barcodeScanning: null },
-    ] as never[]) {
-      expect(isBarcodeScanningEnabled(normalizeProjectFeatures(features))).toBe(true);
+  // ======================================================================
+  // THE LOCKED COMPATIBILITY MATRIX.
+  //
+  // ONLY THE LITERAL BOOLEAN `false` DISABLES BARCODE SCANNING. Everything
+  // else — absent, null, junk, an empty object, the STRING "false", the number
+  // 0 — resolves to enabled. Nothing is coerced: turning "false" into false
+  // would be inventing a parser for a field the schema says is boolean, and
+  // guessing intent from a value the schema does not define.
+  //
+  // Fail-open is correct HERE because the capability is benign: a till that
+  // silently stopped scanning looks like broken hardware, while one that keeps
+  // scanning only adds a product the cashier chose to scan. It is scoped to
+  // barcodeScanning in v1.3 and must not be inherited by any capability that
+  // gates money, identity or access — see the note on isBarcodeScanningEnabled.
+  // ======================================================================
+  const MATRIX: [label: string, features: unknown, enabled: boolean][] = [
+    ["features absent", undefined, true],
+    ["features: null", null, true],
+    ['features: "bad"', "bad", true],
+    ["features: {}", {}, true],
+    ["barcodeScanning absent", { somethingElse: true }, true],
+    ["barcodeScanning: null", { barcodeScanning: null }, true],
+    ["barcodeScanning: {}", { barcodeScanning: {} }, true],
+    ["enabled: true", { barcodeScanning: { enabled: true } }, true],
+    ["enabled: false", { barcodeScanning: { enabled: false } }, false],
+    ['enabled: "false"', { barcodeScanning: { enabled: "false" } }, true],
+    ["enabled: 0", { barcodeScanning: { enabled: 0 } }, true],
+  ];
+
+  it("only the literal boolean false disables barcode scanning", () => {
+    for (const [label, features, enabled] of MATRIX) {
+      const normalized = normalizeProjectFeatures(features);
+
+      expect(`${label}: ${isBarcodeScanningEnabled(normalized)}`).toBe(`${label}: ${enabled}`);
+    }
+
+    // Exactly one row in the whole matrix disables it.
+    expect(MATRIX.filter(([, , enabled]) => !enabled)).toHaveLength(1);
+  });
+
+  // The accessor is robust whether it is handed a normalized value or a raw
+  // one, so a caller that skipped normalization cannot get a different answer.
+  it("gives the same answer for raw and normalized input", () => {
+    for (const [label, features, enabled] of MATRIX) {
+      expect(`${label}: ${isBarcodeScanningEnabled(features as never)}`).toBe(
+        `${label}: ${enabled}`
+      );
+    }
+  });
+
+  // NEGATIVE CONTROL: no coercion anywhere. If someone later "helpfully" parsed
+  // truthiness, these two rows would flip and this fails.
+  it("does not coerce truthy or falsy values", () => {
+    expect(isBarcodeScanningEnabled({ barcodeScanning: { enabled: "false" } } as never)).toBe(true);
+    expect(isBarcodeScanningEnabled({ barcodeScanning: { enabled: 0 } } as never)).toBe(true);
+    expect(isBarcodeScanningEnabled({ barcodeScanning: { enabled: "" } } as never)).toBe(true);
+    expect(isBarcodeScanningEnabled({ barcodeScanning: { enabled: null } } as never)).toBe(true);
+  });
+
+  // A malformed optional flag must never make a whole project unloadable.
+  it("a malformed features block does not invalidate the project config", () => {
+    for (const [, features] of MATRIX) {
+      expect(
+        isProjectConfig({ ...defaultProjectConfig, features } as never)
+      ).toBe(true);
     }
   });
 });
