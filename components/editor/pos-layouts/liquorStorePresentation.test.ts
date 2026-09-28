@@ -21,8 +21,10 @@ import {
   LIQUOR_STORE_TEMPLATE_ID,
   matchesProductSearch,
   normalizeSearchTerm,
+  resolveBarcodeActivation,
   resolveCatalogItems,
 } from "./shared";
+import { buildBarcodeIndex } from "@/lib/barcode";
 import { getTemplateById, templates } from "@/data/templates";
 import type { MenuItem } from "@/lib/projectConfig";
 
@@ -87,7 +89,16 @@ describe("the Liquor Store presentation is selected by templateId, not by layout
   it("the switch checks templateId BEFORE the layout family", () => {
     const source = code(read(SWITCH));
     expect(source).toContain("if (templateId === LIQUOR_STORE_TEMPLATE_ID)");
-    expect(source).toContain("<LiquorStoreBrowser {...layoutProps} />");
+
+    // The element and the intercepted spread, asserted separately: 1E-B added
+    // a prop and split this across lines, and pinning the exact one-line JSX
+    // was testing the formatter, not the routing.
+    expect(source).toContain("<LiquorStoreBrowser");
+    const liquorBranch = source.slice(
+      source.indexOf("if (templateId === LIQUOR_STORE_TEMPLATE_ID)"),
+      source.indexOf("switch (layout)")
+    );
+    expect(liquorBranch).toContain("{...layoutProps}");
 
     expect(source.indexOf("LIQUOR_STORE_TEMPLATE_ID")).toBeLessThan(
       source.indexOf("switch (layout)")
@@ -210,118 +221,433 @@ describe("the Liquor Store browser sells through the shared engine only", () => 
 // No faked barcode capability
 // ---------------------------------------------------------------------------
 
-describe("no barcode or scanner capability is implied", () => {
-  const source = read(BROWSER); // raw, comments INCLUDED
-  const executable = code(source); // comments STRIPPED
+// ---------------------------------------------------------------------------
+// v1.3 Feature 1E-B — barcode scanning through the one search field
+// ---------------------------------------------------------------------------
 
-  it("renders no scanner status or scan-event wording anywhere", () => {
-    // Deliberately over the RAW source: this is about what a cashier could
-    // read on screen, so a scanner claim sitting in a string is exactly what
-    // must not exist, comment-stripped or not.
-    for (const banned of [
-      "Ready to scan",
-      "Scanner connected",
-      "Scan successful",
-      "Barcode recognized",
-      "Scanner unavailable",
-      "Unknown barcode",
-    ]) {
-      expect(source).not.toContain(banned);
+describe("barcode enablement is a resolved project capability", () => {
+  it("is resolved through the shared rule at each configuration owner", () => {
+    // The till owns GeneratedPosConfig; the Builder owns ProjectConfig. Each
+    // applies lib/projectFeatures.ts's rule itself, so there is one rule.
+    expect(code(read(RUNTIME))).toContain(
+      "barcodeScanningEnabled={isBarcodeScanningEnabled(config.features)}"
+    );
+    expect(code(read(SHELL))).toContain(
+      "barcodeScanningEnabled={isBarcodeScanningEnabled(projectConfig.features)}"
+    );
+  });
+
+  it("reaches the browser as a BOOLEAN, never as the feature model", () => {
+    const browser = code(read(BROWSER));
+    expect(browser).toContain("barcodeScanningEnabled: boolean");
+    // Presentation must not interpret the model or restate its defaults.
+    expect(browser).not.toContain("ProjectFeatures");
+    expect(browser).not.toContain("isBarcodeScanningEnabled");
+    expect(browser).not.toContain("@/lib/projectFeatures");
+    expect(browser).not.toContain("barcodeScanning?.");
+  });
+
+  it("is required, so no host can omit it into a duplicated default", () => {
+    const sw = code(read(SWITCH));
+    expect(sw).toContain("barcodeScanningEnabled: boolean;");
+    expect(sw).not.toContain("barcodeScanningEnabled?: boolean");
+    expect(code(read(BROWSER))).not.toContain("barcodeScanningEnabled = ");
+  });
+
+  it("is never derived from templateId", () => {
+    const browser = code(read(BROWSER));
+    expect(browser).not.toContain("templateId");
+    expect(browser).not.toContain("liquor-store");
+
+    // The switch uses templateId only to choose a presentation. The capability
+    // must be FORWARDED, never computed from the template there.
+    //
+    // The first spelling of this guard used [^{]* between the `=` and
+    // `templateId`, which could never cross the opening brace of a JSX
+    // expression — so `barcodeScanningEnabled={templateId === ...}` sailed
+    // past it. A negative control caught that; this asserts the forwarded
+    // expression exactly, and separately refuses any templateId inside it.
+    const sw = code(read(SWITCH));
+    expect(sw).toContain("barcodeScanningEnabled={barcodeScanningEnabled}");
+
+    for (const match of sw.matchAll(/barcodeScanningEnabled=\{([^}]*)\}/g)) {
+      expect(match[1]).toBe("barcodeScanningEnabled");
+      expect(match[1]).not.toContain("templateId");
     }
   });
 
-  it("calls none of the shared barcode APIs", () => {
-    // NAMED SYMBOLS, NOT THE WORD "barcode". This guard previously banned the
-    // bare substring in the stripped source, which conflated two different
-    // things: explaining in a comment that scanning does not exist yet (fine,
-    // and the comments are stripped anyway) with actually resolving a scan
-    // (not fine). Every name below is a real export of lib/barcode.ts or
-    // lib/projectFeatures.ts, so this fails on use and stays quiet on mention.
-    for (const api of [
-      "buildBarcodeIndex",
-      "lookupBarcode",
-      "normalizeBarcode",
-      "normalizeOptionalBarcode",
-      "findDuplicateBarcode",
-      "getBarcodeMessage",
-      "BARCODE_MAX_LENGTH",
-      "isBarcodeScanningEnabled",
-      "barcodeScanningEnabled",
-    ]) {
-      expect(executable).not.toContain(api);
+  it("the Builder and the till hand the same prop to the same component", () => {
+    for (const file of [RUNTIME, PREVIEW]) {
+      expect(code(read(file))).toContain("barcodeScanningEnabled={");
     }
+    expect(code(read(PREVIEW))).toContain("barcodeScanningEnabled: boolean");
+  });
+});
 
-    // And it does not import the modules those live in.
-    expect(executable).not.toContain("@/lib/barcode");
-    expect(executable).not.toContain("@/lib/projectFeatures");
+describe("there is exactly one Search / Scan field", () => {
+  const browser = code(read(BROWSER));
+
+  it("renders a single input", () => {
+    expect([...browser.matchAll(/<input\b/g)]).toHaveLength(1);
   });
 
-  it("reads no barcode off a product, even though the shared model now has one", () => {
-    // The field exists (see the shared-model test below). This browser simply
-    // does not consult it — that is the boundary, not the field's existence.
-    expect(executable).not.toContain(".barcode");
-    expect(executable).not.toContain("barcode:");
-  });
-
-  it("captures no keyboard input and installs no global listener", () => {
-    // A wedge scanner types. Any of these would be the beginning of catching
-    // that typing, which is Lane 1's contract to define, not this component's.
+  it("has no scan mode, overlay, modal or hidden capture field", () => {
     for (const banned of [
-      "onKeyDown",
-      "onKeyUp",
-      "onKeyPress",
-      "keydown",
-      "keypress",
-      "addEventListener",
+      'type="hidden"',
+      "scanMode",
+      "scannerOpen",
+      "ScannerOverlay",
+      "ScannerModal",
+      "showScanner",
+    ]) {
+      expect(browser).not.toContain(banned);
+    }
+  });
+
+  it("keeps searchTerm as the one field value, fed by ordinary onChange", () => {
+    expect(browser).toContain("value={searchTerm}");
+    expect(browser).toContain("onChange={(event) => setSearchTerm(event.target.value)}");
+  });
+
+  it("does not activate anything from typing — only from the key handler", () => {
+    // onChange must do nothing but set state. If activation ever moved into
+    // it, typing "012345678905" would sell an item mid-keystroke.
+    const onChange = browser.slice(
+      browser.indexOf("onChange={"),
+      browser.indexOf("onKeyDown={")
+    );
+    expect(onChange).not.toContain("onAddToCart");
+    expect(onChange).not.toContain("resolveBarcodeActivation");
+  });
+
+  it("shows the scan-capable placeholder only when the capability is on", () => {
+    expect(browser).toContain('"Search products or scan barcode"');
+    expect(browser).toContain('"Search products…"');
+    expect(browser).toContain("barcodeScanningEnabled\n                ? \"Search products or scan barcode\"");
+  });
+});
+
+describe("Enter is handled on the field, and only on the field", () => {
+  const browser = code(read(BROWSER));
+  const handler = browser.slice(
+    browser.indexOf("function handleSearchKeyDown"),
+    browser.indexOf("if (categories.length === 0)")
+  );
+
+  it("is wired to the input, not to the document or window", () => {
+    expect(browser).toContain("onKeyDown={handleSearchKeyDown}");
+    for (const banned of [
       "document.addEventListener",
       "window.addEventListener",
+      "addEventListener",
+      "useEffect",
     ]) {
-      expect(executable).not.toContain(banned);
+      expect(browser).not.toContain(banned);
     }
   });
 
-  it("runs no scan-timing or scan-source detection", () => {
-    // Inter-keystroke timing and prefix framing are how a scanner is told
-    // apart from a human; neither belongs here before the contract exists.
+  it("does nothing at all when the capability is off", () => {
+    expect(handler).toContain("if (!barcodeScanningEnabled) {");
+    // And it is the FIRST reject, so a disabled project cannot even reach the
+    // field-clearing branch.
+    expect(handler.indexOf("!barcodeScanningEnabled")).toBeLessThan(
+      handler.indexOf("event.key !== \"Enter\"")
+    );
+  });
+
+  it("ignores an Enter that is confirming an IME composition", () => {
+    expect(handler).toContain("event.nativeEvent.isComposing");
+  });
+
+  it("ignores an autorepeating held Enter, so one press is one add", () => {
+    expect(handler).toContain("event.repeat");
+  });
+
+  it("ignores every key that is not Enter", () => {
+    expect(handler).toContain('event.key !== "Enter"');
+  });
+
+  it("runs no scan-timing, scan-source or prefix-framing detection", () => {
     for (const banned of [
       "setTimeout",
       "setInterval",
       "Date.now",
       "performance.now",
-      "scannerAvailability",
       "scanSource",
+      "scannerAvailability",
       "prefix",
+      "buffer",
     ]) {
-      expect(executable).not.toContain(banned);
+      expect(browser).not.toContain(banned);
+    }
+  });
+});
+
+describe("an accepted Enter activates through the shared path exactly once", () => {
+  const browser = code(read(BROWSER));
+  const handler = browser.slice(
+    browser.indexOf("function handleSearchKeyDown"),
+    browser.indexOf("if (categories.length === 0)")
+  );
+
+  it("clears the field and calls the normal onAddToCart, once", () => {
+    expect(handler).toContain("setSearchTerm(\"\");");
+    expect(handler).toContain("onAddToCart(currentItem);");
+    expect([...handler.matchAll(/onAddToCart\(/g)]).toHaveLength(1);
+  });
+
+  it("runs no second activation preflight and mutates no cart directly", () => {
+    for (const banned of [
+      "resolveItemActivation",
+      "canActivateItem",
+      "setCart",
+      "createCartItem",
+      "calculateCartSummary",
+      "getItemQuantityInCart",
+    ]) {
+      expect(browser).not.toContain(banned);
     }
   });
 
-  it("exposes exactly ONE input, the manual search field", () => {
-    // A second field is how a Search/Scan split would first appear.
-    expect([...executable.matchAll(/<input\b/g)]).toHaveLength(1);
-    expect(executable).toContain('placeholder="Search products…"');
-    // No stolen focus, which only a scan-first surface would want.
-    expect(executable).not.toContain("autoFocus");
-    expect(executable).not.toContain(".focus()");
-    expect(executable).not.toContain("useRef");
+  it("duplicates no stock policy and shows no barcode stock refusal", () => {
+    const raw = read(BROWSER);
+    for (const banned of [
+      "Cannot add",
+      "out of stock —",
+      "Out of stock —",
+      "stockQuantity <= 0 &&",
+    ]) {
+      expect(raw).not.toContain(banned);
+    }
+    // addToCart stays void-returning upstream; nothing here reads a result.
+    expect(browser).not.toContain("const added");
+    expect(browser).not.toContain("await onAddToCart");
   });
 
-  it("mutates no cart directly and runs no second activation preflight", () => {
-    // If a barcode path is ever added it must still go through the shared
-    // onAddToCart. These are the two shapes that would bypass it.
-    for (const banned of ["setCart", "resolveItemActivation", "canActivateItem"]) {
-      expect(executable).not.toContain(banned);
+  it("reaches ModifierSelector through the existing shared interception", () => {
+    // The browser itself knows nothing about modifiers; ProductBrowser wraps
+    // the handler it passes down, so a scanned modifier product opens the
+    // selector by the same route a tapped one does.
+    expect(browser).not.toContain("ModifierSelector");
+    expect(browser).not.toContain("modifierGroups");
+
+    const sw = code(read(SWITCH));
+    expect(sw).toContain("const layoutProps = { ...props, onAddToCart: handleAddToCart };");
+    expect(sw).toContain("<LiquorStoreBrowser");
+    expect(sw).toContain("{...layoutProps}");
+    expect(sw).toContain("ModifierSelector");
+  });
+});
+
+describe("the barcode index is the shared one, built from current items", () => {
+  const browser = code(read(BROWSER));
+
+  it("uses buildBarcodeIndex over the current menuItems", () => {
+    expect(browser).toContain("buildBarcodeIndex(menuItems, { enabled: barcodeScanningEnabled })");
+    expect(browser).toContain("[menuItems, barcodeScanningEnabled]");
+  });
+
+  it("implements no normalizer, matcher, index or duplicate detector of its own", () => {
+    for (const banned of [
+      "normalizeBarcode",
+      "normalizeOptionalBarcode",
+      "findDuplicateBarcode",
+      "new Map",
+      "toLowerCase",
+      "startsWith",
+      "includes(",
+      "padStart",
+      "parseInt",
+      "Number(",
+    ]) {
+      expect(browser).not.toContain(banned);
     }
   });
 
-  it("the SHARED model supports barcode — that is Lane 1's, and is not denied here", () => {
-    // Replaces an assertion that MenuItem carried no barcode field. That was
-    // true when written and is now simply wrong: accepted Feature 1E-A added
-    // `barcode?: string` to the shared model on purpose. Asserting its absence
-    // made this file contradict the data model it sits on, so the assertion is
-    // inverted to match reality and to catch an accidental REMOVAL of the
-    // field. The Lane 2 boundary was never about the model — it is the
-    // behavioral guards above.
+  it("hands the untouched field value to the shared resolver", () => {
+    expect(browser).toContain("value: searchTerm,");
+    // Not the manual-search normalization, which lowercases.
+    expect(browser).not.toContain("normalizeSearchTerm(searchTerm)");
+  });
+});
+
+// --- REAL behavior, over the pure resolver -------------------------------
+
+describe("resolveBarcodeActivation", () => {
+  const CODED: MenuItem[] = [
+    item({ id: "b1", name: "Domestic Lager 6-Pack", barcode: "012345678905" }),
+    item({ id: "b2", name: "IPA 6-Pack", barcode: "A1b2" }),
+    item({ id: "b3", name: "House Red Wine", barcode: "5901234123457" }),
+    item({ id: "b4", name: "Loose Candy" }), // no barcode
+  ];
+  const index = buildBarcodeIndex(CODED);
+
+  it("resolves an exact hit to the current item", () => {
+    const hit = resolveBarcodeActivation({ menuItems: CODED, index, value: "012345678905" });
+    expect(hit?.id).toBe("b1");
+  });
+
+  it("preserves leading zeros — the zero-stripped value is a different code", () => {
+    expect(
+      resolveBarcodeActivation({ menuItems: CODED, index, value: "12345678905" })
+    ).toBeNull();
+  });
+
+  it("is case-sensitive, because Code 39/128 alphabets are", () => {
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "A1b2" })?.id).toBe("b2");
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "a1B2" })).toBeNull();
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "a1b2" })).toBeNull();
+  });
+
+  it("does not activate on a prefix", () => {
+    expect(
+      resolveBarcodeActivation({ menuItems: CODED, index, value: "01234567890" })
+    ).toBeNull();
+  });
+
+  it("does not activate on a partial or extended value", () => {
+    for (const value of ["2345678905", "0123456789051", "0123 45678905"]) {
+      expect(resolveBarcodeActivation({ menuItems: CODED, index, value })).toBeNull();
+    }
+  });
+
+  it("does not activate on a manual-search match", () => {
+    // "IPA" finds a product in the search box; it is not that product's code.
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "IPA" })).toBeNull();
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "lager" })).toBeNull();
+  });
+
+  it("returns null for an empty or whitespace value", () => {
+    for (const value of ["", "   "]) {
+      expect(resolveBarcodeActivation({ menuItems: CODED, index, value })).toBeNull();
+    }
+  });
+
+  it("resolves the DURABLE id against the CURRENT catalogue, not the indexed one", () => {
+    // Index built from the old catalogue; the item is then re-priced. The
+    // object returned must be the current one.
+    const repriced = CODED.map((i) =>
+      i.id === "b1" ? { ...i, price: 99.99, name: "Domestic Lager 6-Pack (new)" } : i
+    );
+    const hit = resolveBarcodeActivation({
+      menuItems: repriced,
+      index,
+      value: "012345678905",
+    });
+    expect(hit?.price).toBe(99.99);
+    expect(hit).toBe(repriced[0]); // the current object, not the indexed one
+  });
+
+  it("activates nothing when the id no longer exists in the catalogue", () => {
+    const without = CODED.filter((i) => i.id !== "b1");
+    expect(
+      resolveBarcodeActivation({ menuItems: without, index, value: "012345678905" })
+    ).toBeNull();
+  });
+
+  it("FAILS SAFE on a duplicated catalogue rather than picking a winner", () => {
+    const dupes: MenuItem[] = [
+      item({ id: "d1", name: "Cheap", price: 1, barcode: "999" }),
+      item({ id: "d2", name: "Expensive", price: 99, barcode: "999" }),
+    ];
+    const refused = buildBarcodeIndex(dupes);
+    expect(refused.ok).toBe(false);
+    expect(
+      resolveBarcodeActivation({ menuItems: dupes, index: refused, value: "999" })
+    ).toBeNull();
+  });
+
+  it("resolves nothing at all when the capability is disabled", () => {
+    const off = buildBarcodeIndex(CODED, { enabled: false });
+    expect(
+      resolveBarcodeActivation({ menuItems: CODED, index: off, value: "012345678905" })
+    ).toBeNull();
+  });
+
+  it("ignores an item with no barcode", () => {
+    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "b4" })).toBeNull();
+  });
+
+  it("never mutates its inputs", () => {
+    const snapshot = JSON.parse(JSON.stringify(CODED));
+    resolveBarcodeActivation({ menuItems: CODED, index, value: "012345678905" });
+    expect(CODED).toEqual(snapshot);
+  });
+});
+
+describe("a miss is indistinguishable from ordinary search", () => {
+  const raw = read(BROWSER);
+  const browser = code(raw);
+
+  it("shows no barcode error wording anywhere", () => {
+    for (const banned of [
+      "Barcode not found",
+      "barcode not found",
+      "Unknown barcode",
+      "No barcode",
+      "Scan failed",
+      "Not recognized",
+      "Ready to scan",
+      "Scanner connected",
+      "Scan successful",
+      "Barcode recognized",
+      "Scanner unavailable",
+    ]) {
+      expect(raw).not.toContain(banned);
+    }
+  });
+
+  it("keeps searchTerm and the filtered results on a miss", () => {
+    const handler = browser.slice(
+      browser.indexOf("function handleSearchKeyDown"),
+      browser.indexOf("if (categories.length === 0)")
+    );
+    // The miss branch is a bare return: it clears nothing and sets nothing.
+    const missBranch = handler.slice(
+      handler.indexOf("if (currentItem === null)"),
+      handler.indexOf("setSearchTerm(\"\");")
+    );
+    expect(missBranch).toContain("return;");
+    expect(missBranch).not.toContain("setSearchTerm");
+    expect(missBranch).not.toContain("setActiveCategory");
+    expect(missBranch).not.toContain("onAddToCart");
+  });
+
+  it("leaves the accepted manual-search behavior untouched", () => {
+    // Barcode normalization is separate from search normalization.
+    const sharedSrc = code(read("components/editor/pos-layouts/shared.ts"));
+    expect(sharedSrc).toContain("return term.trim().toLowerCase();");
+    expect(sharedSrc).toContain("input.menuItems.filter((item) => matchesProductSearch");
+  });
+});
+
+describe("no focus stealing and no global scanner architecture", () => {
+  const browser = code(read(BROWSER));
+
+  it("never focuses itself", () => {
+    for (const banned of ["autoFocus", ".focus()", "useRef", "createRef", "tabIndex={-1}"]) {
+      expect(browser).not.toContain(banned);
+    }
+  });
+
+  it("installs no global listener and no scanner engine", () => {
+    for (const banned of [
+      "window.addEventListener",
+      "document.addEventListener",
+      "addEventListener",
+      "IndexedDB",
+      "indexedDB",
+      "getUserMedia",
+      "BarcodeDetector",
+      "fetch(",
+    ]) {
+      expect(browser).not.toContain(banned);
+    }
+  });
+});
+
+describe("the SHARED model supports barcode — that is Lane 1's, and is not denied here", () => {
+  it("MenuItem carries the optional barcode field 1E-A added", () => {
     const config = code(read("lib/projectConfig.ts"));
     const type = config.slice(
       config.indexOf("export type MenuItem"),

@@ -1,3 +1,5 @@
+import { lookupBarcode } from "@/lib/barcode";
+import type { BarcodeIndexResult } from "@/lib/barcode";
 import type {
   EditorMode,
   MenuItem,
@@ -146,4 +148,51 @@ export function resolveCatalogItems(input: {
     items: input.menuItems.filter((item) => matchesProductSearch(item, normalized)),
     searching: true,
   };
+}
+
+
+/**
+ * v1.3 Feature 1E-B — which product, if any, does this scanned/typed value
+ * activate?
+ *
+ * PURE, AND SEPARATED FROM THE COMPONENT FOR THE SAME REASON
+ * resolveCatalogItems is: this repository has no DOM test environment, and
+ * these are the rules where being wrong costs money — an exact match, a
+ * case-sensitive one, one that keeps leading zeros, one that refuses a
+ * duplicated catalogue, and one that resolves against the catalogue as it is
+ * NOW. Asserting those by grepping a component is not proving them.
+ *
+ * IT IMPLEMENTS NO BARCODE RULE OF ITS OWN. Normalization, matching and the
+ * duplicate refusal all belong to lib/barcode.ts; this composes them. There is
+ * no second normalizer, index, parser or duplicate detector here, and there
+ * must never be — `value` is handed to lookupBarcode exactly as received, so
+ * manual-search normalization can never leak into barcode matching.
+ *
+ * Returns the CURRENT MenuItem, never one captured when the index was built:
+ * lookupBarcode yields a durable id, and that id is resolved against the
+ * menuItems passed in. A stale or removed id resolves to null rather than to
+ * whatever now sits in that position.
+ */
+export function resolveBarcodeActivation(input: {
+  /** The catalogue as it is now. */
+  menuItems: readonly MenuItem[];
+  /** The shared index, already built from that catalogue. */
+  index: BarcodeIndexResult;
+  /** The complete, untouched field value. */
+  value: string;
+}): MenuItem | null {
+  // FAIL SAFE on a catalogue the shared builder refused. A duplicated barcode
+  // resolves to two products, and picking either sells one at the other's
+  // price based on array order nobody can see.
+  if (!input.index.ok) {
+    return null;
+  }
+
+  const itemId = lookupBarcode(input.index.lookup, input.value);
+
+  if (itemId === null) {
+    return null;
+  }
+
+  return input.menuItems.find((item) => item.id === itemId) ?? null;
 }

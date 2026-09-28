@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { buildBarcodeIndex } from "@/lib/barcode";
 import { useProductCategories } from "./useProductCategories";
-import { resolveCatalogItems } from "./shared";
+import { resolveBarcodeActivation, resolveCatalogItems } from "./shared";
 import type { ProductBrowserProps } from "./shared";
 import type { MenuItem } from "@/components/editor/EditorShell";
 
@@ -28,11 +29,21 @@ import type { MenuItem } from "@/components/editor/EditorShell";
 // this trades that for a 15px name, a 20px price and a container-driven grid
 // that actually densifies with width.
 //
-// SCANNING DOES NOT EXIST YET. The search row below is the region that will
-// later host scan input, and it is deliberately built as an honest manual
-// search and nothing else — no scanner status, no availability indicator, no
-// "ready to scan", no keyboard capture. Lane 1 owns the barcode contract; until
-// it lands, this surface must not imply a cashier can scan.
+// SCANNING, AS OF v1.3 Feature 1E-B. The one search field below doubles as the
+// scan field. There is no scanner engine here and there is not meant to be: a
+// wedge scanner is a keyboard that types fast and presses Enter, so the whole
+// integration is an Enter handler ON THAT INPUT. No global listener, no timing
+// heuristic, no scanner-source detection, no prefix framing, no buffer — none
+// of which could work reliably anyway, and all of which would make an ordinary
+// cashier's Enter behave differently from a scanner's.
+//
+// TYPING IS NEVER SCANNING. onChange stays pure manual search. Only an accepted
+// Enter consults the barcode index, and only an EXACT hit activates anything.
+//
+// A MISS IS SILENT ON PURPOSE. A cashier typing "vodka" and pressing Enter and
+// an unknown scanned value both reach the same branch, and neither gets a
+// barcode error — the two are intentionally indistinguishable, so the field
+// simply stays as ordinary search showing its ordinary results.
 
 function stockBadgeLabel(item: MenuItem): string {
   if (!item.trackInventory) {
@@ -61,6 +72,23 @@ function stockBadgeClassName(item: MenuItem): string {
   return "bg-emerald-50 text-emerald-700";
 }
 
+/**
+ * v1.3 Feature 1E-B — the ALREADY-RESOLVED answer to "may this project scan?".
+ *
+ * A BOOLEAN, NEVER ProjectFeatures. The feature model's compatibility rule
+ * (absence means enabled, only a literal false disables) lives in
+ * lib/projectFeatures.ts and is applied by whoever owns the configuration —
+ * PosRuntime for a till, EditorShell for the Builder. Presentation interpreting
+ * that model would be a second copy of the rule, free to drift from the first.
+ *
+ * It is also NOT derived from templateId. The capability belongs to the
+ * project: a convenience store may scan, and a liquor store with no scanner may
+ * not. Deriving it from the template would make both impossible.
+ */
+type LiquorStoreBrowserProps = ProductBrowserProps & {
+  barcodeScanningEnabled: boolean;
+};
+
 export default function LiquorStoreBrowser({
   menuItems,
   selectedItemId,
@@ -69,7 +97,8 @@ export default function LiquorStoreBrowser({
   currencySymbol,
   onSelect,
   onAddToCart,
-}: ProductBrowserProps) {
+  barcodeScanningEnabled,
+}: LiquorStoreBrowserProps) {
   // includeAll is the ONLY behavioral difference this browser asks of the
   // shared hook. Every other caller omits it and is unchanged.
   const { categories, activeCategory, setActiveCategory, visibleItems } =
@@ -84,6 +113,82 @@ export default function LiquorStoreBrowser({
     categoryItems: visibleItems,
     searchTerm,
   });
+
+  // Built from the CURRENT menuItems, by the shared builder, so a configuration
+  // change reindexes and there is exactly one index implementation in the
+  // product. `enabled` is handed to the builder as well as checked below: a
+  // disabled project therefore has an EMPTY index, so even a mistake in the
+  // handler could not resolve anything.
+  const barcodeIndex = useMemo(
+    () => buildBarcodeIndex(menuItems, { enabled: barcodeScanningEnabled }),
+    [menuItems, barcodeScanningEnabled]
+  );
+
+  /**
+   * The entire barcode integration.
+   *
+   * THE REJECTS COME FIRST, and each is a real failure mode rather than
+   * defensive noise:
+   *
+   *   disabled    — the project said no; Enter must do nothing barcode-shaped,
+   *                 and in particular must not clear the field.
+   *   composing   — an IME uses Enter to accept a candidate. A cashier writing
+   *                 Japanese would otherwise activate a product mid-word.
+   *   repeat      — a held Enter autorepeats. One press must mean one add.
+   *   not Enter   — every other key is ordinary typing.
+   *
+   * Then resolveBarcodeActivation decides, against the COMPLETE, untouched
+   * searchTerm. It refuses a duplicated catalogue, looks the value up exactly
+   * through lib/barcode.ts — trim only, case preserved, leading zeros preserved,
+   * deliberately NOT manual-search normalization, because "A1b2" and "a1B2" are
+   * two different products in a case-sensitive symbology — and resolves the
+   * durable id it gets back against the catalogue as it is now.
+   */
+  function handleSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (!barcodeScanningEnabled) {
+      return;
+    }
+
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
+
+    if (event.repeat) {
+      return;
+    }
+
+    if (event.key !== "Enter") {
+      return;
+    }
+
+    // The COMPLETE, untouched field value. One shared decision covers the
+    // duplicate refusal, the exact lookup and the current-catalogue
+    // resolution — and null covers every way this can decline: a refused
+    // index, a miss, or an id the catalogue no longer has.
+    const currentItem = resolveBarcodeActivation({
+      menuItems,
+      index: barcodeIndex,
+      value: searchTerm,
+    });
+
+    if (currentItem === null) {
+      // Stay ordinary search: keep the query, keep the filtered results, say
+      // nothing about barcodes.
+      return;
+    }
+
+    // The ONE activation, through the ONE shared path. ProductBrowser
+    // intercepts this and opens ModifierSelector when the product needs it;
+    // PosRuntime's updater remains the authoritative stock decision.
+    //
+    // CLEARING IS NOT A RECEIPT. The field clears because the cashier is
+    // finished with that value, not because the add succeeded — addToCart
+    // returns void and cannot truthfully say. An exact hit that the
+    // authoritative updater later refuses for stock still clears, and that is
+    // accepted for v1.3.
+    setSearchTerm("");
+    onAddToCart(currentItem);
+  }
 
   // An empty menu yields zero categories. Same meaning as every other browser's
   // empty state: there is nothing configured yet, and the Builder is where that
@@ -101,9 +206,10 @@ export default function LiquorStoreBrowser({
 
   return (
     <>
-      {/* Search row.
-          This is the region that will later host scan input. Today it is a
-          manual product search and presents itself as nothing else. */}
+      {/* Search row — ONE field, for both typing and scanning.
+          A second "scan" input, a scan mode, or a scanner overlay would each
+          force the cashier to decide which box to be in before they know what
+          they are holding. */}
       <div className="flex-none border-b border-neutral-200 bg-white px-3 py-2.5">
         <div className="relative">
           <svg
@@ -124,8 +230,17 @@ export default function LiquorStoreBrowser({
             inputMode="search"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="Search products…"
-            aria-label="Search products"
+            onKeyDown={handleSearchKeyDown}
+            placeholder={
+              barcodeScanningEnabled
+                ? "Search products or scan barcode"
+                : "Search products…"
+            }
+            aria-label={
+              barcodeScanningEnabled
+                ? "Search products or scan barcode"
+                : "Search products"
+            }
             className="h-11 w-full rounded-lg border border-neutral-200 bg-neutral-50 pl-9 pr-10 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-400 focus:bg-white focus:outline-none"
           />
 

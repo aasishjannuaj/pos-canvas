@@ -65,6 +65,12 @@ type EditorPreviewProps = {
   // Builder-only mockup. EditorShell already receives it; this is the one
   // missing hop.
   templateId: string;
+  /**
+   * v1.3 Feature 1E-B — resolved by EditorShell, which owns the ProjectConfig.
+   * The preview forwards it untouched so the Builder and a till answer "may I
+   * scan?" from the same rule and the same project data.
+   */
+  barcodeScanningEnabled: boolean;
 };
 
 function calculateOrderSummary(tax: {
@@ -120,6 +126,7 @@ export default function EditorPreview({
   lastCompletedOrderId,
   layout,
   templateId,
+  barcodeScanningEnabled,
 }: EditorPreviewProps) {
   const currencySymbol = CURRENCY_SYMBOLS[receipt.currency];
   const orderNumber = `${receipt.orderPrefix}1001`;
@@ -160,6 +167,7 @@ export default function EditorPreview({
         <ProductBrowser
           layout={layout}
           templateId={templateId}
+          barcodeScanningEnabled={barcodeScanningEnabled}
           menuItems={menuItems}
           selectedItemId={selectedItemId}
           editorMode={editorMode}

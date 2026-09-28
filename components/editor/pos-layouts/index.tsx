@@ -28,6 +28,19 @@ type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
    * Optional so an omitting caller keeps today's exact layout-only behavior.
    */
   templateId?: string;
+  /**
+   * v1.3 Feature 1E-B — the resolved barcode capability, forwarded only to the
+   * browser that presents it.
+   *
+   * REQUIRED, so the compiler makes every host resolve it rather than letting
+   * an omission silently become a default — a default here would be a second
+   * copy of lib/projectFeatures.ts's compatibility rule.
+   *
+   * Deliberately NOT on ProductBrowserProps: Menu Grid, Product Grid and
+   * Service Grid must not gain a barcode concept just because one variant has
+   * one, so it is passed beside the shared spread instead of inside it.
+   */
+  barcodeScanningEnabled: boolean;
   // Feature 18.2 — hosts receive the chosen selections alongside the item.
   // Omitted for a product with no modifier groups, so existing callers that
   // ignore the second argument keep working unchanged.
@@ -48,6 +61,7 @@ type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
 export default function ProductBrowser({
   layout,
   templateId,
+  barcodeScanningEnabled,
   ...props
 }: ProductBrowserSwitchProps) {
   // Feature 18.2 — the single shared interception point.
@@ -83,7 +97,12 @@ export default function ProductBrowser({
     // retail (also product-grid) still resolves to ProductGridBrowser and an
     // unknown or legacy templateId simply falls through to today's behavior.
     if (templateId === LIQUOR_STORE_TEMPLATE_ID) {
-      return <LiquorStoreBrowser {...layoutProps} />;
+      return (
+        <LiquorStoreBrowser
+          {...layoutProps}
+          barcodeScanningEnabled={barcodeScanningEnabled}
+        />
+      );
     }
 
     switch (layout) {

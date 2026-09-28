@@ -247,7 +247,33 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
     for (const file of [...walk("components/editor/pos-layouts"), ...walk("components/runtime")]) {
       const source = code(read(file));
 
-      for (const banned of ["addEventListener(\"key", "document.addEventListener", "barcode", "wedge"]) {
+      // v1.3 Feature 1E-B — "barcode" was removed from this list, and ONLY
+      // that word. It was a SCOPE fence ("barcode is out of scope for this
+      // lane"), not the safety property: Control Room has since authorised
+      // Lane 2 to connect the Liquor Store search field to the shared barcode
+      // capability, so the word now appears here legitimately.
+      //
+      // THE SAFETY PROPERTY IS UNCHANGED AND IS TIGHTENED BELOW. What must
+      // never exist is a listener that can reach a COVERED POS. A React
+      // onKeyDown is a prop on an element inside the inert subtree, and
+      // `inert` makes that subtree unfocusable and non-interactive, so it
+      // cannot fire while an overlay is up. A document/window listener could,
+      // which is why every one of them stays banned — along with any .focus()
+      // that could drag focus back out of inert.
+      //
+      // NOT a blanket addEventListener ban: PosRuntime legitimately registers
+      // `beforeunload`, which warns about losing a cart and cannot mutate one.
+      // The sibling guard above already pins the runtime's listener set to
+      // exactly that one, so banning the bare call here would only duplicate
+      // that rule and contradict it.
+      for (const banned of [
+        "addEventListener(\"key",
+        "addEventListener('key",
+        "document.addEventListener",
+        ".focus()",
+        "autoFocus",
+        "wedge",
+      ]) {
         expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
         expect(source).not.toContain(banned);
       }

@@ -52,6 +52,7 @@ import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import PosHeader from "@/components/runtime/PosHeader";
 import ProductBrowser from "@/components/editor/pos-layouts";
+import { isBarcodeScanningEnabled } from "@/lib/projectFeatures";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
 import type {
   PosRuntimeCompleteSale,
@@ -909,6 +910,7 @@ export default function PosRuntime({
           <ProductBrowser
             layout={config.project.layout}
             templateId={config.project.templateId}
+            barcodeScanningEnabled={isBarcodeScanningEnabled(config.features)}
             menuItems={menuItems}
             selectedItemId={null}
             editorMode="preview"

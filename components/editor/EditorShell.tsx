@@ -6,6 +6,7 @@ import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
 import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
+import { isBarcodeScanningEnabled } from "@/lib/projectFeatures";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
 import { completeSaleOrderV3 } from "@/lib/orders";
 import { restockInventory, adjustInventory } from "@/lib/inventory";
@@ -1857,6 +1858,9 @@ export default function EditorShell({
             lastCompletedOrderId={lastCompletedOrderId}
             layout={layout}
             templateId={templateId}
+            /* v1.3 Feature 1E-B — resolved HERE, at the Builder's configuration
+               owner, through the same shared rule a till uses. */
+            barcodeScanningEnabled={isBarcodeScanningEnabled(projectConfig.features)}
           />
         )}
         <EditorPropertiesPanel
