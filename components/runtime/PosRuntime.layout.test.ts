@@ -84,6 +84,10 @@ describe("the intended scroll container still owns vertical scrolling", () => {
       "MenuGridBrowser.tsx",
       "ProductGridBrowser.tsx",
       "ServiceGridBrowser.tsx",
+      // v1.3 Lane 2 Task 2 — the Liquor Store variant has a search row and a
+      // category rail above its catalog, so it is MORE important, not less,
+      // that the catalog is the element that scrolls.
+      "LiquorStoreBrowser.tsx",
     ]) {
       const layoutSource = readFileSync(join(layoutsDir, file), "utf-8");
 

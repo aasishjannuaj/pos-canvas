@@ -376,6 +376,16 @@ export function buildOfflineEnqueueInput(input: {
   cart: readonly CartItem[];
   paymentMethod: PaymentMethod;
   now: number;
+  /**
+   * v1.3 Feature 1B — the employee and register established when this sale was
+   * rung, as HISTORICAL CLAIMS for the server to validate at sync time.
+   *
+   * OPTIONAL, so nothing that predates Feature 1B changes shape. The runtime
+   * supplies them from its in-memory gate state; a till with nothing
+   * established cannot reach this function at all, because Policy 1 blocks the
+   * checkout before a draft is minted.
+   */
+  claims?: { employeePosSessionId: string | null; registerSessionId: string | null };
 }): EnqueueSaleInput {
   return {
     saleRequestId: input.draft.saleRequestId,
@@ -388,6 +398,8 @@ export function buildOfflineEnqueueInput(input: {
     items: buildSaleRequestItems(input.cart),
     occurredAt: input.draft.occurredAt,
     now: new Date(input.now).toISOString(),
+    employeePosSessionId: input.claims?.employeePosSessionId ?? null,
+    registerSessionId: input.claims?.registerSessionId ?? null,
   };
 }
 

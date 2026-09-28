@@ -271,10 +271,14 @@ describe("PosRuntime is transport-agnostic", () => {
     expect(owner).toContain('href: "/dashboard"');
   });
 
-  it("the device host calls complete_sale_v3, not v2", () => {
+  it("the device host calls the approved sale entry point, not a retired one", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the approved device entry point is now
+    // completeDeviceSaleV5, which carries no project id and lets the server
+    // derive employee, device and register. The property being guarded is
+    // unchanged — the host must not reach a retired entry point.
     const app = code(read("components/device/DeviceApp.tsx"));
-    expect(app).toContain("completeDeviceSaleV3");
-    expect(app).not.toMatch(/completeDeviceSale\b(?!V3)/);
+    expect(app).toContain("completeDeviceSaleV5");
+    expect(app).not.toMatch(/completeDeviceSale\b(?!V5)/);
   });
 
   it("both hosts send modifier IDENTIFIERS only", () => {

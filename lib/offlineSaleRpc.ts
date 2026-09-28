@@ -1,4 +1,5 @@
-// Feature 24.5D — the ONLY module in this repository that calls complete_sale_v4.
+// Feature 24.5D — the ONLY module in this repository that submits a QUEUED sale.
+// v1.3 Feature 1B-RUNTIME — that submission now goes to complete_sale_v5.
 //
 // Deliberately its own file. Keeping the v4 call in one small adapter makes
 // "offline submission is reachable only from the sync engine" a property a
@@ -69,7 +70,7 @@ export type SaleRpcCall = (
  */
 const defaultRpc: SaleRpcCall = async (args, signal) => {
   const { data, error } = await getDeviceSupabaseClient()
-    .rpc("complete_sale_v4", args)
+    .rpc("complete_sale_v5", args)
     .abortSignal(signal);
 
   return { data, error };
@@ -115,7 +116,10 @@ export async function submitQueuedSale(
   try {
     const { data, error } = await rpc(
       {
-        p_project_id: record.projectId,
+        // NO p_project_id. complete_sale_v5 derives the project from this
+        // device's own pairing row, so the queued projectId is authorization
+        // context the server no longer accepts — and no longer needs. It stays
+        // on the record because the enqueue-time identity check still uses it.
         p_payment_method: record.paymentMethod,
         p_tip_amount: record.tipAmount,
         // Identifiers and quantities only — buildSaleRequestItems' rule, applied
@@ -135,6 +139,13 @@ export async function submitQueuedSale(
         p_sale_request_id: record.saleRequestId,
         p_occurred_at: record.occurredAt,
         p_source: record.source,
+        // v1.3 Feature 1B — HISTORICAL CLAIMS, validated independently by the
+        // server against this device's own history and stored as NULL when they
+        // cannot be proven. Null on every record written before Feature 1B, and
+        // on any sale the till could not attribute. A financially valid sale is
+        // never refused because of what is here.
+        p_employee_pos_session_id: record.employeePosSessionId,
+        p_register_session_id: record.registerSessionId,
       },
       controller.signal
     );

@@ -13,6 +13,23 @@ export type OrderLineItem = {
 
 export type OrderTotal = {
   id: string;
+  /**
+   * v1.3 Feature 1F — who rang this sale, or null.
+   *
+   * NULL IS A REAL AND PERMANENT ANSWER. Legacy v1.2 sales predate employees
+   * entirely, and an offline sale can be recorded with only partial
+   * attribution. Such a sale is "Unattributed": it stays in every total, it is
+   * never reassigned, and it is never rewritten.
+   */
+  employeeId: string | null;
+  /**
+   * The register session this sale belongs to, or null.
+   *
+   * Its presence is what decides whether an authoritative business date exists
+   * for this order (see list_order_business_dates). Null means this product
+   * never recorded a business day for the sale -- not that the sale is invalid.
+   */
+  registerSessionId: string | null;
   orderNumber: string;
   subtotal: number;
   taxAmount: number;

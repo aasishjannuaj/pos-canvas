@@ -38,15 +38,27 @@ describe("the interception point is shared, not per-layout", () => {
   });
 
   it("no layout carries modifier logic of its own", () => {
-    for (const layout of ["MenuGridBrowser", "ProductGridBrowser", "ServiceGridBrowser"]) {
+    for (const layout of [
+      "MenuGridBrowser",
+      "ProductGridBrowser",
+      "ServiceGridBrowser",
+      // v1.3 Lane 2 Task 2 — the Liquor Store presentation variant is a browser
+      // like any other and is held to the same rule: no modifier logic of its
+      // own, it goes through ProductBrowser's shared interception.
+      "LiquorStoreBrowser",
+    ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("modifierGroups");
       expect(source).not.toContain("ModifierSelector");
     }
   });
 
-  it("all three layouts receive the intercepted handler", () => {
-    expect([...browser.matchAll(/\{\.\.\.layoutProps\}/g)]).toHaveLength(3);
+  it("every layout and presentation variant receives the intercepted handler", () => {
+    // Raised from 3 to 4 by the Liquor Store presentation variant. This must
+    // track the real number of browsers ProductBrowser can render — a browser
+    // that did NOT get layoutProps would be selling outside the shared
+    // modifier path.
+    expect([...browser.matchAll(/\{\.\.\.layoutProps\}/g)]).toHaveLength(4);
   });
 });
 
@@ -161,7 +173,18 @@ describe("cart identity and rendering", () => {
     const submission = code(read("lib/saleSubmission.ts"));
     expect(submission).toContain("getItemQuantityInCart(cart, itemId)");
     expect(submission).toContain("currentQuantity: 0");
-    expect(runtime).toContain("getItemQuantityInCart(prev, menuItem.id)");
+
+    // v1.3 Feature 1E-A — the runtime's add path still counts PER PRODUCT
+    // against the authoritative `prev` cart; that counting simply moved behind
+    // the shared activation predicate, so a tap and a later barcode cannot end
+    // up applying two different stock rules. Pinned in both halves rather than
+    // by one literal, which keeps the property asserted wherever the call
+    // lives: the runtime must hand `prev` to the shared predicate, and the
+    // shared predicate must aggregate by item id.
+    expect(runtime).toContain("canActivateItem(menuItem, prev)");
+    expect(code(read("lib/itemActivation.ts"))).toContain(
+      "getItemQuantityInCart(cart, item.id)"
+    );
   });
 });
 

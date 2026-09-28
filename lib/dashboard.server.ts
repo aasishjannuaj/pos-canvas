@@ -20,6 +20,11 @@ type OrderTotalRow = {
   total: number;
   payment_method: PaymentMethod;
   created_at: string;
+  // v1.3 Feature 1F — attribution columns that have existed on `orders` since
+  // 20260917120000 and were simply not being selected. Nullable on purpose:
+  // legacy and partially-attributed sales genuinely have neither.
+  employee_id: string | null;
+  register_session_id: string | null;
   order_items: OrderItemDetailRow[] | null;
 };
 
@@ -41,6 +46,10 @@ function mapOrderTotalRow(row: OrderTotalRow): OrderTotal {
     tip: row.tip_amount,
     total: row.total,
     paymentMethod: row.payment_method,
+    // v1.3 Feature 1F — carried through as-is. A null here is "Unattributed"
+    // or "no register recorded", never a value to fill in.
+    employeeId: row.employee_id ?? null,
+    registerSessionId: row.register_session_id ?? null,
     itemCount,
     items,
     createdAt: row.created_at,
@@ -88,6 +97,8 @@ export async function getProjectOrderTotals(projectId: string): Promise<{
       total,
       payment_method,
       created_at,
+      employee_id,
+      register_session_id,
       order_items (
         item_id,
         item_name,

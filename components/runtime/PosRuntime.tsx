@@ -24,6 +24,12 @@ import type {
   PaymentMethod,
   SaleSaveStatus,
 } from "@/lib/cart";
+// v1.3 Feature 1E-A — the shared stock predicate. The rule it applies is
+// lib/cart.ts's own `canAddItemQuantity`, so this replaces a local
+// re-derivation of that rule rather than adding a second policy beside it.
+// Only the predicate is imported: this component reports no activation status,
+// because it cannot know one (see addToCart).
+import { canActivateItem } from "@/lib/itemActivation";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { isSubmitBlocked } from "@/lib/saleRequest";
 import type { SaleRequestState } from "@/lib/saleRequest";
@@ -46,6 +52,7 @@ import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import PosHeader from "@/components/runtime/PosHeader";
 import ProductBrowser from "@/components/editor/pos-layouts";
+import { isBarcodeScanningEnabled } from "@/lib/projectFeatures";
 import PosCheckoutPanel from "@/components/runtime/PosCheckoutPanel";
 import type {
   PosRuntimeCompleteSale,
@@ -353,19 +360,30 @@ export default function PosRuntime({
   // same product with two different modifier selections stays two independent
   // lines. Stock, by contrast, is held against the PRODUCT, so the quantity
   // checks below count every line carrying that itemId.
-  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []) {
+  //
+  // v1.3 Feature 1E-A — RETURNS NOTHING, DELIBERATELY. An earlier pass had this
+  // report whether the item was added, predicted from the render-time `cart`
+  // before dispatching. That prediction was reachably wrong in both directions:
+  // with a stock ceiling of one, two adds in the same tick both read the same
+  // snapshot and were both told "added" while the updater committed only the
+  // first; and a remove followed by an add in one tick predicted a stock refusal
+  // while the updater went on to add. A synchronous function that dispatches a
+  // functional update cannot observe that update's outcome, so it must not claim
+  // to — and lib/itemActivation.ts is the preflight for callers that need to
+  // decide BEFORE attempting an add.
+  //
+  // The check below is the ONE authoritative stock decision, and it stays inside
+  // the updater against `prev` for exactly the reason the prediction failed:
+  // `prev` is the cart as it actually is, including updates queued in this tick.
+  // It calls the same shared predicate the preflight does, so there is one stock
+  // policy, applied at two moments, with the fresh one deciding the mutation.
+  function addToCart(menuItem: MenuItem, selections: CartModifierSelection[] = []): void {
     setCart((prev) => {
       const line = createCartItem(menuItem, selections);
       const existing = prev.find((cartItem) => cartItem.lineKey === line.lineKey);
 
-      if (
-        !canAddItemQuantity({
-          item: menuItem,
-          // Across ALL lines of this product, not just this one.
-          currentQuantity: getItemQuantityInCart(prev, menuItem.id),
-          addQuantity: 1,
-        })
-      ) {
+      // The authoritative check, against the cart as it actually is.
+      if (!canActivateItem(menuItem, prev)) {
         return prev;
       }
 
@@ -885,8 +903,14 @@ export default function PosRuntime({
           height 693 in both. */}
       <div className="flex flex-1 flex-col overflow-hidden md:flex-row">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white">
+          {/* v1.3 Lane 2 Task 2 — templateId selects a presentation variant
+              (see components/editor/pos-layouts/index.tsx). It is already on
+              the pinned GeneratedPosConfig contract, so this adds no field,
+              no fetch and no persisted state. */}
           <ProductBrowser
             layout={config.project.layout}
+            templateId={config.project.templateId}
+            barcodeScanningEnabled={isBarcodeScanningEnabled(config.features)}
             menuItems={menuItems}
             selectedItemId={null}
             editorMode="preview"

@@ -82,12 +82,21 @@ describe("offline checkout persists and never submits", () => {
     }
   });
 
-  it("the v4 adapter is still the only caller, and only the engine imports it", () => {
+  it("the queued-sale adapter is still the only caller, and only the engine imports it", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: the adapter submits complete_sale_v5.
+    // The guarded property is unchanged — exactly one module may submit a
+    // queued sale, and only the sync engine may import it.
     const callers = productSourceFiles().filter((file) =>
-      code(read(file)).includes('rpc("complete_sale_v4"')
+      code(read(file)).includes('rpc("complete_sale_v5"')
     );
 
-    expect(callers).toEqual([RPC_ADAPTER]);
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. Online device sales and queued device
+    // sales now use the SAME server function (complete_sale_v5), so "who may
+    // call that RPC" is no longer one module — it is exactly two, each owning
+    // one path: lib/device.rpc.ts for the live checkout and lib/offlineSaleRpc.ts
+    // for the queue. The property that matters is unchanged: no component, no
+    // checkout surface and no template may issue the call itself.
+    expect(callers).toEqual(["lib/device.rpc.ts", RPC_ADAPTER]);
 
     const importers = productSourceFiles().filter(
       (file) => file !== RPC_ADAPTER && code(read(file)).includes("offlineSaleRpc")
@@ -163,13 +172,14 @@ describe("offline checkout persists and never submits", () => {
 // ---------------------------------------------------------------------------
 
 describe("online checkout is exactly what it was", () => {
-  it("the device still completes an online sale through complete_sale_v3", () => {
+  it("the device completes an online sale through its approved entry point", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME: online device sales go to v5.
     const rpc = code(read("lib/device.rpc.ts"));
 
     expect(rpc).toContain('rpc("complete_sale_v3"');
     expect(rpc).not.toContain("complete_sale_v4");
     expect(rpc).not.toContain("enqueueSale");
-    expect(code(read(DEVICE_APP))).toContain("completeDeviceSaleV3");
+    expect(code(read(DEVICE_APP))).toContain("completeDeviceSaleV5");
   });
 
   it("the online branch of the runtime is unchanged and still submits", () => {
