@@ -212,8 +212,12 @@ describe("the Liquor Store browser sells through the shared engine only", () => 
 
 describe("no barcode or scanner capability is implied", () => {
   const source = read(BROWSER); // raw, comments INCLUDED
+  const executable = code(source); // comments STRIPPED
 
   it("renders no scanner status or scan-event wording anywhere", () => {
+    // Deliberately over the RAW source: this is about what a cashier could
+    // read on screen, so a scanner claim sitting in a string is exactly what
+    // must not exist, comment-stripped or not.
     for (const banned of [
       "Ready to scan",
       "Scanner connected",
@@ -226,27 +230,104 @@ describe("no barcode or scanner capability is implied", () => {
     }
   });
 
-  it("implements no barcode lookup, parsing or keyboard-wedge capture", () => {
-    const executable = code(source);
+  it("calls none of the shared barcode APIs", () => {
+    // NAMED SYMBOLS, NOT THE WORD "barcode". This guard previously banned the
+    // bare substring in the stripped source, which conflated two different
+    // things: explaining in a comment that scanning does not exist yet (fine,
+    // and the comments are stripped anyway) with actually resolving a scan
+    // (not fine). Every name below is a real export of lib/barcode.ts or
+    // lib/projectFeatures.ts, so this fails on use and stays quiet on mention.
+    for (const api of [
+      "buildBarcodeIndex",
+      "lookupBarcode",
+      "normalizeBarcode",
+      "normalizeOptionalBarcode",
+      "findDuplicateBarcode",
+      "getBarcodeMessage",
+      "BARCODE_MAX_LENGTH",
+      "isBarcodeScanningEnabled",
+      "barcodeScanningEnabled",
+    ]) {
+      expect(executable).not.toContain(api);
+    }
+
+    // And it does not import the modules those live in.
+    expect(executable).not.toContain("@/lib/barcode");
+    expect(executable).not.toContain("@/lib/projectFeatures");
+  });
+
+  it("reads no barcode off a product, even though the shared model now has one", () => {
+    // The field exists (see the shared-model test below). This browser simply
+    // does not consult it — that is the boundary, not the field's existence.
+    expect(executable).not.toContain(".barcode");
+    expect(executable).not.toContain("barcode:");
+  });
+
+  it("captures no keyboard input and installs no global listener", () => {
+    // A wedge scanner types. Any of these would be the beginning of catching
+    // that typing, which is Lane 1's contract to define, not this component's.
     for (const banned of [
-      "barcode",
-      "Barcode",
       "onKeyDown",
+      "onKeyUp",
+      "onKeyPress",
       "keydown",
+      "keypress",
       "addEventListener",
-      "scannerAvailability",
+      "document.addEventListener",
+      "window.addEventListener",
     ]) {
       expect(executable).not.toContain(banned);
     }
   });
 
-  it("MenuItem still carries no barcode field, so there is nothing to search", () => {
+  it("runs no scan-timing or scan-source detection", () => {
+    // Inter-keystroke timing and prefix framing are how a scanner is told
+    // apart from a human; neither belongs here before the contract exists.
+    for (const banned of [
+      "setTimeout",
+      "setInterval",
+      "Date.now",
+      "performance.now",
+      "scannerAvailability",
+      "scanSource",
+      "prefix",
+    ]) {
+      expect(executable).not.toContain(banned);
+    }
+  });
+
+  it("exposes exactly ONE input, the manual search field", () => {
+    // A second field is how a Search/Scan split would first appear.
+    expect([...executable.matchAll(/<input\b/g)]).toHaveLength(1);
+    expect(executable).toContain('placeholder="Search products…"');
+    // No stolen focus, which only a scan-first surface would want.
+    expect(executable).not.toContain("autoFocus");
+    expect(executable).not.toContain(".focus()");
+    expect(executable).not.toContain("useRef");
+  });
+
+  it("mutates no cart directly and runs no second activation preflight", () => {
+    // If a barcode path is ever added it must still go through the shared
+    // onAddToCart. These are the two shapes that would bypass it.
+    for (const banned of ["setCart", "resolveItemActivation", "canActivateItem"]) {
+      expect(executable).not.toContain(banned);
+    }
+  });
+
+  it("the SHARED model supports barcode — that is Lane 1's, and is not denied here", () => {
+    // Replaces an assertion that MenuItem carried no barcode field. That was
+    // true when written and is now simply wrong: accepted Feature 1E-A added
+    // `barcode?: string` to the shared model on purpose. Asserting its absence
+    // made this file contradict the data model it sits on, so the assertion is
+    // inverted to match reality and to catch an accidental REMOVAL of the
+    // field. The Lane 2 boundary was never about the model — it is the
+    // behavioral guards above.
     const config = code(read("lib/projectConfig.ts"));
     const type = config.slice(
       config.indexOf("export type MenuItem"),
       config.indexOf("export type Currency")
     );
-    expect(type.toLowerCase()).not.toContain("barcode");
+    expect(type).toContain("barcode?: string");
   });
 });
 
