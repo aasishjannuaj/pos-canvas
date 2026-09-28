@@ -26,6 +26,7 @@ import type { LogoUploadStatus } from "./BrandingLogoField";
 // must never import the persistence normalizer: it deletes incomplete groups,
 // which is correct at the save/build boundary and destructive at a render one.
 import { toEditableModifierGroups } from "@/lib/modifierAuthoring";
+import { BUSINESS_TIMEZONE_UNSET_LABEL } from "@/lib/businessTimezone";
 // v1.3 Feature 1E-A — the same barcode rules the config pipeline applies, so
 // the Builder's advice and the generator's refusal cannot drift apart.
 import {
@@ -74,6 +75,15 @@ type EditorPropertiesPanelProps = {
   onLogoRemove: () => void;
   onLogoReject: (message: string) => void;
   businessProfile: ProjectConfig["businessProfile"];
+  /**
+   * v1.3 Task 5A — `projects.business_timezone`, a COLUMN rather than part of
+   * ProjectConfig, which is why it arrives beside businessProfile instead of
+   * inside it. Null means the owner has not configured one.
+   */
+  businessTimezone: string | null;
+  /** The IANA identifiers to offer. A menu; never a selection. */
+  businessTimezoneOptions: string[];
+  onBusinessTimezoneChange: (timezone: string) => void;
   onBusinessProfileChange: (
     changes: Partial<ProjectConfig["businessProfile"]>
   ) => void;
@@ -265,6 +275,9 @@ export default function EditorPropertiesPanel({
   onLogoRemove,
   onLogoReject,
   businessProfile,
+  businessTimezone,
+  businessTimezoneOptions,
+  onBusinessTimezoneChange,
   onBusinessProfileChange,
   tax,
   onTaxChange,
@@ -1078,6 +1091,48 @@ export default function EditorPropertiesPanel({
                   }
                   className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
                 />
+              </div>
+
+              {/* v1.3 Task 5A — the business timezone.
+
+                  A SETTING, NOT A GUESS. The list comes from the runtime's own
+                  IANA data, but nothing preselects a zone: an unconfigured
+                  project shows "Not set" and stays that way until the owner
+                  picks one and saves. That matters because this value dates
+                  every register day and everything reported from it, and the
+                  database refuses to open a day without it rather than
+                  inventing one.
+
+                  The placeholder is only selectable while the project is still
+                  unset. Clearing a configured timezone would stop paired tills
+                  selling, and this control is not where that decision belongs;
+                  the column still accepts null through the same owner path. */}
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor="business-timezone"
+                  className="text-xs font-medium uppercase tracking-wide text-neutral-400"
+                >
+                  Business Timezone
+                </label>
+                <select
+                  id="business-timezone"
+                  value={businessTimezone ?? ""}
+                  onChange={(event) => onBusinessTimezoneChange(event.target.value)}
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                >
+                  <option value="" disabled={businessTimezone !== null}>
+                    {BUSINESS_TIMEZONE_UNSET_LABEL}
+                  </option>
+                  {businessTimezoneOptions.map((zone) => (
+                    <option key={zone} value={zone}>
+                      {zone}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs leading-relaxed text-neutral-500">
+                  Sets the business day this shop&apos;s registers and reports
+                  are grouped by. Save to apply it.
+                </p>
               </div>
             </div>
           )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import EditorTopBar from "./EditorTopBar";
 import EditorSidebar from "./EditorSidebar";
@@ -8,6 +8,11 @@ import EditorPreview from "./EditorPreview";
 import EditorPropertiesPanel from "./EditorPropertiesPanel";
 import { isBarcodeScanningEnabled } from "@/lib/projectFeatures";
 import { saveNewProject, updateProject, getProjectConfig } from "@/lib/projects";
+import {
+  businessTimezoneUpdate,
+  listBusinessTimezoneOptions,
+  runtimeSupportedTimezones,
+} from "@/lib/businessTimezone";
 import { completeSaleOrderV3 } from "@/lib/orders";
 import { restockInventory, adjustInventory } from "@/lib/inventory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
@@ -193,6 +198,12 @@ type EditorShellProps = {
   templateId: string;
   initialConfig?: ProjectConfig;
   initialProjectId?: string | null;
+  /**
+   * v1.3 Task 5A — the project's saved `business_timezone`, or null when the
+   * owner has not configured one. Seeds local state exactly like
+   * initialProjectName above; null stays null until an owner chooses.
+   */
+  initialBusinessTimezone?: string | null;
   initialCompletedOrders?: CompletedOrder[];
   // Feature 28A — the canonical receipts for the same orders, so the receipt
   // overlay never has to render the number-typed projection above.
@@ -213,6 +224,7 @@ export default function EditorShell({
   templateId,
   initialConfig,
   initialProjectId,
+  initialBusinessTimezone,
   initialCompletedOrders,
   initialCompletedReceipts,
   initialInventoryTransactions,
@@ -368,6 +380,26 @@ export default function EditorShell({
   // state are both derived from the combination of the two in
   // EditorTopBar, not stored redundantly here.
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
+
+  // v1.3 Task 5A — the business timezone the owner is editing, and the one the
+  // database currently holds. TWO VALUES ON PURPOSE: the difference between
+  // them is what decides whether a save carries `business_timezone` at all, so
+  // an ordinary price edit never puts the column through the validation
+  // trigger, and a timezone the owner did not touch is never rewritten.
+  const [businessTimezone, setBusinessTimezone] = useState<string | null>(
+    initialBusinessTimezone ?? null
+  );
+  const [savedBusinessTimezone, setSavedBusinessTimezone] = useState<string | null>(
+    initialBusinessTimezone ?? null
+  );
+
+  // The MENU, not a choice: the runtime's IANA list, read once. Nothing here
+  // selects a zone — see lib/businessTimezone.ts.
+  const businessTimezoneOptions = useMemo(
+    () => listBusinessTimezoneOptions(runtimeSupportedTimezones(), businessTimezone),
+    [businessTimezone]
+  );
+
   const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -761,6 +793,13 @@ export default function EditorShell({
       ...prev,
       businessProfile: { ...prev.businessProfile, ...changes },
     }));
+  }
+
+  // v1.3 Task 5A — the owner's deliberate timezone choice. Marks the project
+  // dirty like every other Business field, so it is persisted by the same Save.
+  function handleBusinessTimezoneChange(timezone: string) {
+    markDirty();
+    setBusinessTimezone(timezone);
   }
 
   function handleTaxChange(changes: Partial<TaxSettings>) {
@@ -1376,6 +1415,8 @@ export default function EditorShell({
         name: trimmedName,
         templateId,
         config: configToPersist,
+        // Only when the owner actually picked one before the first save.
+        ...businessTimezoneUpdate(null, businessTimezone),
       });
 
       if (error || !project) {
@@ -1396,6 +1437,7 @@ export default function EditorShell({
       onboarding.persistProgressForProject(project.id);
 
       setProjectId(project.id);
+      setSavedBusinessTimezone(businessTimezone);
       setIsDirty(false);
       setSaveStatus("saved");
       setSaveError(null);
@@ -1416,14 +1458,21 @@ export default function EditorShell({
       projectId,
       name: trimmedName,
       config: configToPersist,
+      // Omitted unless the owner changed it; lib/projects.ts treats an omitted
+      // value as "leave the column alone".
+      ...businessTimezoneUpdate(savedBusinessTimezone, businessTimezone),
     });
 
     if (error || !project) {
+      // The database is the authority on whether a timezone change is safe. A
+      // refusal — including business_timezone_change_blocked_open_register — is
+      // surfaced as the save error, never swallowed into a "Saved" state.
       setSaveStatus("error");
       setSaveError(error ?? "Something went wrong while saving.");
       return;
     }
 
+    setSavedBusinessTimezone(businessTimezone);
     setIsDirty(false);
     setSaveStatus("saved");
     setSaveError(null);
@@ -1886,6 +1935,9 @@ export default function EditorShell({
           onLogoReject={handleLogoReject}
           businessProfile={projectConfig.businessProfile}
           onBusinessProfileChange={handleBusinessProfileChange}
+          businessTimezone={businessTimezone}
+          businessTimezoneOptions={businessTimezoneOptions}
+          onBusinessTimezoneChange={handleBusinessTimezoneChange}
           tax={projectConfig.tax}
           onTaxChange={handleTaxChange}
           receipt={projectConfig.receipt}

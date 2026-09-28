@@ -64,6 +64,9 @@ export default async function EditorPage({
         templateId={project.template_id}
         initialConfig={initialConfig}
         initialProjectId={project.id}
+        // v1.3 Task 5A — the saved business timezone, or null when the owner
+        // has not configured one yet. Loaded, never inferred.
+        initialBusinessTimezone={project.business_timezone}
         initialCompletedOrders={orders}
         initialCompletedReceipts={receipts}
         initialInventoryTransactions={transactions}

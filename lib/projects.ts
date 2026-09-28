@@ -5,12 +5,26 @@ type SaveNewProjectInput = {
   name: string;
   templateId: string;
   config: ProjectConfig;
+  /**
+   * v1.3 Task 5A — the IANA business timezone, when the owner chose one before
+   * the project's first save.
+   *
+   * OMITTED MEANS "leave it unset", exactly as UpdateProjectInput's omission
+   * means "leave it alone". Nothing infers a value here: a project created
+   * without a deliberate choice is created with no timezone, and
+   * projects_validate_business_timezone validates this on INSERT as well as on
+   * UPDATE (the trigger is `before insert or update of business_timezone`), so
+   * an invalid identifier is refused by the database rather than by a client
+   * rule that could drift from it.
+   */
+  businessTimezone?: string | null;
 };
 
 export async function saveNewProject({
   name,
   templateId,
   config,
+  businessTimezone,
 }: SaveNewProjectInput) {
   const supabase = createClient();
 
@@ -33,12 +47,15 @@ export async function saveNewProject({
       name,
       template_id: templateId,
       config,
+      // Spread for the same reason as updateProject below: an omitted timezone
+      // must leave the column at its default null, not write an invented one.
+      ...(businessTimezone !== undefined ? { business_timezone: businessTimezone } : {}),
     })
     .select()
     .single();
 
   if (error) {
-    return { project: null, error: error.message };
+    return { project: null, error: describeProjectUpdateError(error.message) };
   }
 
   return { project: data, error: null };
@@ -171,6 +188,11 @@ export type SavedProject = {
   name: string;
   template_id: string;
   config: ProjectConfig;
+  /**
+   * v1.3 Task 5A — the project's authoritative business timezone, or null when
+   * the owner has not configured one yet. Null is a real, displayable state.
+   */
+  business_timezone: string | null;
   created_at: string;
   updated_at: string;
 };

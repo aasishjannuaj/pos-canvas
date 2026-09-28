@@ -21,7 +21,7 @@ export async function getUserProjects(): Promise<{
 
   const { data, error } = await supabase
     .from("projects")
-    .select("id, name, template_id, config, created_at, updated_at")
+    .select("id, name, template_id, config, business_timezone, created_at, updated_at")
     .order("updated_at", { ascending: false });
 
   if (error) {
@@ -49,7 +49,7 @@ export async function getProjectById(projectId: string): Promise<{
 
   const { data, error } = await supabase
     .from("projects")
-    .select("id, name, template_id, config, created_at, updated_at")
+    .select("id, name, template_id, config, business_timezone, created_at, updated_at")
     .eq("id", projectId)
     .single();
 
