@@ -656,6 +656,96 @@ export async function completeDeviceSaleV3(request: DeviceSaleV3Request): Promis
   }
 }
 
+export type DeviceSaleV5Request = {
+  paymentMethod: "cash" | "card";
+  items: {
+    itemId: string;
+    quantity: number;
+    modifiers: { groupId: string; optionIds: string[] }[];
+  }[];
+  saleRequestId: string;
+  /**
+   * v1.3 Feature 1B — EXPECTATIONS, not authority.
+   *
+   * complete_sale_v5 compares each against the row it has locked for this
+   * device and refuses the sale if either has moved. It never copies them into
+   * the order: the stored employee_id, paired_device_id and register_session_id
+   * are all read from server rows. Sending them is what turns "the cashier
+   * switched while this cart was open" from a silent misattribution into a
+   * refusal the operator has to resolve.
+   */
+  expectedEmployeePosSessionId: string;
+  expectedRegisterSessionId: string;
+};
+
+/**
+ * Completes an ONLINE paired-device sale through complete_sale_v5.
+ *
+ * NO PROJECT ID. v5 derives the project from this device's own pairing row, so
+ * unlike v3 there is no tenant argument to get wrong — and none to forge. The
+ * device, the employee and the register are all resolved server-side.
+ *
+ * Everything financial is v4's, unchanged: identifiers and quantities only, the
+ * tip hardcoded to 0 (v5 rejects a non-zero device tip exactly as v3 did), the
+ * caller's saleRequestId carried straight through for idempotency, and the
+ * server's own receipt returned rather than anything assembled here.
+ */
+export async function completeDeviceSaleV5(request: DeviceSaleV5Request): Promise<{
+  receipt: CompletedSaleReceipt | null;
+  error: string | null;
+  failure?: DeviceFailureKind;
+  rolledBack?: boolean;
+}> {
+  try {
+    const { data, error, status } = await getDeviceSupabaseClient().rpc("complete_sale_v5", {
+      p_payment_method: request.paymentMethod,
+      p_tip_amount: 0,
+      p_items: request.items.map((item) => ({
+        itemId: item.itemId,
+        quantity: item.quantity,
+        modifiers: item.modifiers.map((group) => ({
+          groupId: group.groupId,
+          optionIds: group.optionIds,
+        })),
+      })),
+      p_sale_request_id: request.saleRequestId,
+      // An online sale happens now, by definition: v5 refuses a caller-supplied
+      // time on the online path rather than ignoring it.
+      p_occurred_at: null,
+      p_source: "online",
+      p_employee_pos_session_id: request.expectedEmployeePosSessionId,
+      p_register_session_id: request.expectedRegisterSessionId,
+    });
+
+    if (error) {
+      const withHttpStatus = withStatus(error, status);
+
+      return {
+        receipt: null,
+        error: error.message,
+        failure: classifyDeviceFailure(withHttpStatus),
+        rolledBack: isDatabaseRejection(error),
+      };
+    }
+
+    if (!isCompletedSaleReceipt(data)) {
+      return {
+        receipt: null,
+        error: "The sale response could not be read.",
+        failure: "server_rejected",
+      };
+    }
+
+    return { receipt: data, error: null };
+  } catch (thrown) {
+    return {
+      receipt: null,
+      error: "The sale could not be completed. Check the connection and try again.",
+      failure: classifyDeviceFailure(thrown),
+    };
+  }
+}
+
 export type DeviceSaleRequest = {
   projectId: string;
   paymentMethod: "cash" | "card";

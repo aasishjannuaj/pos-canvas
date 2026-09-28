@@ -26,6 +26,13 @@ import type { LogoUploadStatus } from "./BrandingLogoField";
 // must never import the persistence normalizer: it deletes incomplete groups,
 // which is correct at the save/build boundary and destructive at a render one.
 import { toEditableModifierGroups } from "@/lib/modifierAuthoring";
+// v1.3 Feature 1E-A — the same barcode rules the config pipeline applies, so
+// the Builder's advice and the generator's refusal cannot drift apart.
+import {
+  getBarcodeMessage,
+  normalizeBarcode,
+  normalizeOptionalBarcode,
+} from "@/lib/barcode";
 import { getAppInformation } from "@/lib/appInformation";
 import PublishProgressSteps from "@/components/editor/PublishProgressSteps";
 import {
@@ -321,6 +328,46 @@ export default function EditorPropertiesPanel({
     string | null
   >(null);
   const [adjustQuantityInput, setAdjustQuantityInput] = useState("");
+
+  // v1.3 Feature 1E-A — advisory barcode feedback for the selected item.
+  //
+  // ADVISORY, NOT ENFORCEMENT. Nothing here blocks an edit: an owner mid-typing
+  // is briefly holding an invalid value, and refusing keystrokes would make the
+  // field unusable. The authoritative rules live where they can be applied
+  // safely — normalizeMenuItem drops an unusable barcode, and
+  // createGeneratedPosConfig REFUSES to build a catalogue in which two products
+  // share one. This only explains, ahead of time, what those will do.
+  //
+  // Uses the same normalizer and the same duplicate detector as those two, so
+  // what this warns about and what they do can never disagree.
+  const barcodeAdvice = ((): string | null => {
+    if (selectedItem === null) {
+      return null;
+    }
+
+    const typed = selectedItem.barcode ?? "";
+
+    // An empty field is the ordinary case — most products have no barcode.
+    if (typed.trim() === "") {
+      return null;
+    }
+
+    const result = normalizeBarcode(typed);
+
+    if (!result.ok) {
+      return getBarcodeMessage(result.problem);
+    }
+
+    const clash = menuItems.find(
+      (item) =>
+        item.id !== selectedItem.id &&
+        normalizeOptionalBarcode(item.barcode) === result.barcode
+    );
+
+    return clash === undefined
+      ? null
+      : `Also used by “${clash.name.trim() === "" ? "another product" : clash.name.trim()}”. Publishing is blocked until one changes.`;
+  })();
 
   const trackedItems = menuItems.filter((item) => item.trackInventory);
   const effectiveRestockItemId =
@@ -787,6 +834,38 @@ export default function EditorPropertiesPanel({
                       }
                       className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
                     />
+                  </div>
+
+                  {/* v1.3 Feature 1E-A — optional barcode, stored on the item
+                      and routed through the SAME onUpdate handler every other
+                      field above uses.
+
+                      RAW WHILE TYPING, normalized at the boundaries, exactly as
+                      name and category already are: the owner sees what they
+                      typed, and normalizeMenuItem/toRuntimeSafeMenuItem decide
+                      what is actually stored and shipped. The feedback below is
+                      ADVISORY — it explains what will happen, it does not
+                      enforce. Enforcement lives in createGeneratedPosConfig,
+                      which refuses to build an ambiguous catalogue at all. */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
+                      Barcode (optional)
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={selectedItem.barcode ?? ""}
+                      onChange={(event) =>
+                        onUpdate(selectedItem.id, { barcode: event.target.value })
+                      }
+                      placeholder="012345678905"
+                      className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
+                    />
+                    {barcodeAdvice !== null && (
+                      <p className="text-xs text-amber-700">{barcodeAdvice}</p>
+                    )}
                   </div>
 
                   {/* Feature 18.2 Phase 4 — modifier authoring, underneath the

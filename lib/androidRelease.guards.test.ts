@@ -603,9 +603,13 @@ describe("earlier device/checkout/branding paths are unchanged", () => {
     expect(rpc).toContain("get_device_config");
   });
 
-  it("Feature 18.2 v3 checkout is untouched", () => {
+  it("the device checkout entry point is the approved one", () => {
+    // UPDATED BY v1.3 Feature 1B-RUNTIME. The device host moved from
+    // completeDeviceSaleV3 to completeDeviceSaleV5 (server-derived attribution).
+    // v3 REMAINS DEFINED for the owner/browser host and for rollback, which is
+    // what the first assertion still pins.
     expect(code(read("lib/device.rpc.ts"))).toContain('rpc("complete_sale_v3"');
-    expect(code(read("components/device/DeviceApp.tsx"))).toContain("completeDeviceSaleV3");
+    expect(code(read("components/device/DeviceApp.tsx"))).toContain("completeDeviceSaleV5");
   });
 
   it("Feature 19 logo rendering is untouched", () => {

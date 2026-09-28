@@ -22,6 +22,10 @@ import type {
   ReceiptSettings,
   TaxSettings,
 } from "@/lib/projectConfig";
+// v1.3 Feature 1E-A — the barcode value contract and the project capability
+// model, both pure and both already used by lib/projectConfig.ts's normalizer.
+import { findDuplicateBarcode, normalizeOptionalBarcode } from "@/lib/barcode";
+import type { ProjectFeatures } from "@/lib/projectFeatures";
 import { getTemplateById } from "@/data/templates";
 import { DEFAULT_POS_LAYOUT } from "@/lib/posLayout";
 import type { PosLayout } from "@/lib/posLayout";
@@ -71,6 +75,19 @@ export type GeneratedPosConfig = {
   menuItems: MenuItem[];
   tax: TaxSettings;
   receipt: ReceiptSettings;
+  /**
+   * v1.3 Feature 1E-A — the project's optional capabilities, carried so a
+   * pinned till can answer "may I scan?" from its own configuration instead of
+   * inferring it from templateId.
+   *
+   * OPTIONAL, AND OMITTED WHEN THE PROJECT NEVER CONFIGURED ONE. This is not
+   * tidiness: canonicalizeGeneratedPosConfig hashes every key at every depth,
+   * that hash becomes build_jobs.config_hash, and config_hash drives build
+   * dedupe and the device config-update offer. Emitting a defaults block here
+   * would change the hash of every existing project and ask every paired till
+   * to re-pin, in order to record a value their silence already meant.
+   */
+  features?: ProjectFeatures;
 };
 
 export type CreateGeneratedPosConfigInput = {
@@ -154,7 +171,12 @@ function toRuntimeSafeMenuItem(item: MenuItem, index: number): MenuItem {
       ? Math.floor(item.stockQuantity)
       : 0;
 
-  return {
+  // v1.3 Feature 1E-A — re-normalized here rather than trusted, for the same
+  // reason modifierGroups is: this is the boundary every build passes through,
+  // and D4c freezes the snapshot once written.
+  const barcode = normalizeOptionalBarcode(item.barcode);
+
+  const runtimeSafe: MenuItem = {
     id,
     name,
     category: item.category,
@@ -168,6 +190,17 @@ function toRuntimeSafeMenuItem(item: MenuItem, index: number): MenuItem {
     price,
     stockQuantity,
   };
+
+  // v1.3 Feature 1E-A — THIS FUNCTION BUILDS FIELD BY FIELD AND HAS NO SPREAD,
+  // so an unknown key on the input is dropped here. Without this assignment a
+  // barcode would work everywhere in the Builder and silently vanish from every
+  // device. Attached only when present, so an item with no barcode produces a
+  // menu item with no `barcode` key and an unchanged canonical hash.
+  if (barcode !== undefined) {
+    runtimeSafe.barcode = barcode;
+  }
+
+  return runtimeSafe;
 }
 
 // Feature 14.1 — runtime-safe tax cleanup. normalizeProjectConfig does not
@@ -278,7 +311,36 @@ export function createGeneratedPosConfig(
   // generated output impossible, only fall back to a safe default layout.
   const layout = getTemplateById(templateId)?.layout ?? DEFAULT_POS_LAYOUT;
 
-  return {
+  const menuItems = normalizedConfig.menuItems.map(toRuntimeSafeMenuItem);
+
+  // ==========================================================================
+  // v1.3 Feature 1E-A — THE AUTHORITATIVE DUPLICATE REFUSAL.
+  //
+  // Two products sharing a barcode is a catalogue mistake with no safe reading.
+  // Neither first-wins nor last-wins is defensible: both quietly sell one
+  // product at another's price, and which one a till picks depends on array
+  // order nobody can see.
+  //
+  // It is refused HERE, at generation, because this is the boundary that
+  // produces the artifact devices pin. build_jobs.config_snapshot is frozen by
+  // D4c once written, so an ambiguous configuration that reached it could never
+  // be corrected in place — only superseded by a whole new build. Throwing
+  // matches how this function already treats a caller-side mistake it must not
+  // paper over (see requireNonEmptyTrimmed above), as opposed to legacy data,
+  // which every other rule here normalizes instead.
+  //
+  // The Builder's advisory warning uses the same detector, so what it flags and
+  // what this refuses can never disagree.
+  // ==========================================================================
+  const duplicateBarcode = findDuplicateBarcode(menuItems);
+
+  if (duplicateBarcode !== null) {
+    throw new Error(
+      `createGeneratedPosConfig: barcode ${JSON.stringify(duplicateBarcode)} is used by more than one product.`
+    );
+  }
+
+  const generated: GeneratedPosConfig = {
     schemaVersion: GENERATED_POS_CONFIG_SCHEMA_VERSION,
     generatedAt,
     project: {
@@ -289,10 +351,20 @@ export function createGeneratedPosConfig(
     },
     businessProfile: toRuntimeSafeBusinessProfile(normalizedConfig.businessProfile),
     branding: toRuntimeSafeBranding(normalizedConfig.branding),
-    menuItems: normalizedConfig.menuItems.map(toRuntimeSafeMenuItem),
+    menuItems,
     tax: toRuntimeSafeTax(normalizedConfig.tax),
     receipt: toRuntimeSafeReceipt(normalizedConfig.receipt),
   };
+
+  // v1.3 Feature 1E-A — carried only when the project actually configured a
+  // capability. normalizeProjectConfig has already removed the key entirely
+  // when it did not, so a pre-1E project produces a byte-identical canonical
+  // string — and therefore an unchanged config hash — after this feature.
+  if (normalizedConfig.features !== undefined) {
+    generated.features = normalizedConfig.features;
+  }
+
+  return generated;
 }
 
 // Feature 14.2 — export eligibility as a small, pure, independently testable

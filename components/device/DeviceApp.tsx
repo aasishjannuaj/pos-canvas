@@ -27,8 +27,21 @@ import DevicePairingScreen from "@/components/device/DevicePairingScreen";
 import DeviceStatusScreen from "@/components/device/DeviceStatusScreen";
 import DeviceSyncStatus from "@/components/device/DeviceSyncStatus";
 import {
+  BusinessTimezoneRequiredCard,
+  DailyContextRecoveryCard,
+  DailyRegisterStatus,
+  EmployeeLockCard,
+  TimeClockPanel,
+  CashMovementPanel,
+} from "@/components/device/PosGates";
+import { clockInEmployee, clockOutEmployee, newTimeClockRequestId } from "@/lib/timeClock.rpc";
+import type { TimeClockAction, TimeClockResult } from "@/lib/timeClock";
+import { newCashMovementRequestId, recordCashMovement } from "@/lib/cashMovement.rpc";
+import { cashMovementFailure } from "@/lib/cashMovement";
+import type { CashMovementResult, CashMovementType } from "@/lib/cashMovement";
+import {
   applyDeviceConfigUpdate,
-  completeDeviceSaleV3,
+  completeDeviceSaleV5,
   fetchDeviceConfig,
   fetchDevicePairingState,
   getDeviceSession,
@@ -52,6 +65,22 @@ import {
   toDeviceDisplayConfig,
 } from "@/lib/deviceSession";
 import type { DevicePairing, DeviceState, DeviceUpdateOffer } from "@/lib/deviceSession";
+import { startReconnectProbe } from "@/lib/deviceReconnectProbe";
+import {
+  AUTO_LOCK_ACTIVITY_EVENTS,
+  AUTO_LOCK_MESSAGE,
+  startAutoLock,
+} from "@/lib/autoLock";
+
+/**
+ * v1.3 CP4 — the two ways an operator stops being trusted on this till.
+ *
+ * They differ in exactly one thing: whether a person decided. Everything after
+ * that decision — capture the session id, clear local authority, lock, then
+ * terminate the server session — is identical, and is shared rather than
+ * copied so the ordering that makes it safe cannot drift between them.
+ */
+type OperatorLockReason = "ring_out" | "auto_lock";
 import { permitsOfflineFallback, readOnlineHint } from "@/lib/deviceConnectivity";
 import type { DeviceFailureKind } from "@/lib/deviceConnectivity";
 import {
@@ -118,6 +147,54 @@ import {
   resolveUncertainSale,
 } from "@/lib/uncertainSaleSession";
 import type { UncertainSale } from "@/lib/saleSubmission";
+import {
+  employeeLoginByCode,
+  endEmployeePosSession,
+  fetchCurrentEmployeeSession,
+  fetchLoginEmployees,
+} from "@/lib/employee.rpc";
+import {
+  getEmployeeLoginErrorMessage,
+  type EmployeeSession,
+  type LoginEmployee,
+} from "@/lib/employeeSession";
+import {
+} from "@/lib/register.rpc";
+import {
+  UNLOADED_ROSTER,
+  applyRosterFailed,
+  applyRosterLoaded,
+  beginRosterLoad,
+  resetRoster,
+  shouldLoadRoster,
+} from "@/lib/employeeRoster";
+import type { RosterState } from "@/lib/employeeRoster";
+import { ensureDailyRegisterContext } from "@/lib/daily.rpc";
+import {
+  adoptSaleRegisterId,
+  nextDailyRefreshDelayMs,
+  shouldAdoptSaleRegisterId,
+  timestampMs,
+} from "@/lib/dailyRegister";
+import {
+  EMPTY_POS_GATE_STATE,
+  applyExplicitDailyEstablished,
+  applyDailyRefresh,
+  applySaleRegisterAdoption,
+  applyEmployeeAuthenticated,
+  applyReconnectDerivation,
+  applySaleAttributionFailure,
+  buildOfflineClaims,
+  canCheckoutOffline,
+  describePosGateBlock,
+  beginEmployeeSwitch,
+  checkRetainedEmployee,
+  classifySaleAttributionFailure,
+  resolvePosGate,
+  type DailyAcquisition,
+  type PosGateState,
+  type SessionRead,
+} from "@/lib/posGate";
 import type {
   PosRuntimeArmOnlineSale,
   PosRuntimeCompleteSale,
@@ -139,6 +216,20 @@ const EMPTY_SALE_STATUS: OfflineSaleStatus = {
   nextRetryAt: null,
   uncertainOnlineSale: false,
 };
+
+/**
+ * Which kind of server read a gate derivation is.
+ *
+ * "reconnect" re-verifies a till whose operator ALREADY authenticated here: it
+ * keeps them only while the server still reports the same POS session, and
+ * locks otherwise. It cannot unlock a locked till.
+ *
+ * "observe" follows a stale-expectation refusal and adopts nothing at all.
+ *
+ * Note what is absent: there is no mode that turns a server observation into an
+ * unlocked POS. Only an Employee ID and a PIN do that.
+ */
+type GateDerivationMode = "reconnect" | "observe";
 
 export default function DeviceApp() {
   const [state, setState] = useState<DeviceState>({ status: "checking" });
@@ -314,6 +405,833 @@ export default function DeviceApp() {
    * yet" is not the same claim as "this till cannot go offline".
    */
   const [offlinePrepared, setOfflinePrepared] = useState<boolean | null>(null);
+
+  /**
+   * v1.3 Feature 1B — the employee and register this till has established.
+   *
+   * IN MEMORY ONLY, DELIBERATELY. Nothing here is written to storage: an
+   * employee session and an open register are server state, and a till that
+   * remembered them across a restart would be inventing authority it no longer
+   * holds. Every start and every reconnect re-derives both from the server, and
+   * Policy 1 gates offline checkout on having done so in THIS app run.
+   */
+  const [gate, setGate] = useState<PosGateState>(EMPTY_POS_GATE_STATE);
+  const gateRef = useRef<PosGateState>(EMPTY_POS_GATE_STATE);
+  /**
+   * Consecutive freshness refreshes that came back with the SAME context.
+   *
+   * Feeds the backoff in lib/dailyRegister.ts. A ref rather than state: it
+   * changes nothing on screen, and making it state would re-run the very effect
+   * that writes it.
+   */
+  const dailyUnchangedRef = useRef(0);
+  /**
+   * The login roster, as a LIFECYCLE rather than an array.
+   *
+   * An empty array could not tell "nobody has asked yet" apart from "this
+   * project genuinely has no one", so a normal startup announced the second
+   * while the truth was the first. lib/employeeRoster.ts keeps them apart.
+   */
+  const [roster, setRoster] = useState<RosterState>(UNLOADED_ROSTER);
+  /**
+   * Closes the window between "a fetch has been started" and "React has
+   * committed the loading state". `shouldLoadRoster` refuses to start a second
+   * load once the state says `loading`, but the state is not visible to the
+   * next effect run until the render lands; this ref is.
+   */
+  const rosterInFlightRef = useRef(false);
+
+  /**
+   * v1.3 CP3 — closes the double-press window on Ring Out.
+   *
+   * `gateBusy` cannot do this job. It is React state, so it is not visible to a
+   * second click that lands before the render commits — and Ring Out's first
+   * act is a security transition, which must happen exactly once and must not
+   * be followed by a second logout call. A ref is readable in the same tick.
+   */
+  const ringOutInFlightRef = useRef(false);
+
+  /**
+   * v1.3 CP3 — the accepted transport-failure transition, reachable from above.
+   *
+   * WHY A REF AND NOT A DIRECT CALL. Ring Out lives beside the login handler,
+   * which is where it belongs and where the accepted CP2d and employee-lock
+   * guards expect to find it. enterOfflineFromTransportFailure is declared far
+   * below, beside the sale path that already uses it. Moving either to satisfy
+   * the other would drag an unrelated region across a guard's boundary — the
+   * Windows update handling, or the sale-rejection path — and those guards are
+   * pinning real invariants, not accidents of layout.
+   *
+   * So this holds the SAME function, assigned once it exists. Ring Out reaches
+   * the one accepted transition instead of growing a second one.
+   */
+  const enterOfflineRef = useRef<(() => Promise<void>) | null>(null);
+  const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
+  const [gateBusy, setGateBusy] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+
+  /**
+   * v1.3 Feature 1C — the Time Clock, which is a guest on this screen.
+   *
+   * It is separate state on purpose. Opening it, using it and closing it must
+   * leave `gate` untouched: the same operator is on the till afterwards, with
+   * the same cart and the same business day. Nothing here is allowed to
+   * reach into employee authority.
+   */
+  const [timeClockOpen, setTimeClockOpen] = useState(false);
+  const [timeClockBusy, setTimeClockBusy] = useState(false);
+  const [timeClockResult, setTimeClockResult] = useState<TimeClockResult | null>(null);
+  const timeClockInFlightRef = useRef(false);
+
+  // v1.3 Feature 1D — the Cash Movement panel's own state, kept entirely apart
+  // from the gate's. Opening it changes no authority, and closing it restores
+  // whatever was on screen.
+  const [cashMovementOpen, setCashMovementOpen] = useState(false);
+  const [cashMovementBusy, setCashMovementBusy] = useState(false);
+  const [cashMovementResult, setCashMovementResult] = useState<CashMovementResult | null>(null);
+  const cashMovementInFlightRef = useRef(false);
+
+  useEffect(() => {
+    gateRef.current = gate;
+  }, [gate]);
+
+
+
+  /**
+   * Re-derives BOTH sessions from the server.
+   *
+   * The only way gate state is ever established. Used at startup, after a
+   * reconnect, and after any sale the server refused on attribution grounds —
+   * the till never promotes what it already holds, because the refusal is proof
+   * it was wrong about server state.
+   */
+  /**
+   * "establish" is the ordinary startup/reconnect read: whatever the server
+   * reports becomes this till's state, and the POS opens if both exist.
+   *
+   * "observe" is the read that follows a stale-expectation refusal. It asks the
+   * same questions and adopts NOTHING — see applyRecoveryObservation.
+   */
+  /**
+   * What to tell the operator after a daily acquisition, and nothing more.
+   *
+   * The pure transition has already decided what the till holds; this only
+   * explains it. `null` clears the message, which is what a success means.
+   */
+  const describeDailyOutcome = useCallback(
+    (next: PosGateState, daily: DailyAcquisition): string | null => {
+      if (daily.ok) return null;
+
+      if (daily.reason === "timezone_required") {
+        return "This business needs a timezone before sales can be rung up.";
+      }
+
+      if (daily.reason === "conflict") {
+        return "Could not confirm which business day this till is on. Try again.";
+      }
+
+      // Unreachable server. A till that was already established keeps selling
+      // and is told nothing; one that has nothing yet is told to check.
+      return next.establishedOnline
+        ? null
+        : "Could not reach the server to set up today. Check the connection and try again.";
+    },
+    []
+  );
+
+  /** One employee read, in the shape the pure rules consume. */
+  const readEmployeeSession = useCallback(async (): Promise<SessionRead<EmployeeSession>> => {
+    const result = await fetchCurrentEmployeeSession();
+
+    return result.ok ? { ok: true, session: result.session } : { ok: false };
+  }, []);
+
+  /**
+   * One ensure_daily_register_context() call, in the shape the pure rules
+   * consume.
+   *
+   * THE ONLY PLACE A BUSINESS DAY COMES FROM. Nothing else in this component
+   * computes, formats, guesses or caches one, and the two domain refusals are
+   * kept apart from a transport failure here rather than downstream: a business
+   * with no timezone is somebody's job to fix, a conflict is an exception a
+   * cashier can retry past, and an unreachable server is neither.
+   */
+  const acquireDaily = useCallback(async (): Promise<DailyAcquisition> => {
+    const result = await ensureDailyRegisterContext();
+
+    if (result.ok) {
+      return { ok: true, context: result.context };
+    }
+
+    if (result.error === "business_timezone_required") {
+      return { ok: false, reason: "timezone_required" };
+    }
+
+    if (result.error === "daily_register_timezone_conflict") {
+      return { ok: false, reason: "conflict" };
+    }
+
+    return { ok: false, reason: "unavailable" };
+  }, []);
+
+  const deriveGateState = useCallback(
+    async (mode: GateDerivationMode = "reconnect"): Promise<PosGateState> => {
+      // v1.3 CP2d — ONE SHAPE FOR EVERY RE-DERIVATION: who is signed in, and
+      // what day the server says it is. The register is no longer asked about,
+      // because there is no longer a register to choose.
+      const employee = await readEmployeeSession();
+
+      // The employee read decides whether the till keeps its operator at all,
+      // so a failed or empty one short-circuits: there is nobody to establish a
+      // business day for, and asking would only create one nobody is standing
+      // behind.
+      if (!employee.ok || employee.session === null) {
+        const next = applyReconnectDerivation(gateRef.current, {
+          employee,
+          daily: { ok: false, reason: "unavailable" },
+        });
+
+        setGate(next);
+        return next;
+      }
+
+      const daily = await acquireDaily();
+
+      // "observe" follows a stale-expectation refusal and must adopt NOTHING:
+      // the server has just proven this till wrong, and a fresh read is an
+      // observation, not the operator's choice to trust it again. The recovery
+      // survives and keeps the gate shut.
+      const next =
+        mode === "observe"
+          ? applyDailyRefresh(gateRef.current, { ok: false, reason: "unavailable" })
+          : applyReconnectDerivation(gateRef.current, { employee, daily });
+
+      setGate(next);
+      return next;
+    },
+    [readEmployeeSession, acquireDaily]
+  );
+
+  /**
+   * True only while this till is ready AND online.
+   *
+   * Flipping false→true is the reconnect signal: the effect below re-derives
+   * both sessions from the server rather than promoting whatever the till was
+   * holding while it was offline.
+   */
+  const gateDerivationAllowed =
+    state.status === "ready" && getDeviceRuntimeMode(state) !== "offline";
+
+  /**
+   * Startup and reconnect derivation.
+   *
+   * Runs whenever the till is ready and ONLINE. Offline it does nothing at all:
+   * there is no server to ask, and inventing state from what the last screen
+   * showed is the one thing Policy 1 forbids. A till that goes offline keeps
+   * what it established; a till that STARTS offline holds nothing and cannot
+   * check out until it reconnects.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed) {
+      return;
+    }
+
+    // Deferred out of the commit phase, and cancellable — the same shape the
+    // revoked-drain effect below uses, for the same two reasons. A till that
+    // leaves this screen before the timer fires never starts a derivation whose
+    // answer nothing will read.
+    const start = setTimeout(() => {
+      void deriveGateState();
+    }, 0);
+
+    return () => clearTimeout(start);
+  }, [gateDerivationAllowed, deriveGateState]);
+
+  /**
+   * v1.3 CP2d — MIDNIGHT IS FRESHNESS, NEVER CORRECTNESS.
+   *
+   * This timer exists so a till that has been open all evening is already
+   * holding tomorrow's context when the first morning sale is rung, saving a
+   * server-side roll-forward. It is not what makes midnight work:
+   * complete_sale_v5 rolls any sale onto the current business day by itself, so
+   * a timer that fires late, fires early, or never fires at all cannot misfile
+   * money. Android suspends, Windows sleeps, JS timers drift and device clocks
+   * are wrong — all of that is assumed here, and none of it matters.
+   *
+   * IT CAN ONLY EVER ADD. applyDailyRefresh never locks the till, never ends an
+   * employee session, never touches the cart and never stops an authorized
+   * offline checkout because a business day ended by this device's reckoning.
+   * A refresh that cannot reach the server changes nothing at all.
+   *
+   * WHEN IT RUNS. Only while the till is ready, online and established. Offline
+   * it does not run, which is exactly what keeps a till that crossed midnight
+   * without a network selling under the day it legitimately established.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed || !gate.establishedOnline || gate.daily === null) {
+      return;
+    }
+
+    const delay = nextDailyRefreshDelayMs({
+      closedAtMs: timestampMs(gate.daily.closedAt),
+      nowMs: Date.now(),
+      consecutiveUnchanged: dailyUnchangedRef.current,
+    });
+
+    const held = gate.daily.registerSessionId;
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const acquisition = await acquireDaily();
+
+        // THE BACKOFF LIVES HERE. A server that keeps answering with the same
+        // context — because this clock is ahead, or because the day genuinely
+        // has not turned — makes the next wait longer instead of spinning.
+        if (acquisition.ok && acquisition.context.registerSessionId === held) {
+          dailyUnchangedRef.current += 1;
+        } else if (acquisition.ok) {
+          dailyUnchangedRef.current = 0;
+        }
+
+        setGate(applyDailyRefresh(gateRef.current, acquisition));
+      })();
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [gateDerivationAllowed, gate.establishedOnline, gate.daily, acquireDaily]);
+
+  /**
+   * Coming back to the foreground is a reconnect, and is treated as one.
+   *
+   * A till that was backgrounded over midnight — or for three days — wakes with
+   * a stale context and possibly a replaced employee session. Both questions
+   * are the same ones a reconnect asks, so this reuses the same derivation
+   * rather than inventing a second path: same POS session or the till locks,
+   * and whatever business day the server says it is now.
+   *
+   * GENERIC ON PURPOSE. `visibilitychange` is what Android's WebView and the
+   * Windows shell both deliver; there is no platform-specific branch here and
+   * no platform-specific register behaviour anywhere in this component.
+   */
+  useEffect(() => {
+    if (!gateDerivationAllowed || typeof document === "undefined") {
+      return;
+    }
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // A till with nobody signed in has nothing to revalidate, and a
+      // derivation would only ask questions whose answers cannot unlock it.
+      if (gateRef.current.employee === null) return;
+
+      void deriveGateState();
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [gateDerivationAllowed, deriveGateState]);
+
+  /**
+   * A pairing that stops being ready takes every established session with it.
+   *
+   * The clearing is deferred the same way, but note what that does NOT mean:
+   * the gate this guards is read from `gateRef`, which the checkout path
+   * consults directly, and `resolvePosGate` derives the screen from state that
+   * is already empty in the cases that matter. A cleanup that lands a tick late
+   * cannot widen the offline gate, because a till that is not `ready` has no
+   * POS mounted to sell from in the first place.
+   */
+  useEffect(() => {
+    if (state.status === "ready") {
+      return;
+    }
+
+    const clear = setTimeout(() => {
+      setGate(EMPTY_POS_GATE_STATE);
+      setSelectedEmployee(null);
+      setRoster(resetRoster());
+      setGateError(null);
+    }, 0);
+
+    return () => clearTimeout(clear);
+  }, [state.status]);
+
+  /**
+   * THE PRIMARY CASHIER LOGIN: Employee ID + PIN.
+   *
+   * On success the register is read from the server and REUSED as it stands.
+   * Signing in never opens, closes or rotates a drawer period — an open
+   * register spans many operators, and the two lifecycles are independent. No
+   * open register simply leaves the operator at the register gate.
+   */
+  const handleEmployeeCodeLogin = useCallback(
+    async (employeeCode: string, pin: string) => {
+      setGateBusy(true);
+      setGateError(null);
+
+      // EVERY submitted attempt reaches the server, malformed or not: the
+      // per-device throttle can only count what it sees, and the shape checks
+      // in the card only grey out the button.
+      const result = await employeeLoginByCode(employeeCode, pin);
+
+      if (!result.ok) {
+        setGateBusy(false);
+        // Whatever the server said, unchanged. An unknown Employee ID and a
+        // wrong PIN are one answer there, and making them two here would undo
+        // the reason they are one.
+        setGateError(getEmployeeLoginErrorMessage(result.error, result.retryAfterSeconds ?? null));
+        return;
+      }
+
+      // ==================================================================
+      // v1.3 CP2d — THE REST OF LOGIN IS THE SERVER ESTABLISHING TODAY.
+      //
+      // There is no cashier step between these two calls. No register to
+      // choose, no opening cash to count, no panel to dismiss: the business
+      // day is a calendar fact, so the till asks for it and unlocks.
+      //
+      // AND THEN IT ASKS WHO IS SIGNED IN AGAIN. Between the login returning
+      // and the day coming back, the employee POS session can have been
+      // replaced -- a switch at this till, or another one on the same pairing.
+      // Unlocking on the login's word alone would open the POS under an
+      // operator the server had already moved on from, and a connection drop
+      // straight afterwards would let offline sales be taken under them. The
+      // comparison is by SESSION ID, in lib/posGate.ts, and a mismatch sends
+      // the cashier back to Employee ID and PIN with the cart untouched.
+      // ==================================================================
+      const daily = await acquireDaily();
+      const revalidated = await readEmployeeSession();
+
+      const next = applyEmployeeAuthenticated({
+        employee: result.session,
+        daily,
+        revalidated,
+      });
+
+      setGate(next);
+      setGateBusy(false);
+      setSelectedEmployee(null);
+
+      if (next.employee === null) {
+        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+        return;
+      }
+
+      setGateError(describeDailyOutcome(next, daily));
+    },
+    [acquireDaily, readEmployeeSession, describeDailyOutcome]
+  );
+
+  /**
+   * Resolves a register recovery around ONE register operation, with the
+   * retained employee checked on both sides of it.
+   *
+   *   read employee → [operation] → read employee again
+   *
+   * THE PRE-CHECK IS A GATE, NOT A FORMALITY. `operation` is not called at all
+   * unless the retained employee is still the one signed in — which is what
+   * keeps open_register_session from opening a register under somebody the
+   * local operator was not recovering.
+   *
+   * THE POST-CHECK CLOSES THE READ WINDOW. Without it the client could
+   * establish a pair it never saw coexist: employee confirmed, employee
+   * switched, register observed, pair established. That pair would be refused
+   * by an online sale — but Policy 1 reads `establishedOnline`, so a connection
+   * drop straight afterwards would let a NEW OFFLINE SALE be taken under an
+   * employee the server had already replaced, and nothing later can un-take it.
+   *
+   * Every identity comparison belongs to lib/posGate.ts. This function performs
+   * reads and renders the outcome; it decides nothing.
+   */
+  const recoverDailyContext = useCallback(async () => {
+    setGateBusy(true);
+    setGateError(null);
+
+    const employeeBefore = await readEmployeeSession();
+    const precheck = checkRetainedEmployee(gateRef.current, employeeBefore);
+
+    if (!precheck.ok) {
+      // FAIL CLOSED BEFORE THE ENSURE RUNS. Nothing is attempted, so there is
+      // no server-side context created under an operator nobody was recovering.
+      setGate(precheck.state);
+      setGateBusy(false);
+
+      if (precheck.reason === "employee_changed") {
+        setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+        setSelectedEmployee(null);
+      } else {
+        setGateError("Could not check who is signed in. Check the connection and try again.");
+      }
+
+      return;
+    }
+
+    const daily = await acquireDaily();
+    const employeeAfter = await readEmployeeSession();
+
+    const next = applyExplicitDailyEstablished(gateRef.current, {
+      employeeBefore,
+      daily,
+      employeeAfter,
+    });
+
+    setGate(next);
+    setGateBusy(false);
+
+    // The pure transition has already decided; these only explain it. An
+    // escalation to the employee gate is the one an operator most needs told,
+    // because the screen changes under them.
+    if (next.recovery === "employee") {
+      setGateError("The signed-in employee changed. Sign in again to keep taking sales.");
+      setSelectedEmployee(null);
+      return;
+    }
+
+    setGateError(describeDailyOutcome(next, daily));
+  }, [acquireDaily, readEmployeeSession, describeDailyOutcome]);
+
+  /**
+   * v1.3 CP3 — Ring Out. The operator hands the till back.
+   *
+   * LOCAL SECURITY ACTION FIRST, AND IT IS NOT A REQUEST. Ring Out ends this
+   * person's authority to operate this POS. That is a decision made at the
+   * till, so it is applied here BEFORE anything is awaited, and no answer the
+   * server gives afterwards can undo it. The previous implementation did the
+   * opposite: it called employee_logout, discarded the result, and then let a
+   * re-derivation decide. That worked only because the derivation happens to be
+   * fail-closed — so a logout that failed while the SESSION READ still
+   * succeeded left the rung-out employee holding a live, unlocked till.
+   *
+   * THE REF IS WRITTEN BEFORE THE AWAIT, NOT JUST THE STATE. Checkout reads
+   * `gateRef.current` directly and does not wait for React to commit, so the
+   * ref is what actually closes the window in which a new sale could begin
+   * under the employee who just rang out. Writing only through setGate would
+   * leave that window open for a render.
+   *
+   * WHAT SURVIVES, DELIBERATELY. beginEmployeeSwitch clears the employee and
+   * keeps everything else: the DAILY context, because a business day is not a
+   * drawer period and nobody closes one; the cart, because the next operator
+   * finishes the order the last one started; PosRuntime, because the gate is an
+   * overlay and never an unmount; and every queued paid sale, which is money
+   * already taken and owes nothing to who is signed in.
+   *
+   * THE STALE SERVER SESSION IS NOT THIS FUNCTION'S PROBLEM. If the logout
+   * cannot be delivered, the server session stays open — and stays powerless,
+   * because authority is local and complete_sale_v5 is told which session to
+   * expect by a client that no longer has one. The next successful login ends
+   * it atomically with end_reason 'switched'. Its recorded ended_at is
+   * therefore the login's instant rather than this one; that is accepted
+   * reporting debt, not something to fix here by inventing a logout locally.
+   */
+  const lockOperatorOut = useCallback(async (reason: OperatorLockReason) => {
+    // Same-tick guard, SHARED BY BOTH CALLERS. A second press must not fire a
+    // second termination, and neither must a timeout that expires while a
+    // press is already in flight: whichever arrives first owns the episode and
+    // the other observes the till already locked.
+    if (ringOutInFlightRef.current) {
+      return;
+    }
+
+    ringOutInFlightRef.current = true;
+
+    try {
+      // CAPTURED FIRST, AND THE ORDER IS LOAD-BEARING. The transition below
+      // clears `employee`, so afterwards there is no identity left to name.
+      // The server contract is expectation-bound precisely so this till can
+      // say WHICH session it means; reading the id after the transition would
+      // send nothing and reinstate the "end whatever is open" behaviour CP3.1
+      // exists to remove.
+      const expectedEmployeePosSessionId = gateRef.current.employee?.employeeSessionId;
+
+      const lockedOut = beginEmployeeSwitch(gateRef.current);
+
+      // The ref first: it is what checkout consults.
+      gateRef.current = lockedOut;
+      setGate(lockedOut);
+      setSelectedEmployee(null);
+      // Ring Out needs no explanation -- the operator pressed it. A till that
+      // locked itself does: otherwise the next person finds a PIN prompt and
+      // no reason for it.
+      setGateError(reason === "auto_lock" ? AUTO_LOCK_MESSAGE : null);
+      setGateBusy(true);
+
+      if (expectedEmployeePosSessionId === undefined) {
+        // Nobody was on the till, so there is nothing to end and nothing this
+        // call could name. Staying silent is the point: asking the server to
+        // close "whatever is open" is exactly what CP3.1 removed.
+        return;
+      }
+
+      const result = await endEmployeePosSession(expectedEmployeePosSessionId);
+
+      if (!result.ok) {
+        if (result.error === "offline") {
+          // The request never reached the server. That is the same fact the
+          // sale path already acts on, so it takes the same accepted
+          // transition — which is also what arms the CP2e reconnect probe.
+          await enterOfflineRef.current?.();
+        } else {
+          // EVERY other answer leaves this operator rung out HERE, including
+          // session_replaced — where somebody has already taken the till and
+          // whose shift this call deliberately did not touch. The server's own
+          // wording is shown; none of these may suggest anyone is still signed
+          // in, and none of them restores local authority.
+          setGateError(result.message);
+        }
+      }
+    } finally {
+      setGateBusy(false);
+      ringOutInFlightRef.current = false;
+    }
+  }, []);
+
+  /**
+   * v1.3 CP4 — a till that nobody has touched for ten minutes locks itself.
+   *
+   * KEYED ON THE SESSION ID, WHICH IS WHY IT NEEDS NO SPECIAL CASES. The
+   * episode begins when an employee actually holds authority -- not when a
+   * login RPC returned, because a login whose revalidation failed leaves the
+   * till locked and must not arm anything. It ends when authority ends, by any
+   * route: Ring Out, this timer, a stale-session lock, a reconnect that found
+   * the session replaced. React tears the effect down and the deadline goes
+   * with it. A re-login is a new session id, so it is simply a new episode
+   * with a fresh ten minutes.
+   *
+   * THE LISTENERS LIVE HERE, NOT IN PosRuntime. The runtime tree is kept free
+   * of document listeners on purpose -- that is what makes the `inert`
+   * boundary trustworthy, and an accepted guard pins it. Listening at the host
+   * covers the runtime's subtree anyway, and capture phase means a template
+   * that stops propagation cannot blind the till to a real person.
+   *
+   * RESUME IS A CHECK, NOT A RESET. Coming back to the foreground never
+   * extends anything; it compares the clock to the deadline and locks on the
+   * spot if the till slept through it.
+   */
+  useEffect(() => {
+    const employeeSessionId = gate.employee?.employeeSessionId;
+
+    if (employeeSessionId === undefined || typeof document === "undefined") {
+      return;
+    }
+
+    return startAutoLock(
+      {
+        now: () => Date.now(),
+        setTimer: (run, delayMs) => setTimeout(run, delayMs),
+        clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+        onActivity: (handler) => {
+          const listener = (event: Event) => handler(event);
+
+          for (const type of AUTO_LOCK_ACTIVITY_EVENTS) {
+            document.addEventListener(type, listener, { capture: true, passive: true });
+          }
+
+          return () => {
+            for (const type of AUTO_LOCK_ACTIVITY_EVENTS) {
+              document.removeEventListener(type, listener, { capture: true });
+            }
+          };
+        },
+        onResume: (handler) => {
+          const listener = () => {
+            if (document.visibilityState !== "visible") {
+              return;
+            }
+
+            handler();
+          };
+
+          document.addEventListener("visibilitychange", listener);
+          window.addEventListener("focus", listener);
+
+          return () => {
+            document.removeEventListener("visibilitychange", listener);
+            window.removeEventListener("focus", listener);
+          };
+        },
+      },
+      () => {
+        void lockOperatorOut("auto_lock");
+      }
+    );
+  }, [gate.employee?.employeeSessionId, lockOperatorOut]);
+
+  /**
+   * v1.3 Feature 1C — send one punch, and change nothing else.
+   *
+   * WHAT THIS DELIBERATELY DOES NOT TOUCH: `gate`, `gateRef`, the cart, the
+   * DAILY context and the sale queue. An employee clocking in on a till their
+   * colleague is operating must leave that colleague exactly where they were,
+   * mid-order if need be. So this writes only its own three pieces of state.
+   *
+   * ONE REQUEST ID PER ATTEMPT. A lost reply can be retried by pressing again,
+   * and the server answers the repeat with the original record rather than
+   * opening a second shift. Nothing is stored locally and nothing is retried
+   * automatically — a punch must never appear without a person making it.
+   */
+  const handleTimeClock = useCallback(
+    async (action: TimeClockAction, employeeCode: string, pin: string) => {
+      if (timeClockInFlightRef.current) {
+        return;
+      }
+
+      timeClockInFlightRef.current = true;
+      setTimeClockBusy(true);
+      setTimeClockResult(null);
+
+      try {
+        const requestId = newTimeClockRequestId();
+        const result =
+          action === "clock_in"
+            ? await clockInEmployee(employeeCode, pin, requestId)
+            : await clockOutEmployee(employeeCode, pin, requestId);
+
+        setTimeClockResult(result);
+      } finally {
+        setTimeClockBusy(false);
+        timeClockInFlightRef.current = false;
+      }
+    },
+    []
+  );
+
+  /** Closes the panel and forgets the answer. Authority is untouched either way. */
+  const dismissTimeClock = useCallback(() => {
+    setTimeClockOpen(false);
+    setTimeClockResult(null);
+  }, []);
+
+  /**
+   * v1.3 Feature 1D — records one cash movement the employee has just confirmed.
+   *
+   * IT TOUCHES NO AUTHORITY. No POS session is created, switched or ended, the
+   * current operator is untouched, the cart is untouched, and no clock is
+   * punched. The employee who authorized this may not be the one operating the
+   * till, and after it lands they still are not.
+   *
+   * THE BUSINESS DAY IS AN EXPECTATION, NOT A CLAIM. The register session id is
+   * the one this till last heard from the server, sent so the server can refuse a
+   * movement whose day changed underneath it — the 23:59:59 case. The server
+   * derives the real one itself and this never overrides it.
+   *
+   * ONE REQUEST ID PER CONFIRMED ATTEMPT. A lost reply can be retried by pressing
+   * Confirm again, and the server answers the repeat with the original record
+   * rather than moving the money twice. Nothing is stored locally and nothing is
+   * retried automatically — a cash record must never appear without a person
+   * confirming it.
+   */
+  const handleCashMovement = useCallback(
+    async (
+      type: CashMovementType,
+      employeeCode: string,
+      pin: string,
+      amount: string,
+      note: string | null
+    ) => {
+      if (cashMovementInFlightRef.current) {
+        return;
+      }
+
+      // No business day on this till, so there is nothing for this money to
+      // belong to — and a movement may not start one. The panel already refuses
+      // this, and refusing again here is what makes that a rule rather than a
+      // screen.
+      const expectedRegisterSessionId = gateRef.current.daily?.registerSessionId;
+
+      if (expectedRegisterSessionId === undefined) {
+        setCashMovementResult(cashMovementFailure("no_daily_context"));
+        return;
+      }
+
+      cashMovementInFlightRef.current = true;
+      setCashMovementBusy(true);
+      setCashMovementResult(null);
+
+      try {
+        const result = await recordCashMovement(type, {
+          employeeCode,
+          pin,
+          amount,
+          note,
+          expectedRegisterSessionId,
+          requestId: newCashMovementRequestId(),
+        });
+
+        setCashMovementResult(result);
+      } finally {
+        setCashMovementBusy(false);
+        cashMovementInFlightRef.current = false;
+      }
+    },
+    []
+  );
+
+  /** Closes the panel and forgets the answer. Authority is untouched either way. */
+  const dismissCashMovement = useCallback(() => {
+    setCashMovementOpen(false);
+    setCashMovementResult(null);
+  }, []);
+
+  /**
+   * Loads the roster the selector offers. Names and ids only; the server reads
+   * the project off this device's own pairing row.
+   */
+  const loadRoster = useCallback(async () => {
+    // ONE REQUEST AT A TIME. The ref closes the window before React commits
+    // `loading`; `beginRosterLoad` closes it afterwards. Both are needed
+    // because the auto-load effect and the Refresh button can fire together.
+    if (rosterInFlightRef.current) {
+      return;
+    }
+
+    rosterInFlightRef.current = true;
+    setRoster((current) => beginRosterLoad(current));
+
+    try {
+      const result = await fetchLoginEmployees();
+
+      // A FAILURE IS A STATE, NOT AN EMPTY LIST. It used to become `[]`, which
+      // the selector then read as "this project has nobody" — an outage
+      // rendered as a setup problem.
+      setRoster(result.ok ? applyRosterLoaded(result.employees) : applyRosterFailed());
+    } finally {
+      rosterInFlightRef.current = false;
+    }
+  }, []);
+
+  /**
+   * The roster's automatic first load.
+   *
+   * WHY THIS EXISTS. Nothing used to request the roster on the way in: the only
+   * callers were the Refresh button and Switch employee, so a normal startup
+   * reached the employee gate holding an empty list and told the operator that
+   * nobody could sign in on this till. The list was never asked for.
+   *
+   * NARROW BY CONSTRUCTION. Every condition lives in `shouldLoadRoster`, which
+   * is pure and tested: ready, online, at the employee gate, nobody selected,
+   * and the roster never requested. A FAILED load is not retried here — that is
+   * the loop guard, and Refresh is how a person retries.
+   */
+  useEffect(() => {
+    if (
+      !shouldLoadRoster({
+        ready: state.status === "ready",
+        online: gateDerivationAllowed,
+        gate: resolvePosGate(gate),
+        employeeSelected: selectedEmployee !== null,
+        roster,
+      })
+    ) {
+      return;
+    }
+
+    const start = setTimeout(() => {
+      void loadRoster();
+    }, 0);
+
+    return () => clearTimeout(start);
+  }, [state.status, gateDerivationAllowed, gate, selectedEmployee, roster, loadRoster]);
 
   const refreshSaleStatus = useCallback(async () => {
     const status = await readOfflineSaleStatus();
@@ -865,6 +1783,91 @@ export default function DeviceApp() {
       })();
     });
   }, [syncSessionKey, runSync, returnOnlineFromReconnect]);
+
+  /**
+   * v1.3 CP2e follow-up — the automatic reconnect probe.
+   *
+   * THE DEFECT THIS CLOSES. The effect above is the ONLY thing that ever asked
+   * the server again after an outage, and it hangs off the browser's `online`
+   * event. That event fires when the LINK drops and returns; it does not fire
+   * when the link stayed up and only the backend was unreachable — a captive
+   * portal, an ISP outage, a backend that was down. navigator.onLine reported
+   * true throughout, so a till in that state stayed offline forever: every new
+   * sale queued, the queue drained only when a cashier pressed Sync now, and a
+   * changed employee POS-session was never noticed. Validated on staging: with
+   * the link up and the backend blocked, restoring the backend recovered
+   * nothing until an `online` event was synthesised by hand.
+   *
+   * IT SUPPLEMENTS THAT TRIGGER, IT DOES NOT REPLACE IT. A real link drop
+   * still recovers immediately through the event; this only covers the case
+   * the event cannot see. Both converge on returnOnlineFromReconnect, so there
+   * is exactly one reconnect implementation and Sync now still shares it.
+   *
+   * IT DECIDES NOTHING. A probe that succeeds means one thing — the
+   * authoritative backend answered — and the existing path then owns every
+   * consequence: pairing validity, config refresh, exact employee POS-session
+   * revalidation, DAILY reconciliation and the drain. Probe success is NOT
+   * authentication, and a till whose POS-session was replaced still locks and
+   * still demands an Employee ID and PIN. Nothing here consults
+   * navigator.onLine, and there is no new reachability endpoint: the probe IS
+   * returnOnlineFromReconnect, whose first act is the canonical
+   * get_device_pairing_state call the reconnect path already used.
+   *
+   * SINGLE-FLIGHT, TWICE OVER. `inFlight` keeps this effect's own lifecycle
+   * signals from stacking — `focus` and `visibilitychange` both fire on the
+   * same foreground and must produce ONE attempt, not two — and
+   * returnOnlineFromReconnect's `resolving` ref independently excludes a
+   * concurrent cold-start resolve. Neither is redundant: they guard different
+   * collisions.
+   *
+   * PAUSED WHILE HIDDEN. A backgrounded till has no cashier to serve and no
+   * reason to burn a request a minute, so scheduling stops when the document
+   * hides and an attempt fires immediately when it comes back — which is also
+   * the moment a cashier is most likely to be waiting.
+   *
+   * THE EPISODE OWNS THE BACKOFF. The effect is keyed on offline runtime mode,
+   * so leaving offline tears it down and a genuinely new outage mounts it
+   * fresh at the start of the curve. A till that flaps does not inherit the
+   * previous episode's minute-long wait.
+   */
+  useEffect(() => {
+    if (
+      state.status !== "ready" ||
+      getDeviceRuntimeMode(state) !== "offline" ||
+      typeof document === "undefined"
+    ) {
+      return;
+    }
+
+    return startReconnectProbe(
+      {
+        isVisible: () => document.visibilityState === "visible",
+        // BOTH lifecycle signals, collapsed into one. Android's WebView and the
+        // Windows shell deliver these differently and often together; the loop
+        // must not be able to tell them apart, or one foreground becomes two
+        // backend attempts.
+        onForeground: (handler) => {
+          document.addEventListener("visibilitychange", handler);
+          window.addEventListener("focus", handler);
+
+          return () => {
+            document.removeEventListener("visibilitychange", handler);
+            window.removeEventListener("focus", handler);
+          };
+        },
+        setTimer: (run, delayMs) => setTimeout(run, delayMs),
+        clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+      },
+      // The EXISTING reconnect episode, in the EXISTING order: authoritative
+      // refresh first so a revocation confirmed during the outage is applied
+      // before anything else, then the drain. Identical to what the `online`
+      // event runs, because it must be the same reconnect, not a second one.
+      async () => {
+        await returnOnlineFromReconnect();
+        await runSync("reconnect");
+      }
+    );
+  }, [state, returnOnlineFromReconnect, runSync]);
 
   /**
    * Feature 24.5F (DEF-02) — wake the engine when a persisted retry falls due.
@@ -1469,14 +2472,100 @@ export default function DeviceApp() {
   // and still returns the server's authoritative receipt; nothing about it
   // touches the queue.
   const completeSale: PosRuntimeCompleteSale = useCallback(
-    // Feature 18.2 — the device now calls complete_sale_v3.
-    async (input) => completeDeviceSaleV3({
-      projectId: input.projectId,
-      paymentMethod: input.paymentMethod,
-      items: input.items,
-      saleRequestId: input.saleRequestId,
-    }),
-    []
+    // v1.3 Feature 1B-RUNTIME — the device now calls complete_sale_v5.
+    //
+    // NO PROJECT ID: v5 derives the project, the device, the employee and the
+    // register from this device's own pairing row and the sessions open on it.
+    // The two ids below are EXPECTATIONS the server compares against what it
+    // has locked; they never become the stored attribution.
+    //
+    // A sale cannot be attempted at all without both, because PosRuntime is
+    // only mounted once the gates are satisfied — but the guard is restated
+    // here rather than assumed, since this callback is what a future host would
+    // reuse.
+    async (input) => {
+      const current = gateRef.current;
+
+      if (current.employee === null || current.daily === null) {
+        return {
+          receipt: null,
+          error: "Sign in an employee before taking a sale.",
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
+      const result = await completeDeviceSaleV5({
+        paymentMethod: input.paymentMethod,
+        items: input.items,
+        saleRequestId: input.saleRequestId,
+        expectedEmployeePosSessionId: current.employee.employeeSessionId,
+        expectedRegisterSessionId: current.daily.registerSessionId,
+      });
+
+      // STALE STATE IS NOT RETRIED. The server has just proven this till wrong
+      // about who is signed in or which register is open; resubmitting would
+      // put the sale under whatever is true now, which is precisely the silent
+      // misattribution the expectations exist to prevent. The cart is
+      // untouched, so the same sale can be rung again deliberately once the
+      // right context has been re-established BY A PERSON.
+      //
+      // THE RE-READ IS "observe", NOT "establish". This is the correction: an
+      // establishing derivation would find the server's current employee and
+      // current open register, mark them established, and reopen the POS on its
+      // own — adopting a context the operator never chose, one step after the
+      // refusal that was supposed to prevent exactly that. In observe mode the
+      // read still happens (it is what detects that the employee changed too),
+      // but nothing it returns can open a gate.
+      const attribution = classifySaleAttributionFailure(result.error);
+
+      if (attribution !== null) {
+        const recovering = applySaleAttributionFailure(gateRef.current, attribution);
+
+        // Written through the ref as well as through state: the observe pass
+        // below reads gateRef to decide how strict to be, and it must see the
+        // recovery this refusal just raised, not the state React has yet to
+        // commit.
+        gateRef.current = recovering;
+        setGate(recovering);
+        setGateError(result.error);
+        void deriveGateState("observe");
+
+        return result;
+      }
+
+      // ==================================================================
+      // v1.3 CP2d — ADOPTING WHAT THE SERVER ACTUALLY STORED. Freshness only.
+      //
+      // complete_sale_v5 returns the register id it wrote the order against.
+      // When CP2c rolled this sale forward onto a new business day, that id is
+      // the CURRENT day and the one this till was holding is yesterday's.
+      // Taking it means the next sale arrives current instead of rolling
+      // forward again — one round trip saved, and nothing more: refusing to
+      // adopt would still be correct, because CP2c would roll that one forward
+      // too. This runs ONLY after the server has already completed the sale.
+      //
+      // NO BUSINESS DATE IS DERIVED HERE. The response carries an id and
+      // nothing else useful, so the adopted context is marked as having no
+      // known end and the freshness timer reconciles the rest from the server.
+      // ==================================================================
+      const stored = (result.receipt as { attribution?: { registerSessionId?: unknown } } | null)
+        ?.attribution?.registerSessionId;
+
+      if (result.receipt !== null && shouldAdoptSaleRegisterId(gateRef.current.daily, stored)) {
+        const adopted = applySaleRegisterAdoption(
+          gateRef.current,
+          adoptSaleRegisterId(gateRef.current.daily, stored)
+        );
+
+        dailyUnchangedRef.current = 0;
+        gateRef.current = adopted;
+        setGate(adopted);
+      }
+
+      return result;
+    },
+    [deriveGateState]
   );
 
   /**
@@ -1551,6 +2640,15 @@ export default function DeviceApp() {
       // identity behind for the retry rather than minting a second one.
       offlineDraftRef.current = drafted.draft;
 
+      // v1.3 Feature 1B — Policy 1, restated at the durable write. The UI is
+      // already gated, but this is the last point before money becomes a record
+      // and it must not depend on which screen was rendered.
+      const attribution = canCheckoutOffline(gateRef.current);
+
+      if (!attribution.ok) {
+        return { ok: false, message: attribution.message };
+      }
+
       const outcome = await completeOfflineSale({
         session: eligibility.session,
         config: eligibility.config,
@@ -1558,6 +2656,9 @@ export default function DeviceApp() {
         cart: input.cart,
         paymentMethod: input.paymentMethod,
         now,
+        // HISTORICAL CLAIMS, validated by the server at sync time and stored as
+        // NULL when they cannot be proven. Never a reason to refuse the sale.
+        claims: buildOfflineClaims(gateRef.current),
       });
 
       if (!outcome.ok) {
@@ -1648,6 +2749,15 @@ export default function DeviceApp() {
       };
     });
   }, []);
+
+  /**
+   * Hands Ring Out the transition above. One function, two callers: the sale
+   * rejection path calls it directly, Ring Out through the ref.
+   */
+  useEffect(() => {
+    enterOfflineRef.current = enterOfflineFromTransportFailure;
+  }, [enterOfflineFromTransportFailure]);
+
 
   /**
    * Feature 24.5F — make an outbound sale identity durable before it is sent.
@@ -1954,7 +3064,128 @@ export default function DeviceApp() {
       // positive answer. An undecided device (null) and a refused one both
       // block, so there is no state in which "we have not checked yet" reads
       // as "go ahead".
-      const offlineSaleAllowed = offlineMode && offlineCheckout?.ok === true;
+      // v1.3 Feature 1B Policy 1 — an offline checkout ALSO requires an
+      // employee and a register established from the server during this app
+      // run. The disk-side eligibility above is unchanged; this is the second
+      // condition, and it is why an offline cold start can sell nothing.
+      const offlineAttribution = canCheckoutOffline(gate);
+      const offlineSaleAllowed =
+        offlineMode && offlineCheckout?.ok === true && offlineAttribution.ok;
+
+      // v1.3 Feature 1B-RUNTIME — the gates, AS AN OVERLAY.
+      //
+      // ORDER IS THE CONTRACT: employee, then register, then the POS. A
+      // register cannot be opened without a signed-in employee, so offering it
+      // first would be offering a dead end. Both gates are device-HOST
+      // screens, so no template ever sees employee or register logic.
+      //
+      // THEY DO NOT REPLACE THE POS, AND THAT IS THE WHOLE POINT. These used
+      // to `return` a different tree, which unmounted PosRuntime — and the
+      // cart is useState INSIDE PosRuntime, so a sale the server refused on
+      // attribution grounds threw away the cart the operator was told to
+      // retry. Staging found it: Loaded Fries x1, refused, recovered, cart
+      // empty. Feature 25.3 had already learned this for Sales history and
+      // settings; the gates are folded into that same `overlay` slot rather
+      // than reinventing it, and `inert` below makes the covered POS truly
+      // non-interactive instead of merely hidden.
+      //
+      // OFFLINE, THE GATES ARE NOT RENDERED AS A WAY IN. Neither can be
+      // satisfied without a server, so an offline till with nothing
+      // established shows the ordinary offline runtime and simply cannot
+      // check out — canCheckoutOffline is unchanged and still decides that.
+      const posGate = resolvePosGate(gate);
+
+      const gateOverlay =
+        offlineMode || posGate === "pos" ? null : posGate === "employee" ? (
+          // THE PRIMARY CASHIER LOGIN. One card, an Employee ID and a PIN — no
+          // roster fetch, no staff directory on an unattended screen, and no
+          // name to pick before a credential is asked for. The roster RPC and
+          // its wrapper are untouched and remain available to admin surfaces.
+          <EmployeeLockCard
+            busy={gateBusy}
+            error={gateError}
+            recovery={gate.recovery === "employee"}
+            onSubmit={(employeeCode, pin) => void handleEmployeeCodeLogin(employeeCode, pin)}
+            onTimeClock={() => {
+              setTimeClockResult(null);
+              setTimeClockOpen(true);
+            }}
+            onCashMovement={() => {
+              setCashMovementResult(null);
+              setCashMovementOpen(true);
+            }}
+          />
+        ) : posGate === "timezone" ? (
+          // THE ONE SETUP PROBLEM A CASHIER MUST NOT WORK AROUND. No timezone
+          // picker here, and no local guess: choosing one would date this
+          // shop's money from a device. Lane 3 owns the setting.
+          <BusinessTimezoneRequiredCard
+            busy={gateBusy}
+            error={gateError}
+            onRetry={() => void recoverDailyContext()}
+          />
+        ) : gate.employee !== null ? (
+          // EXCEPTIONAL, NOT REGISTER MANAGEMENT. An ordinary midnight never
+          // reaches here -- CP2c rolls it forward inside the sale. This is a
+          // day the server would not establish, and the only button is to ask
+          // it again.
+          <DailyContextRecoveryCard
+            employee={gate.employee}
+            busy={gateBusy}
+            error={gateError}
+            recovery={gate.recovery === "daily"}
+            onRetry={() => void recoverDailyContext()}
+            onSwitchEmployee={() => {
+              setGateError(null);
+              void loadRoster();
+              setSelectedEmployee(null);
+              setGate(beginEmployeeSwitch(gateRef.current));
+            }}
+          />
+        ) : null;
+
+      /**
+       * ONE covering layer, and one interaction boundary.
+       *
+       * The gates outrank the Feature 25.3 screens: a till with nobody signed
+       * in has no business showing sales history, and this is the behaviour the
+       * gates already had when they replaced the tree.
+       */
+      // The Time Clock sits ABOVE whatever was showing -- the employee lock
+      // card, a recovery card, or nothing at all -- and dismissing it puts the
+      // screen back exactly as it was. It never replaces the login form.
+      const timeClockOverlay = timeClockOpen ? (
+        <TimeClockPanel
+          busy={timeClockBusy}
+          result={timeClockResult}
+          onSubmit={(action, employeeCode, pin) => {
+            void handleTimeClock(action, employeeCode, pin);
+          }}
+          onDismiss={dismissTimeClock}
+        />
+      ) : null;
+
+      // v1.3 Feature 1D — the same layering as the Time Clock: it sits ABOVE
+      // whatever was showing, including the employee lock card, and dismissing it
+      // puts the screen back exactly as it was. It never replaces the login form,
+      // and opening it unlocks nothing.
+      //
+      // The DAILY comes from the gate, not from this panel: a movement may not
+      // bring a business day into existence, so with no daily context the panel
+      // says so and offers nothing else.
+      const cashMovementOverlay = cashMovementOpen ? (
+        <CashMovementPanel
+          busy={cashMovementBusy}
+          result={cashMovementResult}
+          noDailyContext={gate.daily === null}
+          onSubmit={(type, employeeCode, pin, amount, note) => {
+            void handleCashMovement(type, employeeCode, pin, amount, note);
+          }}
+          onDismiss={dismissCashMovement}
+        />
+      ) : null;
+
+      const activeOverlay = cashMovementOverlay ?? timeClockOverlay ?? gateOverlay ?? overlay;
 
       return (
         <div className="flex h-full min-h-0 w-full flex-col">
@@ -1995,6 +3226,34 @@ export default function DeviceApp() {
               submission fails as a transport error, every record is preserved,
               and the backoff is unchanged. Availability keys on the queue's own
               counts, never on navigator.onLine. */}
+          {/* v1.3 CP2d — who is on the till, and which business day it is.
+              A device-host control, beside the sync status, so nothing about
+              the register model enters a template. There is no Close Register:
+              a business day is not a drawer period and nobody closes one. */}
+          {gate.employee !== null && gate.daily !== null && (
+            <DailyRegisterStatus
+              employee={gate.employee}
+              daily={gate.daily}
+              busy={gateBusy}
+              error={gateError}
+              onSwitchEmployee={() => {
+                setGateError(null);
+                void loadRoster();
+                setSelectedEmployee(null);
+                setGate(beginEmployeeSwitch(gateRef.current));
+              }}
+              onLogout={() => void lockOperatorOut("ring_out")}
+              onTimeClock={() => {
+                setTimeClockResult(null);
+                setTimeClockOpen(true);
+              }}
+              onCashMovement={() => {
+                setCashMovementResult(null);
+                setCashMovementOpen(true);
+              }}
+            />
+          )}
+
           <DeviceSyncStatus
             status={saleStatus}
             syncing={syncing}
@@ -2002,79 +3261,106 @@ export default function DeviceApp() {
             onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : null}
           />
 
-          <div className="min-h-0 flex-1">
-        <PosRuntime
-          // Stock tracking is stripped for display: the pinned snapshot's
-          // stockQuantity is frozen at build time and is NOT live inventory.
-          // The server still enforces stock inside complete_sale_v3, and
-          // complete_sale_v4 floors it at zero for a queued sale rather than
-          // destroying the sale (docs/OFFLINE_ARCHITECTURE.md §9).
-          config={toDeviceDisplayConfig(state.config)}
-          submitSale={completeSale}
-          // No live stock source: `projects` is invisible to a device under RLS.
-          refreshStock={null}
-          // A till has nowhere to go back to.
-          homeLink={null}
-          // Feature 25.1 — the ONLY entry point to device settings on a healthy
-          // till. In the header rather than beside checkout: unpairing is an
-          // occasional administrative act, and a destructive control next to the
-          // pay button is a control that eventually gets pressed by accident.
-          // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
-          // Android viewport two full buttons would leave the business name
-          // almost nothing; a menu costs a fixed ~40px and has room to grow.
-          headerTrailing={
-            <OperatorMenu
-              onOpenHistory={() => {
-                setHistoryOrder(null);
-                setHistoryOpen(true);
-              }}
-              onOpenSettings={() => {
-                setResetNotice(null);
-                setSettingsOpen(true);
-              }}
+          {/* `inert` IS THE INTERACTION BOUNDARY, not the covering div.
+              An opaque overlay stops a mouse; it does not stop Tab reaching the
+              buttons underneath, a focused control keeping its focus, or a
+              keyboard/wedge event landing on it. `inert` removes the whole
+              subtree from focus, from pointer events and from the
+              accessibility tree, so the covered POS cannot be operated by any
+              route while a gate or a device screen is up. React 19 takes it as
+              a boolean prop. The cart is untouched — this blocks interaction,
+              not state. */}
+          <div className="min-h-0 flex-1" inert={activeOverlay !== null}>
+            <PosRuntime
+              // Stock tracking is stripped for display: the pinned snapshot's
+              // stockQuantity is frozen at build time and is NOT live inventory.
+              // The server still enforces stock inside complete_sale_v3, and
+              // complete_sale_v4 floors it at zero for a queued sale rather than
+              // destroying the sale (docs/OFFLINE_ARCHITECTURE.md §9).
+              config={toDeviceDisplayConfig(state.config)}
+              submitSale={completeSale}
+              // No live stock source: `projects` is invisible to a device under RLS.
+              refreshStock={null}
+              // A till has nowhere to go back to.
+              homeLink={null}
+              // Feature 25.1 — the ONLY entry point to device settings on a healthy
+              // till. In the header rather than beside checkout: unpairing is an
+              // occasional administrative act, and a destructive control next to the
+              // pay button is a control that eventually gets pressed by accident.
+              // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
+              // Android viewport two full buttons would leave the business name
+              // almost nothing; a menu costs a fixed ~40px and has room to grow.
+              headerTrailing={
+                <OperatorMenu
+                  onOpenHistory={() => {
+                    setHistoryOrder(null);
+                    setHistoryOpen(true);
+                  }}
+                  onOpenSettings={() => {
+                    setResetNotice(null);
+                    setSettingsOpen(true);
+                  }}
+                />
+              }
+              // Feature 19 — the logo origin. A device reads its logo from the
+              // PINNED snapshot's path, so replacing the owner's logo later cannot
+              // change what this till displays. Public bucket: no signing, and no
+              // storage grant a device does not already have.
+              logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
+              onSaleRejected={handleSaleRejected}
+              // Feature 24.5E — the fence now closes only when an offline sale
+              // would NOT be safe. Online is unaffected (null, as always). Offline
+              // and eligible passes null too, and supplies the durable handler
+              // below instead. Offline and ineligible states the reason.
+              // v1.3 Feature 1B-RUNTIME — AND a pending gate closes it too.
+              //
+              // The overlay above already stops a person reaching the pay button
+              // and `inert` stops every other route to it. This is the third,
+              // innermost fence, and it is the one that does not depend on the UI
+              // at all: checkoutBlockedReason is the FIRST statement in
+              // PosRuntime's completeSale, ahead of planSaleSubmission, submitSale
+              // and the durable enqueue. No sale RPC is called, no request id is
+              // minted and no record is written while a gate is pending.
+              //
+              // Offline, the attribution reason is reported as itself. It used to
+              // fall through to "storage_unavailable", which told an operator the
+              // disk had failed when what had actually happened was that Policy 1
+              // had nothing established to sell under.
+              checkoutBlockedReason={
+                !offlineMode
+                  ? describePosGateBlock(gate)
+                  : !offlineSaleAllowed
+                    ? !offlineAttribution.ok
+                      ? offlineAttribution.message
+                      : offlineCheckout === null
+                        ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
+                        : describeOfflineCheckoutBlock(
+                            offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
+                          )
+                    : null
+              }
+              // Non-null ONLY for a validated offline session. The owner runtime
+              // and the Builder Preview never pass this at all.
+              queueOfflineSale={offlineSaleAllowed ? queueOfflineSale : null}
+              // Supplied under the SAME condition as the handler above: the two are
+              // one capability, and a host that persisted sales without ever
+              // reporting an attempt over would let one sale's identity outlive it.
+              discardOfflineSaleDraft={offlineSaleAllowed ? discardOfflineSaleDraft : null}
+              // Feature 24.5F — durable protection for the ONLINE path's identity.
+              // Supplied unconditionally, not gated on offline eligibility: the
+              // request this protects is an online one, and it is exactly the till
+              // that never goes offline which would otherwise lose the key.
+              armOnlineSale={armOnlineSale}
+              resolveOnlineSale={resolveOnlineSale}
+              persistedUncertainSale={uncertainSale}
+              cartLineCountRef={liveCartLineCountRef}
             />
-          }
-          // Feature 19 — the logo origin. A device reads its logo from the
-          // PINNED snapshot's path, so replacing the owner's logo later cannot
-          // change what this till displays. Public bucket: no signing, and no
-          // storage grant a device does not already have.
-          logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
-          onSaleRejected={handleSaleRejected}
-          // Feature 24.5E — the fence now closes only when an offline sale
-          // would NOT be safe. Online is unaffected (null, as always). Offline
-          // and eligible passes null too, and supplies the durable handler
-          // below instead. Offline and ineligible states the reason.
-          checkoutBlockedReason={
-            offlineMode && !offlineSaleAllowed
-              ? offlineCheckout === null
-                ? OFFLINE_CHECKOUT_PREPARING_MESSAGE
-                : describeOfflineCheckoutBlock(
-                    offlineCheckout.ok ? "storage_unavailable" : offlineCheckout.reason
-                  )
-              : null
-          }
-          // Non-null ONLY for a validated offline session. The owner runtime
-          // and the Builder Preview never pass this at all.
-          queueOfflineSale={offlineSaleAllowed ? queueOfflineSale : null}
-          // Supplied under the SAME condition as the handler above: the two are
-          // one capability, and a host that persisted sales without ever
-          // reporting an attempt over would let one sale's identity outlive it.
-          discardOfflineSaleDraft={offlineSaleAllowed ? discardOfflineSaleDraft : null}
-          // Feature 24.5F — durable protection for the ONLINE path's identity.
-          // Supplied unconditionally, not gated on offline eligibility: the
-          // request this protects is an online one, and it is exactly the till
-          // that never goes offline which would otherwise lose the key.
-          armOnlineSale={armOnlineSale}
-          resolveOnlineSale={resolveOnlineSale}
-          persistedUncertainSale={uncertainSale}
-          cartLineCountRef={liveCartLineCountRef}
-        />
           </div>
 
           {/* Above the POS, never instead of it — see the note on `overlay`.
               PosRuntime stays mounted, so the cart survives. */}
-          {overlay !== null && (
-            <div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{overlay}</div>
+          {activeOverlay !== null && (
+            <div className="fixed inset-0 z-30 overflow-y-auto bg-neutral-50">{activeOverlay}</div>
           )}
         </div>
       );
