@@ -1018,6 +1018,13 @@ export default function EditorShell({
         tip: order.tip,
         total: order.total,
         paymentMethod: order.paymentMethod,
+        // v1.3 Feature 1F — BOTH NULL, and truthfully so. This is the Builder's
+        // own preview checkout: it runs from the owner's browser, not a till,
+        // so no employee rang it and no register session existed. Copying an id
+        // in from anywhere to fill the shape would be inventing attribution for
+        // a sale that has none.
+        employeeId: null,
+        registerSessionId: null,
         itemCount: receipt.items.reduce((sum, item) => sum + item.quantity, 0),
         items: receipt.items.map((item) => ({
           itemId: item.itemId,

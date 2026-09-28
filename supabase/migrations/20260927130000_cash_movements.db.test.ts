@@ -1122,8 +1122,15 @@ maybe("the table is reachable only through the three actions", () => {
     // Two functions carry the shared contract's name -- the contract itself and
     // the note rule it shares with the CHECK -- and NEITHER is executable by a
     // client.
-    expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-                    where n.nspname='public' and p.proname ~ 'cash_movement'`)).toBe("2");
+    // v1.3 Feature 1F — was a bare count of 2. It is now an explicit NAME list,
+    // which is stronger: an unexpected new function matching 'cash_movement'
+    // still fails, and the accepted owner read contract is named rather than
+    // silently absorbed by a larger number. This migration's own comment below
+    // anticipated exactly this arrival.
+    expect(sql(DB, `select coalesce(string_agg(p.proname, ',' order by p.proname), '')
+                    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname='public' and p.proname ~ 'cash_movement'`))
+      .toBe("cash_movement_append,cash_movement_trim,list_cash_movements");
 
     for (const internal of ["cash_movement_append(text,text,text,numeric,text,uuid,uuid)",
                             "cash_movement_trim(text)"]) {
@@ -1142,14 +1149,31 @@ maybe("the table is reachable only through the three actions", () => {
                                         'record_cash_drop','record_paid_in','record_paid_out')`))
       .toBe("cash_movement_append,cash_movement_trim,record_cash_drop,record_paid_in,record_paid_out");
 
-    expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+    // v1.3 Feature 1F — Feature 1D added no reader, and still adds none. The one
+    // reader that exists is the accepted owner contract from 20260928120000, and
+    // it is named here together with the privilege check the bare `0` never made:
+    // it is callable by `authenticated` and by nobody else.
+    expect(sql(DB, `select coalesce(string_agg(p.proname, ',' order by p.proname), '')
+                    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='public'
-                      and p.proname ~ '(list|get|fetch|read|history)_?cash'`)).toBe("0");
+                      and p.proname ~ '(list|get|fetch|read|history)_?cash'`))
+      .toBe("list_cash_movements");
 
-    // And nothing outside those four so much as names the table.
-    expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-                    where n.nspname='public' and p.prosrc ~ 'cash_movements'
-                      and p.proname <> 'cash_movement_append'`)).toBe("0");
+    for (const role of ["anon", "service_role"]) {
+      expect(sql(DB, `select has_function_privilege('${role}',
+        'public.list_cash_movements(uuid,timestamptz,timestamptz)','EXECUTE')::text`)).toBe("false");
+    }
+    expect(sql(DB, `select has_function_privilege('authenticated',
+      'public.list_cash_movements(uuid,timestamptz,timestamptz)','EXECUTE')::text`)).toBe("true");
+
+    // And nothing outside the accepted set so much as names the table. An
+    // allow-list rather than a single exception: a NEW function naming
+    // cash_movements is still a failure, which a blanket ban would have had to
+    // be deleted to permit.
+    expect(sql(DB, `select coalesce(string_agg(p.proname, ',' order by p.proname), '')
+                    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname='public' and p.prosrc ~ 'cash_movements'`))
+      .toBe("cash_movement_append,list_cash_movements");
   });
 
   it("52. no Feature 1B or 1C contract was touched, and none learned about cash", () => {
@@ -1159,10 +1183,19 @@ maybe("the table is reachable only through the three actions", () => {
                       ('complete_sale_v5','employee_login_by_code','end_employee_pos_session',
                        'ensure_daily_register_context','clock_in_employee','clock_out_employee')`)).toBe("6");
 
-    // And none of them mentions cash movements.
+    // And none of THEM mentions cash movements.
+    //
+    // v1.3 Feature 1F — scoped to the six contracts this test is named for. It
+    // previously asserted over EVERY function in the schema, which is a broader
+    // claim than "no Feature 1B or 1C contract learned about cash" and which the
+    // accepted owner read contract necessarily breaks. The schema-wide version
+    // of this property lives in test 50, as an allow-list.
     expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='public' and p.prosrc ~ 'cash_movements'
-                      and p.proname <> 'cash_movement_append'`)).toBe("0");
+                      and p.proname in
+                        ('complete_sale_v5','employee_login_by_code','end_employee_pos_session',
+                         'ensure_daily_register_context','clock_in_employee','clock_out_employee')`))
+      .toBe("0");
   });
 
   // NEGATIVE CONTROL ON THE OTHER DIRECTION: recording a movement must leave the

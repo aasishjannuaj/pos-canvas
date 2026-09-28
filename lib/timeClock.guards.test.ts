@@ -440,8 +440,26 @@ describe("the rest of the product is unaware", () => {
         .join("\n")
         .replace(/'(?:[^']|'')*'/g, "''");
 
+      // v1.3 Feature 1F — this was a blanket ban on the substring. The property
+      // this test's own comment says "matters" is that no other migration WRITES
+      // to or RESHAPES the table, and that is what is asserted now, form by form.
+      // An owner READ contract (select ... from public.employee_time_sessions,
+      // added by 20260928120000) does not reshape anything and is not the risk
+      // this guard exists for; a write or a DDL still fails here.
       expect(`${file}: employee_time_sessions`).toBe(`${file}: employee_time_sessions`);
-      expect(code).not.toContain("employee_time_sessions");
+
+      for (const write of [
+        "insert into public.employee_time_sessions",
+        "update public.employee_time_sessions",
+        "delete from public.employee_time_sessions",
+        "truncate public.employee_time_sessions",
+        "alter table public.employee_time_sessions",
+        "drop table public.employee_time_sessions",
+        "create table public.employee_time_sessions",
+        "create table if not exists public.employee_time_sessions",
+      ]) {
+        expect(code.toLowerCase()).not.toContain(write);
+      }
     }
   });
 

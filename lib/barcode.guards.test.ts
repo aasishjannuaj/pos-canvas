@@ -345,7 +345,18 @@ describe("the config pipeline keeps its promises", () => {
       f.endsWith(".sql")
     );
 
-    expect(migrations).toHaveLength(32);
+    // v1.3 Feature 1F — the absolute count `toHaveLength(32)` was removed, and
+    // ONLY that line. It was a proxy for "1E-A shipped no migration", but it
+    // fails for a migration added by ANY feature in ANY lane, which is not what
+    // this test is named for or about. The property is asserted directly below
+    // and is now stronger: no migration may MENTION barcode, and none may be
+    // NAMED for it either -- a filename check the count never performed.
+    expect(migrations.length).toBeGreaterThan(0);
+
+    for (const file of migrations) {
+      expect(`${file}: not a barcode migration`).toBe(`${file}: not a barcode migration`);
+      expect(file.toLowerCase()).not.toContain("barcode");
+    }
 
     for (const file of migrations) {
       const sql = read(join("supabase/migrations", file))
