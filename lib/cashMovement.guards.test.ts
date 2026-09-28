@@ -237,6 +237,72 @@ describe("the server derives everything that matters", () => {
     expect(sqlFunction("cash_movement_append")).toContain("clock_timestamp()");
   });
 
+  // =========================================================================
+  // ONE CLOCK DECIDES THE BUSINESS DAY, AND IT IS THE EVENT'S OWN.
+  //
+  // This was a real defect. The authentication clock is read before a bcrypt and
+  // three lock acquisitions; deriving the business day from it while stamping
+  // occurred_at later is a midnight race, and a request entering at 23:59:59
+  // filed money against yesterday and dated it today. The row contradicted
+  // itself, permanently, about which day the money moved.
+  // =========================================================================
+  it("the business day is derived from the movement instant, not the auth clock", () => {
+    const body = sqlFunction("cash_movement_append");
+
+    expect(body).toContain("business_date_of(v_occurred_at, v_timezone)");
+    expect(body).not.toContain("business_date_of(v_auth_now");
+    // And no third name sneaks in between them.
+    expect(body.match(/business_date_of\(/g)).toHaveLength(1);
+  });
+
+  it("the movement instant is read exactly once, and stamped as read", () => {
+    const body = sqlFunction("cash_movement_append");
+
+    expect(body.match(/v_occurred_at := clock_timestamp\(\)/g)).toHaveLength(1);
+    // The row carries that value, not a fresh reading taken at the insert.
+    expect(body).toContain("p_movement_type, p_amount, v_note, v_occurred_at, p_request_id");
+    expect(body).not.toMatch(/occurred_at\s*\)?\s*values[\s\S]{0,200}clock_timestamp/);
+  });
+
+  it("the two clocks are named apart, and the auth one only paces throttles", () => {
+    const body = sqlFunction("cash_movement_append");
+
+    // A single v_now feeding both jobs is the shape the defect had.
+    expect(body).not.toMatch(/\bv_now\b/);
+    expect(body).toContain("v_auth_now := clock_timestamp()");
+
+    // v_auth_now reaches the limiters and the lockout arithmetic, and nothing else.
+    for (const limiter of [
+      "v_throttled_until > v_auth_now",
+      "v_locked_until > v_auth_now",
+      "record_device_failure(v_device.id, v_auth_now)",
+    ]) {
+      expect(body).toContain(limiter);
+    }
+  });
+
+  // ORDER IS THE PROPERTY: the instant is taken after the credential check, the
+  // active revalidation and the role gate, under the locks already held.
+  it("the movement instant is captured after authorization completes", () => {
+    const body = sqlFunction("cash_movement_append");
+    const at = (needle: string) => {
+      const i = body.indexOf(needle);
+      expect(`found ${needle}`).toBe(`found ${needle}`);
+      expect(i).toBeGreaterThan(-1);
+      return i;
+    };
+
+    const captured = at("v_occurred_at := clock_timestamp()");
+
+    expect(at("employee_pin_verify(p_pin")).toBeLessThan(captured);
+    expect(at("not v_employee.active")).toBeLessThan(captured);
+    expect(at("not in ('owner', 'manager')")).toBeLessThan(captured);
+    // ...and before every decision that depends on it.
+    expect(captured).toBeLessThan(at("business_date_of(v_occurred_at"));
+    expect(captured).toBeLessThan(at("r.business_date = v_business_date"));
+    expect(captured).toBeLessThan(at("insert into public.cash_movements"));
+  });
+
   // THE WHOLE REASON THERE ARE THREE RPCs. A till that could name the kind of
   // financial event it was creating could ask for a "drop" and have a paid-out
   // recorded, or walk straight past the role gate.
@@ -347,7 +413,9 @@ describe("a cash movement belongs to a business day it did not create", () => {
   it("the server derives the business date itself and refuses a day it cannot find", () => {
     const body = sqlFunction("cash_movement_append");
 
-    expect(body).toContain("public.business_date_of(v_now, v_timezone)");
+    // From the movement's own instant. Deriving it from the pre-auth clock was the
+    // midnight race; see "one clock decides the business day" above.
+    expect(body).toContain("public.business_date_of(v_occurred_at, v_timezone)");
     expect(body).toContain("r.business_date = v_business_date");
     expect(body).toContain("no_daily_context");
   });
@@ -657,6 +725,57 @@ describe("the review screen is the only thing between typing and a permanent rec
 
     expect(source).toContain("noDailyContext");
     expect(source).toContain('getCashMovementMessage("no_daily_context")');
+  });
+});
+
+describe("one note normalization rule, shared by the function and the CHECK", () => {
+  // TWO DEFECTS CAME FROM NOT HAVING THIS. Bare btrim() strips SPACES ONLY, so a
+  // one-tab reason satisfied a REQUIRED note; the ASCII-only replacement still did
+  // not match the client's .trim(), so an NBSP-only reason did. The rule is now one
+  // IMMUTABLE function, called from both places.
+  it("the rule exists once and both callers use it", () => {
+    const sql = sqlCode();
+
+    expect(sql).toContain("create or replace function public.cash_movement_trim(p_note text)");
+    expect(sql).toContain("immutable");
+    // The CHECK calls it rather than restating it.
+    expect(sql).toContain("check (note is null\n           or (note = public.cash_movement_trim(note)");
+    expect(sqlFunction("cash_movement_append")).toContain("nullif(public.cash_movement_trim(p_note), '')");
+  });
+
+  // NEGATIVE CONTROL: neither shortcut may reappear anywhere in the contract.
+  // btrim() alone strips spaces only, and [[:space:]] is resolved from the
+  // cluster's ctype rather than from this rule -- under en_US.UTF-8 it misses
+  // U+FEFF, which .trim() removes.
+  it("neither btrim() alone nor [[:space:]] is used to normalize a note", () => {
+    const body = sqlFunction("cash_movement_append");
+
+    expect(body).not.toMatch(/btrim\(/);
+    expect(body).not.toContain("[[:space:]]");
+    expect(body).not.toMatch(/regexp_replace\([^)]*p_note/);
+  });
+
+  it("the rule is not executable by any client role", () => {
+    const sql = sqlCode();
+
+    for (const role of ["public", "anon", "authenticated", "service_role"]) {
+      expect(sql).toContain(`revoke all on function public.cash_movement_trim(text) from ${role}`);
+    }
+
+    expect(sql).not.toMatch(/grant execute on function public\.cash_movement_trim/);
+  });
+
+  // The client half of the same contract: one enumerated set, and .trim() is its
+  // definition. The per-character agreement is proved in lib/cashMovement.test.ts
+  // and in the DB suite; this only pins that the client states the set at all.
+  it("the client enumerates the same set rather than trusting a shortcut", () => {
+    const source = read(CASH);
+
+    expect(source).toContain("CASH_NOTE_TRIMMED_WHITESPACE");
+    expect(source).toContain("\\u00A0");
+    expect(source).toContain("\\uFEFF");
+    // U+200B is in neither implementation, deliberately.
+    expect(stripComments(source)).not.toContain("\\u200B");
   });
 });
 

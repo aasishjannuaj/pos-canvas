@@ -77,6 +77,43 @@ export function isCashMovementNoteRequired(type: CashMovementType): boolean {
 
 export const CASH_MOVEMENT_NOTE_MAX_LENGTH = 200;
 
+/**
+ * The whitespace a note is trimmed of, written out.
+ *
+ * THIS IS THE CONTRACT, NOT A CONVENIENCE. `String.prototype.trim()` removes
+ * exactly these code points, and the server's `cash_movement_trim` enumerates the
+ * same set — because it could not rely on either of the obvious shortcuts. Bare
+ * `btrim()` in PostgreSQL strips SPACES ONLY, which is how a one-tab reason first
+ * got through. `[[:space:]]` is closer but is resolved from the cluster's ctype
+ * rather than from any rule of ours, and under en_US.UTF-8 it misses U+FEFF — so a
+ * reason of one U+FEFF would have survived the server, read as present, and
+ * satisfied a REQUIRED note with something nobody can see.
+ *
+ * Exported so a test can prove the two implementations agree character by
+ * character, rather than by two people reading two lists.
+ *
+ * U+200B ZERO WIDTH SPACE is deliberately ABSENT: trim() does not remove it, so
+ * neither does the server, and a note of one U+200B is real (if odd) content.
+ */
+export const CASH_NOTE_TRIMMED_WHITESPACE: readonly string[] = [
+  "\u0009", // tab
+  "\u000A", // line feed
+  "\u000B", // vertical tab
+  "\u000C", // form feed
+  "\u000D", // carriage return
+  "\u0020", // space
+  "\u00A0", // no-break space
+  "\u1680", // ogham space mark
+  "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005",
+  "\u2006", "\u2007", "\u2008", "\u2009", "\u200A", // en quad .. hair space
+  "\u2028", // line separator
+  "\u2029", // paragraph separator
+  "\u202F", // narrow no-break space
+  "\u205F", // medium mathematical space
+  "\u3000", // ideographic space
+  "\uFEFF", // zero-width no-break space
+];
+
 export type CashNoteProblem = "required" | "too_long";
 
 export type CashNoteResult =
@@ -94,6 +131,14 @@ export function getCashNoteMessage(problem: CashNoteProblem): string {
 
 /**
  * Trims, and collapses blank to null so "no note" has exactly one spelling.
+ *
+ * `.trim()` IS the contract, and the server matches it — see
+ * CASH_NOTE_TRIMMED_WHITESPACE. A reason of one tab, or one non-breaking space,
+ * is blank on both sides, so a required note cannot be satisfied by something
+ * invisible and an optional one cannot be stored as invisible content.
+ *
+ * MEASURED AFTER TRIMMING, as the server measures it. Trailing whitespace is not
+ * content, so a 200-character reason typed with a stray space still fits.
  *
  * REFUSES OVER-LENGTH RATHER THAN TRUNCATING IT. A silently shortened reason is
  * a different reason, and the clause that got cut is usually the one that

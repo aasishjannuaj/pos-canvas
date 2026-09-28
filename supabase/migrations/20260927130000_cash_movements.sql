@@ -45,7 +45,68 @@
 -- missing one, because it looks true.
 
 -- ----------------------------------------------------------------------------
--- 1. The table.
+-- 1. THE NOTE NORMALIZATION RULE, DEFINED ONCE.
+--
+-- THE CONTRACT: a note is trimmed of leading and trailing whitespace, where
+-- "whitespace" means EXACTLY the set JavaScript's String.prototype.trim()
+-- removes. That is the definition on purpose -- the till is the only thing that
+-- writes these notes, and a server rule narrower than the client's means the two
+-- disagree about whether a note exists at all.
+--
+-- WHY THIS IS A FUNCTION AND NOT AN INLINE EXPRESSION. The rule is needed in two
+-- places -- cash_movement_append, and the CHECK that holds even for a row that
+-- somehow bypassed it -- and two copies of a character set drift. It is IMMUTABLE
+-- because it is pure string work, which is also what makes it legal in a CHECK;
+-- contrast is_valid_business_timezone, which CP2a deliberately kept out of a
+-- CHECK because it reads pg_timezone_names and is only STABLE.
+--
+-- WHY THE SET IS ENUMERATED RATHER THAN \s OR [[:space:]]. Neither is a contract.
+-- Bare btrim() strips SPACES ONLY -- measured: of the characters below it removes
+-- U+0020 and nothing else, which is how a one-tab note first got through.
+-- [[:space:]] is much closer but is resolved from the DATABASE CTYPE, so what it
+-- means is a property of the cluster rather than of this rule; under en_US.UTF-8
+-- it matches every character below EXCEPT U+FEFF, which trim() does remove. A
+-- note of one U+FEFF would therefore have satisfied a REQUIRED reason with
+-- something nobody can see. The set is written out so the answer cannot depend on
+-- where the database is running:
+--
+--   U+0009 tab            U+000A line feed       U+000B vertical tab
+--   U+000C form feed      U+000D carriage return U+0020 space
+--   U+00A0 no-break space U+1680 ogham space     U+2000..U+200A quad..hair space
+--   U+2028 line separator U+2029 para separator  U+202F narrow no-break space
+--   U+205F medium math sp U+3000 ideographic sp  U+FEFF zero-width no-break space
+--
+-- U+200B zero-width space is deliberately ABSENT: JavaScript's trim() does not
+-- remove it either, and the contract is that the two agree.
+-- ----------------------------------------------------------------------------
+create or replace function public.cash_movement_trim(p_note text)
+returns text
+language sql
+immutable
+set search_path = pg_catalog, pg_temp
+as $function$
+  select btrim(
+    coalesce(p_note, ''),
+    E'\t\n\u000B\f\r          '
+    || E'        　﻿'
+  )
+$function$;
+
+comment on function public.cash_movement_trim(text) is
+  'v1.3 Feature 1D -- the ONE note normalization rule, shared by '
+  'cash_movement_append and the cash_movements_note_shape CHECK. Trims exactly '
+  'the whitespace set JavaScript''s String.prototype.trim() removes, so the '
+  'server and the till cannot disagree about whether a note exists. Returns the '
+  'empty string for whitespace-only input; the caller decides whether that means '
+  'NULL or a refusal.';
+
+revoke all on function public.cash_movement_trim(text) from public;
+revoke all on function public.cash_movement_trim(text) from anon;
+revoke all on function public.cash_movement_trim(text) from authenticated;
+revoke all on function public.cash_movement_trim(text) from service_role;
+
+-- ----------------------------------------------------------------------------
+-- 2. The table.
 --
 -- amount CHECKS, mirroring register_sessions_opening_cash_* for the same
 -- reasons CP1B gave: numeric(12,2)'s typmod ROUNDS on assignment, so it is not
@@ -97,14 +158,12 @@ create table if not exists public.cash_movements (
   -- A stored note is already trimmed, never empty, and within the limit. Blank
   -- is expressed as NULL, one way only, so "no note" cannot be two things.
   --
-  -- THE CHARACTER SET IS SPELLED OUT, AND THAT MATTERS. Bare btrim() strips
-  -- SPACES ONLY -- a reason of one tab would pass `note <> ''` and be stored as
-  -- invisible content, which is exactly the blank note this constraint exists to
-  -- forbid. The same expression appears in cash_movement_append, so the check and
-  -- the function cannot drift apart.
+  -- THE SAME RULE THE FUNCTION USES, called rather than restated, so the two
+  -- cannot drift. A row that somehow bypassed cash_movement_append still cannot
+  -- hold an untrimmed note, an empty one, or 201 characters.
   constraint cash_movements_note_shape
     check (note is null
-           or (note = btrim(note, E' \t\n\r\f\v')
+           or (note = public.cash_movement_trim(note)
                and note <> ''
                and length(note) <= 200)),
 
@@ -132,7 +191,7 @@ comment on column public.cash_movements.employee_id is
   'keeps serving on the same till.';
 
 -- ----------------------------------------------------------------------------
--- 2. The invariants.
+-- 3. The invariants.
 -- ----------------------------------------------------------------------------
 
 -- THE REPLAY KEY, SCOPED TO THE BUSINESS, AND AT THIS GRAIN ON PURPOSE. A
@@ -152,7 +211,7 @@ create index if not exists cash_movements_register_session_idx
   on public.cash_movements (register_session_id, occurred_at desc);
 
 -- ----------------------------------------------------------------------------
--- 3. No client touches this table directly -- not even to read it.
+-- 4. No client touches this table directly -- not even to read it.
 --
 -- Feature 1D adds no history surface, so there is no runtime SELECT path to
 -- grant. Reporting is Lane 3's, and it will come with its own contract.
@@ -165,7 +224,7 @@ revoke all on table public.cash_movements from authenticated;
 revoke all on table public.cash_movements from service_role;
 
 -- ----------------------------------------------------------------------------
--- 4. The contract, written once.
+-- 5. The contract, written once.
 --
 -- WHY AN INTERNAL HELPER AND NOT THREE COPIES. The three movements differ by
 -- exactly two things: which literal goes in movement_type, and whether a note
@@ -210,7 +269,11 @@ declare
   c_max_note constant integer := 200;
   v_caller          uuid;
   v_device          record;
-  v_now             timestamptz;
+  -- TWO CLOCKS, AND THE NAMES SAY WHICH IS WHICH. v_auth_now paces the throttles
+  -- and nothing else. v_occurred_at is the financial event's instant, captured
+  -- once after authorization, and it is the ONLY clock the business day is
+  -- derived from.
+  v_auth_now        timestamptz;
   v_throttled_until timestamptz;
   v_note            text;
   v_employee        record;
@@ -270,7 +333,12 @@ begin
     return jsonb_build_object('ok', false, 'error', 'not_paired');
   end if;
 
-  v_now := clock_timestamp();
+  -- THE AUTHENTICATION CLOCK. It exists to pace lockouts, and it is deliberately
+  -- NOT used to decide which business day this money belongs to: everything
+  -- between here and the role gate -- a bcrypt, limiter writes, three row locks --
+  -- takes real time, and a request that entered at 23:59:59 can reach the insert
+  -- on the next business day.
+  v_auth_now := clock_timestamp();
 
   -- The device cooldown is checked BEFORE anything is looked up, so a throttled
   -- till cannot be used to probe for Employee IDs at all.
@@ -279,11 +347,11 @@ begin
   from public.employee_login_device_throttles t
   where t.paired_device_id = v_device.id;
 
-  if v_throttled_until is not null and v_throttled_until > v_now then
+  if v_throttled_until is not null and v_throttled_until > v_auth_now then
     return jsonb_build_object(
       'ok', false,
       'error', 'locked_out',
-      'retryAfterSeconds', ceil(extract(epoch from (v_throttled_until - v_now)))::integer
+      'retryAfterSeconds', ceil(extract(epoch from (v_throttled_until - v_auth_now)))::integer
     );
   end if;
 
@@ -315,12 +383,11 @@ begin
   -- ONE SPELLING OF "NO NOTE". Trimmed, and blank collapsed to NULL, so a drop
   -- with a note of three spaces and a drop with no note are the same row.
   --
-  -- THE WHITESPACE SET IS EXPLICIT. Bare btrim() strips SPACES ONLY, so a reason
-  -- of a single tab would survive it, read as present, and satisfy a required
-  -- note with something nobody can see. The client's .trim() strips all of these
-  -- and more, so the UI can never disagree with this -- but a caller reaching the
-  -- RPC directly must get the same rule, and this is where that is decided.
-  v_note := nullif(btrim(coalesce(p_note, ''), E' \t\n\r\f\v'), '');
+  -- ONE RULE, DEFINED IN SECTION 1 AND SHARED WITH THE CHECK. It removes exactly
+  -- what the client's .trim() removes, so a note the till calls blank is blank
+  -- here too -- including a lone tab, and including an NBSP, neither of which bare
+  -- btrim() nor [[:space:]] would have touched.
+  v_note := nullif(public.cash_movement_trim(p_note), '');
 
   -- OVER-LENGTH IS REFUSED, NEVER TRUNCATED. A silently shortened reason is a
   -- different reason, and the sentence that got cut is the one that explained
@@ -343,7 +410,7 @@ begin
   -- "badly typed" from "does not exist".
   if p_employee_code is null or p_employee_code !~ '^[0-9]{3}$' or p_employee_code = '000' then
     perform public.employee_pin_verify(coalesce(p_pin, '0000'), v_dummy_hash);
-    perform public.employee_login_record_device_failure(v_device.id, v_now);
+    perform public.employee_login_record_device_failure(v_device.id, v_auth_now);
     return v_generic_failure;
   end if;
 
@@ -358,7 +425,7 @@ begin
 
   if not found then
     perform public.employee_pin_verify(coalesce(p_pin, '0000'), v_dummy_hash);
-    perform public.employee_login_record_device_failure(v_device.id, v_now);
+    perform public.employee_login_record_device_failure(v_device.id, v_auth_now);
     return v_generic_failure;
   end if;
 
@@ -368,23 +435,23 @@ begin
   where a.paired_device_id = v_device.id
     and a.employee_id = v_employee.id;
 
-  if v_locked_until is not null and v_locked_until > v_now then
+  if v_locked_until is not null and v_locked_until > v_auth_now then
     return jsonb_build_object(
       'ok', false,
       'error', 'locked_out',
-      'retryAfterSeconds', ceil(extract(epoch from (v_locked_until - v_now)))::integer
+      'retryAfterSeconds', ceil(extract(epoch from (v_locked_until - v_auth_now)))::integer
     );
   end if;
 
   if p_pin is null or p_pin !~ '^[0-9]{4}$' then
     perform public.employee_pin_verify('0000', v_dummy_hash);
-    perform public.employee_login_record_device_failure(v_device.id, v_now);
+    perform public.employee_login_record_device_failure(v_device.id, v_auth_now);
     return v_generic_failure;
   end if;
 
   if not public.employee_pin_verify(p_pin, v_employee.pin_hash) then
-    perform public.employee_login_record_employee_failure(v_device.id, v_employee.id, v_now);
-    perform public.employee_login_record_device_failure(v_device.id, v_now);
+    perform public.employee_login_record_employee_failure(v_device.id, v_employee.id, v_auth_now);
+    perform public.employee_login_record_device_failure(v_device.id, v_auth_now);
     return v_generic_failure;
   end if;
 
@@ -455,6 +522,24 @@ begin
   end if;
 
   -- ==========================================================================
+  -- THE FINANCIAL EVENT'S INSTANT. ONE READING, TAKEN HERE.
+  --
+  -- After the credential check, the active revalidation and the role gate, and
+  -- while every authority lock is held -- so nothing below can move underneath
+  -- it. This single value decides BOTH which business day the money belongs to
+  -- and what is written to occurred_at, which is the whole point: those two must
+  -- describe the same instant or the record contradicts itself.
+  --
+  -- WHY NOT v_auth_now. That was read before a bcrypt and three lock
+  -- acquisitions. A request entering at 23:59:59 could derive YESTERDAY's business
+  -- day from it and then stamp the row 00:00:01 today -- money filed, permanently,
+  -- against a day it did not happen on. The device has been held FOR SHARE since
+  -- the top, so no rollover can commit under us; this reading is what makes the
+  -- date and the stamp agree.
+  -- ==========================================================================
+  v_occurred_at := clock_timestamp();
+
+  -- ==========================================================================
   -- THE BUSINESS DAY, DERIVED -- NEVER ACCEPTED, NEVER CREATED.
   --
   -- CP2a's helpers, called as their owner, exactly as
@@ -472,7 +557,8 @@ begin
       return jsonb_build_object('ok', false, 'error', 'business_timezone_required');
   end;
 
-  v_business_date := public.business_date_of(v_now, v_timezone);
+  -- FROM THE EVENT'S OWN INSTANT. Not from v_auth_now.
+  v_business_date := public.business_date_of(v_occurred_at, v_timezone);
 
   if v_business_date is null then
     -- The stored zone no longer resolves, so the server cannot say what day it
@@ -563,10 +649,6 @@ begin
     );
   end if;
 
-  -- THE SERVER'S CLOCK, and there is no argument through which a device could
-  -- offer its own. A till with a wrong clock cannot misdate this shop's money.
-  v_occurred_at := clock_timestamp();
-
   -- THE UNIQUE INDEX IS THE LAST WORD. The lookup above closes the ordinary
   -- case, but two requests carrying the SAME id can reach the insert together --
   -- neither saw the other's row, and nothing they locked serializes them.
@@ -641,7 +723,7 @@ comment on function public.cash_movement_append(text, text, text, numeric, text,
   'the kind of financial event it is creating.';
 
 -- ----------------------------------------------------------------------------
--- 5. The three public actions.
+-- 6. The three public actions.
 --
 -- THREE RPCs, NOT ONE WITH A TYPE ARGUMENT. Each names the event it creates, and
 -- the literal is written here where it cannot be chosen by a caller. A single
@@ -731,7 +813,7 @@ comment on function public.record_paid_out(text, text, numeric, text, uuid, uuid
   'Owner or manager only. Note REQUIRED.';
 
 -- ----------------------------------------------------------------------------
--- 6. Privileges. Supabase's ALTER DEFAULT PRIVILEGES means a new function is
+-- 7. Privileges. Supabase's ALTER DEFAULT PRIVILEGES means a new function is
 --    BORN executable by anon, authenticated and service_role, so every grant
 --    here is written revoke-then-grant, matching CP2b, CP2c, CP3.1 and 1C.
 -- ----------------------------------------------------------------------------
@@ -761,7 +843,7 @@ revoke all on function public.record_paid_out(text, text, numeric, text, uuid, u
 grant execute on function public.record_paid_out(text, text, numeric, text, uuid, uuid) to authenticated;
 
 -- ----------------------------------------------------------------------------
--- 7. Verify what this migration claims, against the live catalog.
+-- 8. Verify what this migration claims, against the live catalog.
 --
 -- THE SOURCE CHECKS READ CODE, NOT PROSE. The comments above deliberately name
 -- the things this function must not call -- "ensure_daily_register_context is
@@ -824,6 +906,29 @@ begin
        where i.indexrelid = 'public.cash_movements_project_request'::regclass)
      <> 'project_id,request_id' then
     raise exception '1D: the replay index is not exactly (project_id, request_id).';
+  end if;
+
+  -- ------------------------------------------------------ the shared note rule
+  select p.oid into v_fn from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = 'cash_movement_trim';
+
+  if v_fn is null then
+    raise exception '1D: cash_movement_trim was not created.';
+  end if;
+
+  -- IMMUTABLE is what makes it legal inside the CHECK. A volatile or stable
+  -- function there would be rejected, and the CHECK is half of "one rule".
+  if (select p.provolatile from pg_proc p where p.oid = v_fn) <> 'i' then
+    raise exception '1D: cash_movement_trim must be IMMUTABLE to be used in a CHECK.';
+  end if;
+
+  -- It agrees with JavaScript's trim() on the cases that caused this correction.
+  if public.cash_movement_trim(E'\u00A0') <> ''
+     or public.cash_movement_trim(E'\t') <> ''
+     or public.cash_movement_trim(E'\u3000\u2009') <> ''
+     or public.cash_movement_trim(E' \u00A0 milk \u00A0 ') <> 'milk'
+     or public.cash_movement_trim(E'a\u00A0b') <> E'a\u00A0b' then
+    raise exception '1D: cash_movement_trim does not implement the agreed whitespace set.';
   end if;
 
   -- ------------------------------------------------------- the internal helper
@@ -914,14 +1019,50 @@ begin
     raise exception '1D: cash_movement_append does not enforce the DAILY contract.';
   end if;
 
-  -- BARE btrim() WOULD BE A BUG, not a style choice: it strips spaces only, so a
-  -- one-tab reason would satisfy a required note with invisible content.
-  if v_body ~ 'btrim\(coalesce\(p_note, ''''\)\)' then
-    raise exception '1D: cash_movement_append trims only spaces from the note.';
+  -- ONE NOTE RULE, AND IT IS THE SHARED ONE. An inline expression here would be a
+  -- second contract: bare btrim() strips spaces only, and [[:space:]] is resolved
+  -- from the cluster's ctype rather than from this rule -- under en_US.UTF-8 it
+  -- misses U+FEFF. Either would let an invisible note satisfy a REQUIRED reason.
+  if v_body !~ 'cash_movement_trim' then
+    raise exception '1D: cash_movement_append does not use the shared note rule.';
   end if;
 
-  if v_body !~ 'btrim\(coalesce\(p_note' then
-    raise exception '1D: cash_movement_append does not trim the note.';
+  if v_body ~ 'btrim\(' or v_body ~ '\[\[:space:\]\]' then
+    raise exception '1D: cash_movement_append normalizes the note itself instead of sharing the rule.';
+  end if;
+
+  -- ==========================================================================
+  -- ONE CLOCK DECIDES THE BUSINESS DAY, AND IT IS THE EVENT'S OWN.
+  --
+  -- The authentication clock is read before a bcrypt and three lock acquisitions.
+  -- Deriving the business day from it while stamping occurred_at later is a
+  -- midnight race: a request entering at 23:59:59 files money against yesterday
+  -- and dates it today. These assertions are why that cannot come back.
+  -- ==========================================================================
+  if v_body !~ 'business_date_of\(v_occurred_at, v_timezone\)' then
+    raise exception '1D: the business day is not derived from the movement instant.';
+  end if;
+
+  if v_body ~ 'business_date_of\(v_auth_now' then
+    raise exception '1D: the business day is derived from the authentication clock.';
+  end if;
+
+  -- Exactly one reading feeds both the date and the stamp. Two would be two
+  -- different instants again, however carefully named.
+  if (length(v_body) - length(replace(v_body, 'v_occurred_at := clock_timestamp()', '')))
+       / length('v_occurred_at := clock_timestamp()') <> 1 then
+    raise exception '1D: the movement instant is not captured exactly once.';
+  end if;
+
+  -- And it is captured AFTER the role gate, not before the credential work.
+  if strpos(v_body, 'v_occurred_at := clock_timestamp()')
+       < strpos(v_body, 'not in (''owner'', ''manager'')') then
+    raise exception '1D: the movement instant is captured before authorization completes.';
+  end if;
+
+  -- The row is stamped with that same value, not with a fresh reading.
+  if v_body !~ 'p_movement_type, p_amount, v_note, v_occurred_at, p_request_id' then
+    raise exception '1D: the inserted row is not stamped with the derived instant.';
   end if;
 
   -- ------------------------------------------------------ the three wrappers

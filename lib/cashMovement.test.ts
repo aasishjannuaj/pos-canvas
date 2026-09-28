@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CASH_MOVEMENT_NOTE_MAX_LENGTH,
+  CASH_NOTE_TRIMMED_WHITESPACE,
   CASH_MOVEMENT_TYPES,
   cashMovementFailure,
   describeCashMovementSuccess,
@@ -191,6 +192,62 @@ describe("the reason", () => {
     const padded = `  ${"x".repeat(CASH_MOVEMENT_NOTE_MAX_LENGTH)}  `;
 
     expect(validateCashNote(padded, "paid_in").ok).toBe(true);
+  });
+
+  // =========================================================================
+  // THE WHITESPACE CONTRACT. Two defects were found here in turn: PostgreSQL's
+  // bare btrim() strips SPACES ONLY, and then the ASCII-only replacement still did
+  // not match `.trim()`. Both let an invisible reason satisfy a REQUIRED note. The
+  // rule is now one enumerated set, shared by the client and the server.
+  // =========================================================================
+  it("treats every character in the contract as blank", () => {
+    for (const ch of CASH_NOTE_TRIMMED_WHITESPACE) {
+      const point = `U+${(ch.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, "0")}`;
+
+      // This is the definition: the set is exactly what .trim() removes.
+      expect(`${point}: ${ch.trim()}`).toBe(`${point}: `);
+
+      // Required: invisible whitespace is not a reason.
+      expect(`${point}: ${JSON.stringify(validateCashNote(ch, "paid_out"))}`).toBe(
+        `${point}: ${JSON.stringify({ ok: false, problem: "required" })}`
+      );
+
+      // Optional: it becomes null, not an invisible note.
+      expect(`${point}: ${JSON.stringify(validateCashNote(ch, "cash_drop"))}`).toBe(
+        `${point}: ${JSON.stringify({ ok: true, note: null })}`
+      );
+    }
+  });
+
+  // THE CASE THAT CAUSED THE SECOND CORRECTION. U+00A0 is not stripped by
+  // PostgreSQL's btrim(), and U+FEFF is not matched by [[:space:]] under
+  // en_US.UTF-8 -- but .trim() removes both, so the server had to as well.
+  it("treats a non-breaking space and a BOM as blank", () => {
+    for (const ch of ["\u00A0", "\u00A0\u00A0\u00A0", "\uFEFF", "\u3000", " \u00A0\t\u3000 "]) {
+      expect(validateCashNote(ch, "paid_in")).toEqual({ ok: false, problem: "required" });
+      expect(validateCashNote(ch, "cash_drop")).toEqual({ ok: true, note: null });
+    }
+  });
+
+  it("trims those characters from around real text, and keeps interior ones", () => {
+    expect(validateCashNote("\u00A0 milk \u00A0", "paid_out")).toEqual({ ok: true, note: "milk" });
+    expect(validateCashNote("\u3000bin bags\u3000", "paid_out")).toEqual({ ok: true, note: "bin bags" });
+    // Interior whitespace is CONTENT.
+    expect(validateCashNote("a\u00A0b", "paid_out")).toEqual({ ok: true, note: "a\u00A0b" });
+  });
+
+  // NEGATIVE CONTROL ON THE SET ITSELF. U+200B is deliberately absent: .trim()
+  // leaves it, so the server leaves it, so a note of one U+200B is real content.
+  // If it were added to the list, the two implementations would disagree again.
+  it("does NOT treat a zero-width space as blank", () => {
+    expect("\u200B".trim()).not.toBe("");
+    expect(CASH_NOTE_TRIMMED_WHITESPACE).not.toContain("\u200B");
+    expect(validateCashNote("\u200B", "paid_out")).toEqual({ ok: true, note: "\u200B" });
+  });
+
+  it("enumerates the set once, with no duplicates", () => {
+    expect(new Set(CASH_NOTE_TRIMMED_WHITESPACE).size).toBe(CASH_NOTE_TRIMMED_WHITESPACE.length);
+    expect(CASH_NOTE_TRIMMED_WHITESPACE).toHaveLength(25);
   });
 
   it("says something useful for every note problem", () => {

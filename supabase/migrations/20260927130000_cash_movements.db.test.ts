@@ -533,25 +533,140 @@ maybe("the reason", () => {
     expect(field(move(DB, 1, "paid_in", "002", "3333", "5.00", padded, DAILY, uuid(181)), "ok")).toBe("true");
   });
 
-  // REGRESSION, AND IT WAS A REAL DEFECT. PostgreSQL's bare btrim() strips SPACES
-  // ONLY, so a reason of one tab survived it, read as present, and satisfied a
-  // required note with content nobody can see -- while the client's .trim(), which
-  // strips all whitespace, called the same input blank. The two disagreed.
-  it("treats a tab or a newline as blank, exactly as the client does", () => {
+  // =========================================================================
+  // THE WHITESPACE CONTRACT. Two real defects were found here, in order: bare
+  // btrim() strips SPACES ONLY, and then the ASCII-only replacement still did not
+  // match the client, whose .trim() removes a much larger set. Both let an
+  // invisible reason satisfy a REQUIRED note. The rule is now defined once, in
+  // cash_movement_trim, as exactly the set JavaScript's trim() removes.
+  // =========================================================================
+  it("treats every kind of whitespace as blank, exactly as the client does", () => {
     reset(DB);
 
-    for (const [i, note] of ["\t", "\t ", "\n", " \r\n\t "].entries()) {
+    const blanks = [
+      ["spaces only", "'   '"],
+      ["tabs only", String.raw`E'\t\t'`],
+      ["newline only", String.raw`E'\n'`],
+      ["mixed ASCII whitespace", String.raw`E' \t\r\n\f\v '`],
+      // THE CASE THAT CAUSED THIS CORRECTION. U+00A0 is not classified as space by
+      // btrim(), nor by [[:space:]] under modern glibc -- but .trim() removes it.
+      ["non-breaking space only", String.raw`E'\u00A0'`],
+      ["several NBSPs", String.raw`E'\u00A0\u00A0\u00A0'`],
+      ["ideographic and hair spaces", String.raw`E'\u3000\u2009'`],
+      ["zero-width no-break space", String.raw`E'\uFEFF'`],
+      ["every trimmed character at once", String.raw`E'\t\n\u000B\f\r \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF'`],
+    ] as const;
+
+    let n = 1840;
+
+    for (const [what, literal] of blanks) {
       // Required: invisible whitespace is not a reason.
-      expect(field(move(DB, 1, "paid_in", "002", "3333", "5.00", note, DAILY, uuid(184 + i * 2)), "error"))
-        .toBe("note_required");
+      const required = move(DB, 1, "paid_in", "002", "3333", "5.00", null, DAILY, uuid(n));
+      expect(required).toBeTruthy();
+      const paidIn = asRole(DB, deviceUser(1),
+        `select public.record_paid_in('002','3333',5.00,${literal},'${DAILY}'::uuid,'${uuid(n)}'::uuid)::text`);
+      n += 1;
+
+      expect(`${what}: ${field(paidIn, "error")}`).toBe(`${what}: note_required`);
 
       // Optional: it becomes NULL, not an invisible note.
-      const drop = move(DB, 1, "cash_drop", "002", "3333", "5.00", note, DAILY, uuid(185 + i * 2));
-      expect(field(drop, "ok")).toBe("true");
-      expect(field(drop, "note")).toBe("");
+      const drop = asRole(DB, deviceUser(1),
+        `select public.record_cash_drop('002','3333',5.00,${literal},'${DAILY}'::uuid,'${uuid(n)}'::uuid)::text`);
+      n += 1;
+
+      expect(`${what}: ${field(drop, "ok")}`).toBe(`${what}: true`);
+      expect(`${what}: ${field(drop, "note")}`).toBe(`${what}: `);
     }
 
     expect(sql(DB, `select count(*)::text from public.cash_movements where note is not null`)).toBe("0");
+  });
+
+  // Interior whitespace is CONTENT. Only the ends are trimmed, and U+200B is not
+  // in the set at all -- because .trim() does not remove it either.
+  it("trims only the ends, and keeps what the client keeps", () => {
+    reset(DB);
+
+    for (const [i, [literal, stored]] of ([
+      [String.raw`E' \u00A0 milk \u00A0 '`, "milk"],
+      [String.raw`E'\u3000bin bags\u3000'`, "bin bags"],
+      // Interior NBSP survives, because it is between real characters.
+      [String.raw`E'a\u00A0b'`, "a\u00A0b"],
+      // U+200B is not trimmed whitespace: this is a real, if odd, one-char note.
+      [String.raw`E'\u200B'`, "\u200B"],
+    ] as const).entries()) {
+      const result = asRole(DB, deviceUser(1),
+        `select public.record_paid_out('002','3333',5.00,${literal},'${DAILY}'::uuid,'${uuid(1870 + i)}'::uuid)::text`);
+
+      expect(field(result, "ok")).toBe("true");
+      expect(field(result, "note")).toBe(stored);
+    }
+  });
+
+  // =========================================================================
+  // NEGATIVE CONTROL: the PREVIOUS implementations, run against the same inputs.
+  //
+  // This is what makes the rule above load-bearing rather than decorative. Both
+  // earlier attempts are evaluated directly, and both let an invisible REQUIRED
+  // note through -- which is precisely the leak that was shipped and corrected.
+  // =========================================================================
+  it("proves bare btrim() AND the ASCII-only rule both leaked an invisible note", () => {
+    // Attempt 1, bare btrim(): a tab survives, so a required note is "satisfied".
+    expect(sql(DB, String.raw`select (btrim(E'\t') = '')::text`)).toBe("false");
+
+    // Attempt 2, ASCII-only btrim(): the tab is fixed, but U+00A0 still survives.
+    expect(sql(DB, String.raw`select (btrim(E'\u00A0', E' \t\n\r\f\v') = '')::text`)).toBe("false");
+    expect(sql(DB, String.raw`select (btrim(E'\u3000', E' \t\n\r\f\v') = '')::text`)).toBe("false");
+
+    // Attempt 3, had we reached for it: [[:space:]] is resolved from the CLUSTER's
+    // ctype, not from any rule of ours. Under en_US.UTF-8 it is close but not
+    // equal to trim() -- it misses U+FEFF, which trim() does remove -- so a note of
+    // one U+FEFF would have satisfied a REQUIRED reason. Measured here rather than
+    // assumed, because the answer is a property of the database and could differ
+    // on another cluster. That variability is itself the reason it is unusable.
+    expect(sql(DB, String.raw`select (regexp_replace(E'\uFEFF', '^[[:space:]]+|[[:space:]]+$', '', 'g') = '')::text`))
+      .toBe("false");
+
+    // THE SHIPPED RULE: every one of them is blank, including U+FEFF.
+    for (const literal of [String.raw`E'\t'`, String.raw`E'\u00A0'`,
+                           String.raw`E'\u3000'`, String.raw`E'\uFEFF'`]) {
+      expect(sql(DB, `select (public.cash_movement_trim(${literal}) = '')::text`)).toBe("true");
+    }
+
+    // AND IT AGREES WITH THE CLIENT, CHARACTER BY CHARACTER. The client exports the
+    // same set as CASH_NOTE_TRIMMED_WHITESPACE and trims with .trim(); this is the
+    // server half, asserted per code point so the two lists cannot drift silently.
+    // U+200B is in NEITHER: trim() leaves it, so a note of one U+200B is content.
+    const TRIMMED = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+      0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
+      0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff];
+
+    for (const point of TRIMMED) {
+      expect(`U+${point.toString(16)}: ${sql(DB, `select (public.cash_movement_trim(chr(${point})) = '')::text`)}`)
+        .toBe(`U+${point.toString(16)}: true`);
+      // The JavaScript side of the same claim.
+      expect(String.fromCodePoint(point).trim()).toBe("");
+    }
+
+    expect(sql(DB, `select (public.cash_movement_trim(chr(8203)) = '')::text`)).toBe("false");
+    expect(String.fromCodePoint(0x200b).trim()).not.toBe("");
+
+    // And the CHECK shares that rule, so a row bypassing the function cannot hold
+    // an invisible note either.
+    reset(DB);
+    let failed = "";
+
+    try {
+      sql(DB, String.raw`insert into public.cash_movements
+               (project_id, paired_device_id, register_session_id, employee_id,
+                movement_type, amount, note, occurred_at, request_id)
+               values ('` + PROJECT + `','` + device(1) + `','` + DAILY + `','` + MANAGER + `',
+                       'paid_out', 5.00, E'\u00A0', now(), '` + uuid(1880) + `')`);
+    } catch (error) {
+      failed = ((error as { stderr?: string }).stderr ?? "").toString();
+    }
+
+    expect(failed).toContain("cash_movements_note_shape");
+    expect(movementCount(DB)).toBe("0");
   });
 
   // NEGATIVE CONTROL AT THE SCHEMA LEVEL: the constraint is what actually holds,
@@ -1004,19 +1119,28 @@ maybe("the table is reachable only through the three actions", () => {
 
   // 50. No history RPC exists to grant a read path to.
   it("50. there is no runtime read contract at all", () => {
-    // Exactly one function carries the shared contract's name, and it is the
-    // internal one no client may execute.
+    // Two functions carry the shared contract's name -- the contract itself and
+    // the note rule it shares with the CHECK -- and NEITHER is executable by a
+    // client.
     expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-                    where n.nspname='public' and p.proname ~ 'cash_movement'`)).toBe("1");
+                    where n.nspname='public' and p.proname ~ 'cash_movement'`)).toBe("2");
+
+    for (const internal of ["cash_movement_append(text,text,text,numeric,text,uuid,uuid)",
+                            "cash_movement_trim(text)"]) {
+      for (const role of ["anon", "authenticated", "service_role"]) {
+        expect(sql(DB, `select has_function_privilege('${role}','public.${internal}','EXECUTE')::text`))
+          .toBe("false");
+      }
+    }
     // Feature 1D added exactly these four and nothing else -- in particular, no
     // list/get/read function, because reading a financial table is Lane 3's
     // contract and will arrive with its own.
     expect(sql(DB, `select string_agg(p.proname, ',' order by p.proname)
                     from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='public'
-                      and p.proname in ('cash_movement_append','record_cash_drop',
-                                        'record_paid_in','record_paid_out')`))
-      .toBe("cash_movement_append,record_cash_drop,record_paid_in,record_paid_out");
+                      and p.proname in ('cash_movement_append','cash_movement_trim',
+                                        'record_cash_drop','record_paid_in','record_paid_out')`))
+      .toBe("cash_movement_append,cash_movement_trim,record_cash_drop,record_paid_in,record_paid_out");
 
     expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='public'
@@ -1056,6 +1180,292 @@ maybe("the table is reachable only through the three actions", () => {
 
     expect(counts()).toBe(before);
     expect(movementCount(DB)).toBe("1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE MIDNIGHT BOUNDARY
+//
+// The defect this covers: cash_movement_append once read one clock before the
+// bcrypt (to pace throttles) and a second one at the insert, then derived the
+// business day from the FIRST. A request entering at 23:59:59 could therefore be
+// filed against yesterday's DAILY while being stamped today -- a row that
+// contradicts itself, permanently, about which day the money moved.
+//
+// THE SEAM IS TEST-ONLY AND TOUCHES NO PRODUCTION CODE. Every one of these
+// functions pins `search_path = public, pg_catalog, pg_temp`, and PostgreSQL
+// honours that order literally when pg_catalog is named explicitly -- so a
+// `public.clock_timestamp()` created here SHADOWS the builtin inside them, and
+// only inside them. It is scripted to return a pre-midnight instant on its first
+// call and a post-midnight one afterwards, which is exactly the race, and it is
+// dropped again in a finally block. No production clock configuration exists or
+// was added.
+// ---------------------------------------------------------------------------
+
+/** A DAILY row for an arbitrary date, in the shape register_sessions_daily_shape demands. */
+function seedDailyFor(db: string, deviceId: string, date: string): string {
+  return sql(db, `
+    insert into public.register_sessions
+      (paired_device_id, opened_at, opening_cash, closed_at, business_date, business_timezone)
+    select '${deviceId}', b.starts_at, 0, b.ends_at, '${date}', '${ZONE}'
+    from public.business_day_bounds('${date}', '${ZONE}') b
+    returning id`);
+}
+
+/** America/New_York is UTC-4 in September, so local midnight is 04:00 UTC. */
+const BEFORE_MIDNIGHT = "2026-09-20 03:59:59.9+00";
+const AFTER_MIDNIGHT = "2026-09-20 04:00:01+00";
+const DATE_D = "2026-09-19";
+const DATE_D_PLUS_1 = "2026-09-20";
+
+/** Installs the scripted clock. Call 1 is pre-midnight; every later call is not. */
+function installClockSeam(db: string): void {
+  sql(db, `
+    create table if not exists public.test_clock_calls (n integer not null);
+    delete from public.test_clock_calls;
+
+    create or replace function public.clock_timestamp()
+    returns timestamptz
+    language plpgsql
+    volatile
+    set search_path = pg_catalog, public, pg_temp
+    as $seam$
+    declare
+      v_calls integer;
+    begin
+      insert into public.test_clock_calls (n) values (1);
+      select count(*) into v_calls from public.test_clock_calls;
+
+      if v_calls <= 1 then
+        return '${BEFORE_MIDNIGHT}'::timestamptz;
+      end if;
+
+      return '${AFTER_MIDNIGHT}'::timestamptz;
+    end;
+    $seam$;`);
+}
+
+function removeClockSeam(db: string): void {
+  sql(db, `drop function if exists public.clock_timestamp();
+           drop table if exists public.test_clock_calls;`);
+}
+
+const clockCalls = (db: string): string =>
+  sql(db, `select count(*)::text from public.test_clock_calls`);
+
+maybe("a request that crosses midnight", () => {
+  it("the seam really does shadow the builtin inside a pinned search_path", () => {
+    reset(DB);
+    installClockSeam(DB);
+
+    try {
+      // PROBED THROUGH A PINNED search_path, because that is the only context the
+      // shadowing applies to -- and the only one the RPCs run in. A top-level
+      // statement searches pg_catalog IMPLICITLY FIRST, so the builtin wins there;
+      // an explicit `public, pg_catalog` is what puts public ahead of it.
+      sql(DB, `
+        create or replace function public.test_seam_probe()
+        returns text language plpgsql
+        set search_path = public, pg_catalog, pg_temp
+        as $probe$ begin return clock_timestamp()::text; end; $probe$;`);
+
+      expect(sql(DB, `select public.test_seam_probe()`)).toBe("2026-09-20 03:59:59.9+00");
+
+      // The real clock is untouched everywhere else: at top level, where pg_catalog
+      // is implicitly first, and wherever it is named explicitly.
+      expect(sql(DB, `select clock_timestamp()::date::text`)).not.toBe(DATE_D);
+      expect(sql(DB, `select pg_catalog.clock_timestamp()::date::text`)).not.toBe(DATE_D);
+
+      sql(DB, `drop function public.test_seam_probe()`);
+    } finally {
+      removeClockSeam(DB);
+    }
+
+    // And it is gone.
+    expect(sql(DB, `select count(*)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+                    where n.nspname='public' and p.proname='clock_timestamp'`)).toBe("0");
+  });
+
+  // REQUIRED OUTCOME 1. The authoritative day at the moment of the financial event
+  // is D+1, and the till asked for D. That is a changed day, and it must refuse.
+  it("with a D+1 DAILY present and an expectation of D, it refuses with daily_changed", () => {
+    reset(DB);
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+
+    const dailyD = seedDailyFor(DB, device(1), DATE_D);
+    const dailyD1 = seedDailyFor(DB, device(1), DATE_D_PLUS_1);
+
+    expect(dailyD).not.toBe(dailyD1);
+    installClockSeam(DB);
+
+    try {
+      const result = move(DB, 1, "cash_drop", "001", "2222", "5.00", null, dailyD, uuid(700));
+
+      expect(field(result, "error")).toBe("daily_changed");
+      expect(movementCount(DB)).toBe("0");
+
+      // The clock really was read on both sides of the boundary during the call,
+      // so this is the race and not a same-day refusal.
+      expect(Number(clockCalls(DB))).toBeGreaterThanOrEqual(2);
+
+      // And the SAME request, asking for the day it actually is, succeeds -- which
+      // proves the refusal above was about the DAY and nothing else.
+      const ok = move(DB, 1, "cash_drop", "001", "2222", "5.00", null, dailyD1, uuid(701));
+
+      expect(field(ok, "ok")).toBe("true");
+      expect(row(DB, field(ok, "movementId"))).toContain(dailyD1);
+    } finally {
+      removeClockSeam(DB);
+    }
+
+    // THE INVARIANT, on the row that did land: the day it is bound to is the day
+    // its own timestamp falls in.
+    expect(sql(DB, `
+      select (public.business_date_of(m.occurred_at, r.business_timezone) = r.business_date)::text
+      from public.cash_movements m
+      join public.register_sessions r on r.id = m.register_session_id`)).toBe("true");
+
+    sql(DB, `delete from public.cash_movements`);
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+    DAILY = ensureDaily(DB, 1);
+  });
+
+  // REQUIRED OUTCOME 2. The day rolled over and nobody has established the new
+  // one. A cash movement may not create it, so there is nothing for this money to
+  // belong to.
+  it("with no D+1 DAILY, it refuses with no_daily_context and creates none", () => {
+    reset(DB);
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+
+    const dailyD = seedDailyFor(DB, device(1), DATE_D);
+    const dailyRows = () =>
+      sql(DB, `select count(*)::text from public.register_sessions
+               where paired_device_id='${device(1)}' and business_date is not null`);
+
+    expect(dailyRows()).toBe("1");
+    installClockSeam(DB);
+
+    try {
+      const result = move(DB, 1, "cash_drop", "001", "2222", "5.00", null, dailyD, uuid(710));
+
+      expect(field(result, "error")).toBe("no_daily_context");
+      expect(movementCount(DB)).toBe("0");
+      // STILL ONE. It did not quietly ensure D+1 to give itself somewhere to write.
+      expect(dailyRows()).toBe("1");
+    } finally {
+      removeClockSeam(DB);
+    }
+
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+    DAILY = ensureDaily(DB, 1);
+  });
+
+  // =========================================================================
+  // THE NEGATIVE CONTROL: the OLD implementation, run against the same setup.
+  //
+  // Generated from the SHIPPED function by pg_get_functiondef and one targeted
+  // substitution -- derive the business day from the authentication clock instead
+  // of the event clock -- so it is genuinely the previous behaviour and cannot
+  // drift away from the code under test. The substitution is asserted to have
+  // applied, so this test fails loudly if the shipped source ever stops matching.
+  // =========================================================================
+  it("the PREVIOUS stale-clock implementation files the money on the wrong day", () => {
+    reset(DB);
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+
+    const dailyD = seedDailyFor(DB, device(1), DATE_D);
+    seedDailyFor(DB, device(1), DATE_D_PLUS_1);
+
+    sql(DB, `
+      do $seed$
+      declare
+        v_def text;
+        v_old text;
+      begin
+        select pg_get_functiondef(p.oid) into v_def
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname = 'cash_movement_append';
+
+        v_old := replace(v_def,
+          'business_date_of(v_occurred_at, v_timezone)',
+          'business_date_of(v_auth_now, v_timezone)');
+
+        if v_old = v_def then
+          raise exception 'the stale-clock substitution did not apply: the shipped source changed shape';
+        end if;
+
+        v_old := replace(v_old, 'public.cash_movement_append(',
+                                'public.cash_movement_append_stale_clock(');
+
+        execute v_old;
+      end;
+      $seed$;`);
+
+    installClockSeam(DB);
+
+    try {
+      // Same inputs as the daily_changed case above, where the corrected function
+      // wrote nothing.
+      const stale = asRole(DB, deviceUser(1),
+        `select public.cash_movement_append_stale_clock('cash_drop','001','2222',5.00,null,` +
+          `'${dailyD}'::uuid,'${uuid(720)}'::uuid)::text`);
+
+      // THE BUG, REPRODUCED: it accepted the request, because the pre-midnight
+      // clock made yesterday look like today.
+      expect(field(stale, "ok")).toBe("true");
+      expect(movementCount(DB)).toBe("1");
+      expect(row(DB, field(stale, "movementId"))).toContain(dailyD);
+    } finally {
+      removeClockSeam(DB);
+      sql(DB, `drop function if exists public.cash_movement_append_stale_clock(text,text,text,numeric,text,uuid,uuid)`);
+    }
+
+    // AND THE ROW CONTRADICTS ITSELF. It is bound to business date D while its own
+    // occurred_at falls on D+1 -- which is the whole defect, stated as data.
+    expect(sql(DB, `
+      select r.business_date::text || ' vs ' ||
+             public.business_date_of(m.occurred_at, r.business_timezone)::text
+      from public.cash_movements m
+      join public.register_sessions r on r.id = m.register_session_id`))
+      .toBe(`${DATE_D} vs ${DATE_D_PLUS_1}`);
+
+    expect(sql(DB, `
+      select (public.business_date_of(m.occurred_at, r.business_timezone) = r.business_date)::text
+      from public.cash_movements m
+      join public.register_sessions r on r.id = m.register_session_id`)).toBe("false");
+
+    sql(DB, `delete from public.cash_movements`);
+    sql(DB, `delete from public.register_sessions where paired_device_id='${device(1)}'`);
+    DAILY = ensureDaily(DB, 1);
+  });
+
+  // THE STANDING INVARIANT, asserted for ordinary movements too: every successful
+  // row's occurred_at falls inside the business date of the DAILY it is bound to.
+  it("every successful movement agrees with its own business day", () => {
+    reset(DB);
+
+    let n = 730;
+
+    for (const [kind, code, pin, note] of [
+      ["cash_drop", "001", "2222", null],
+      ["paid_in", "002", "3333", "float"],
+      ["paid_out", "003", "4444", "bin bags"],
+    ] as const) {
+      expect(field(move(DB, 1, kind, code, pin, "4.00", note, DAILY, uuid(n)), "ok")).toBe("true");
+      n += 1;
+    }
+
+    expect(movementCount(DB)).toBe("3");
+    expect(sql(DB, `
+      select count(*)::text from public.cash_movements m
+      join public.register_sessions r on r.id = m.register_session_id
+      where public.business_date_of(m.occurred_at, r.business_timezone) <> r.business_date`)).toBe("0");
+
+    // And each row's instant really does sit inside that day's stored bounds.
+    expect(sql(DB, `
+      select count(*)::text from public.cash_movements m
+      join public.register_sessions r on r.id = m.register_session_id
+      where m.occurred_at < r.opened_at or m.occurred_at >= r.closed_at`)).toBe("0");
   });
 });
 
