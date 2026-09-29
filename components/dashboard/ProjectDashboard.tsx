@@ -3,6 +3,12 @@
 import { CURRENCY_SYMBOLS } from "@/components/editor/EditorShell";
 import type { Currency, MenuItem } from "@/components/editor/EditorShell";
 import type { OrderTotal } from "@/lib/dashboard.types";
+import type { OrderBusinessDate } from "@/lib/ownerReporting";
+import {
+  currentBusinessDate,
+  indexOrderBusinessDates,
+  resolveOrderBusinessDate,
+} from "@/lib/salesReporting";
 
 // Feature 10.1 — fixed low-stock threshold, project-scoped, no new table.
 const LOW_STOCK_THRESHOLD = 5;
@@ -12,30 +18,48 @@ type ProjectDashboardProps = {
   orderTotalsError: string | null;
   menuItems: MenuItem[];
   currency: Currency;
+  /** The project's SAVED business timezone, or null when unconfigured. */
+  businessTimezone: string | null;
+  /** register_sessions.business_date per order, from list_order_business_dates. */
+  orderBusinessDates: OrderBusinessDate[];
 };
-
-// Matches the app's existing (implicit) timezone convention: every other
-// date display (formatOrderTime, formatReceiptDateTime, formatTransactionTime)
-// calls toLocaleString with no explicit timeZone from a client component,
-// which resolves to the viewer's browser-local time. "Today" here is
-// computed the same way, rather than as a UTC day boundary on the server.
-function isToday(createdAt: string): boolean {
-  const orderDate = new Date(createdAt);
-  const now = new Date();
-  return orderDate.toDateString() === now.toDateString();
-}
 
 export default function ProjectDashboard({
   orderTotals,
   orderTotalsError,
   menuItems,
   currency,
+  businessTimezone,
+  orderBusinessDates,
 }: ProjectDashboardProps) {
   const currencySymbol = CURRENCY_SYMBOLS[currency];
 
+  // v1.3 Task 5C — "Today" is the BUSINESS day, not the viewer's.
+  //
+  // This used to be `orderDate.toDateString() === now.toDateString()`, which
+  // asked the browser what day it was. Two owners of the same shop in two
+  // timezones therefore saw two different "Today's Sales", and a shop trading
+  // past local midnight saw its evening split across two days. The instant is
+  // universal; the timezone that turns it into a date is the business's, and a
+  // registered sale keeps whatever business date the register recorded.
+  //
+  // WITH NO CONFIGURED TIMEZONE there is no "today" to compare against, and
+  // nothing is invented: today's figures resolve to zero rather than to the
+  // viewer's calendar day, and the Sales Report's All Time view still shows
+  // every sale.
+  const today = currentBusinessDate(new Date(), businessTimezone);
+  const businessDateIndex = indexOrderBusinessDates(orderBusinessDates);
+
   // Every row in `orders` is already a completed, paid sale — see
   // lib/dashboard.server.ts for why no status filter is applied.
-  const todaysOrders = orderTotals.filter((order) => isToday(order.createdAt));
+  const todaysOrders =
+    today === null
+      ? []
+      : orderTotals.filter(
+          (order) =>
+            resolveOrderBusinessDate(order, businessDateIndex, businessTimezone)
+              .businessDate === today
+        );
 
   const todaysSalesTotal = todaysOrders.reduce(
     (sum, order) => sum + order.total,

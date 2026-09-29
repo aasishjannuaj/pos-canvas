@@ -95,6 +95,14 @@ import type {
   BuildTarget,
 } from "@/lib/buildJobs";
 import DeviceManagementPanel from "@/components/devices/DeviceManagementPanel";
+// v1.3 Task 5C — the two accepted owner contracts the reports read. Both are
+// owner-authorized (auth.uid() -> projects.user_id) and resolve their own
+// authority server-side; no identity travels in either payload.
+import { fetchOrderBusinessDates } from "@/lib/ownerReporting.rpc";
+import { getOwnerReportMessage } from "@/lib/ownerReporting";
+import type { OrderBusinessDate } from "@/lib/ownerReporting";
+import { listEmployees, LIST_EMPLOYEES_MESSAGES } from "@/lib/employeeAdmin.rpc";
+import type { ReportEmployee } from "@/lib/salesReporting";
 import { uploadProjectLogoAction } from "@/lib/logoUpload.actions";
 import type { UploadLogoActionResult } from "@/lib/logoUpload.actions";
 import type { LogoUploadStatus } from "./BrandingLogoField";
@@ -395,6 +403,65 @@ export default function EditorShell({
   const [savedBusinessTimezone, setSavedBusinessTimezone] = useState<string | null>(
     initialBusinessTimezone ?? null
   );
+
+
+  // v1.3 Task 5C — what the reports need beyond the orders already loaded.
+  //
+  // LOADED ONCE, HERE, AND SHARED. The Dashboard's "Today's Sales" and the
+  // Sales Report's "Today" must mean the same business day; two independent
+  // loaders could disagree the moment one failed. Neither is part of the
+  // project configuration: nothing below is saved, published or exported.
+  const [orderBusinessDates, setOrderBusinessDates] = useState<OrderBusinessDate[]>([]);
+  const [businessDatesError, setBusinessDatesError] = useState<string | null>(null);
+  const [reportEmployees, setReportEmployees] = useState<ReportEmployee[]>([]);
+  const [reportEmployeesError, setReportEmployeesError] = useState<string | null>(null);
+  // True only while there is something to load, so an unsaved project never
+  // shows a spinner for data that will never arrive.
+  const [isLoadingReportData, setIsLoadingReportData] = useState(
+    (initialProjectId ?? null) !== null
+  );
+
+  useEffect(() => {
+    if (projectId === null) return;
+
+    // Async IIFE for the same reason as DeviceManagementPanel's mount effect:
+    // react-hooks/set-state-in-effect traces the writes back to the effect body
+    // otherwise. Every write below happens after an await.
+    void (async () => {
+      const [dates, roster] = await Promise.all([
+        fetchOrderBusinessDates(projectId),
+        listEmployees(projectId),
+      ]);
+
+      if (dates.ok) {
+        setOrderBusinessDates(dates.orderBusinessDates);
+        setBusinessDatesError(null);
+      } else {
+        // A failure is said out loud rather than shown as "no registered
+        // sales": an empty list would silently push every sale onto the
+        // timezone fallback and quietly change the report's dates.
+        setOrderBusinessDates([]);
+        setBusinessDatesError(getOwnerReportMessage(dates.code));
+      }
+
+      if (roster.ok) {
+        setReportEmployees(
+          roster.employees.map((employee) => ({
+            employeeId: employee.employeeId,
+            displayName: employee.displayName,
+            employeeCode: employee.employeeCode,
+            active: employee.active,
+          }))
+        );
+        setReportEmployeesError(null);
+      } else {
+        setReportEmployees([]);
+        setReportEmployeesError(LIST_EMPLOYEES_MESSAGES[roster.code]);
+      }
+
+      setIsLoadingReportData(false);
+    })();
+  }, [projectId]);
 
   // The MENU, not a choice: the runtime's IANA list, read once. Nothing here
   // selects a zone — see lib/businessTimezone.ts.
@@ -1852,12 +1919,22 @@ export default function EditorShell({
             orderTotalsError={orderTotalsError}
             menuItems={projectConfig.menuItems}
             currency={projectConfig.receipt.currency}
+            // The SAVED timezone, not the one being edited: an unsaved change
+            // in the Business panel must not re-bucket a report.
+            businessTimezone={savedBusinessTimezone}
+            orderBusinessDates={orderBusinessDates}
           />
         ) : editorMode === "edit" && editorSection === "Sales Report" ? (
           <SalesReport
             orderTotals={orderTotals}
             orderTotalsError={orderTotalsError}
             currency={projectConfig.receipt.currency}
+            businessTimezone={savedBusinessTimezone}
+            orderBusinessDates={orderBusinessDates}
+            businessDatesError={businessDatesError}
+            employees={reportEmployees}
+            employeesError={reportEmployeesError}
+            isLoadingReportData={isLoadingReportData}
           />
         ) : editorMode === "edit" && editorSection === "Product Performance" ? (
           <ProductPerformance

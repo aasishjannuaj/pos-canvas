@@ -237,15 +237,14 @@ describe("Task 5A leaves history and reporting alone", () => {
     }
   });
 
-  it("changes no reporting behaviour", () => {
-    // The authoritative value is available through the project path for a later
-    // reporting task to consume; Task 5A consumes none of it itself.
+  it("does no reporting of its own", () => {
+    // The authoritative value is available through the project path; Task 5A
+    // consumes none of it itself.
     //
     // NOT A BAN ON MENTIONING REPORTS: EditorShell has mounted SalesReport
     // since long before this task, and an earlier draft of this guard failed on
     // that pre-existing import — which would have been a test punishing the
-    // wrong thing. What Task 5A must not do is FEED the timezone into a report,
-    // which is the later, unauthorised work.
+    // wrong thing.
     for (const file of TASK_5A_SOURCES) {
       const source = code(read(file));
 
@@ -254,10 +253,18 @@ describe("Task 5A leaves history and reporting alone", () => {
       expect(source).not.toMatch(/salesByEmployee|businessDateRange|bucketByBusinessDate/i);
     }
 
+    // WHAT THIS ASSERTION USED TO SAY, AND WHY IT CHANGED. It used to require
+    // that the <SalesReport> mount mention no timezone at all, because feeding
+    // one into a report was work Task 5A had no authority to do. Task 5C is
+    // that work, authorized separately, and it now passes the timezone in — so
+    // the old form would fail a change that is correct. The boundary Task 5A
+    // still owns is WHICH value crosses: the SAVED timezone, never the one
+    // being edited, so an unsaved dropdown change cannot re-bucket a report.
     const shell = code(read(SHELL));
-    const mount = shell.slice(shell.indexOf("<SalesReport"), shell.indexOf("<SalesReport") + 600);
+    const mount = shell.slice(shell.indexOf("<SalesReport"), shell.indexOf("/>", shell.indexOf("<SalesReport")));
 
-    expect(mount).not.toMatch(/timezone/i);
+    expect(mount).toContain("businessTimezone={savedBusinessTimezone}");
+    expect(mount).not.toMatch(/businessTimezone=\{businessTimezone\}/);
   });
 
   it("the existing Business profile fields still render", () => {
