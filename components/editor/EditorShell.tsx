@@ -19,6 +19,7 @@ import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
+import EmployeeManagementPanel from "@/components/employees/EmployeeManagementPanel";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
 import ReceiptPreview from "./ReceiptPreview";
@@ -134,6 +135,8 @@ export type EditorSection =
   | "Taxes"
   | "Settings"
   | "Devices"
+  // v1.3 Task 5B — owner-facing employee administration.
+  | "Employees"
   | "Dashboard"
   | "Sales Report"
   | "Product Performance"
@@ -1876,6 +1879,12 @@ export default function EditorShell({
             projectId={projectId}
             onGoToBuild={() => handleEditorSectionChange("Settings")}
           />
+        ) : editorMode === "edit" && editorSection === "Employees" ? (
+          /* v1.3 Task 5B — self-contained in the same way: the panel loads its
+             own roster through the accepted owner RPCs, so only the project id
+             crosses this boundary. No employee data enters EditorShell state,
+             and none of it reaches projectConfig or a published build. */
+          <EmployeeManagementPanel projectId={projectId} />
         ) : editorMode === "edit" && editorSection === "Settings" ? (
           <ReceiptPreview
             businessProfile={projectConfig.businessProfile}
