@@ -19,6 +19,7 @@ import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
+import EmployeeTimeReport from "@/components/dashboard/EmployeeTimeReport";
 import EmployeeManagementPanel from "@/components/employees/EmployeeManagementPanel";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
@@ -147,6 +148,8 @@ export type EditorSection =
   | "Employees"
   | "Dashboard"
   | "Sales Report"
+  // v1.3 Task 5D — owner-facing Time Clock reporting.
+  | "Employee Time"
   | "Product Performance"
   | "Inventory Summary";
 
@@ -1935,6 +1938,16 @@ export default function EditorShell({
             employees={reportEmployees}
             employeesError={reportEmployeesError}
             isLoadingReportData={isLoadingReportData}
+          />
+        ) : editorMode === "edit" && editorSection === "Employee Time" ? (
+          /* v1.3 Task 5D — self-contained: the panel owns its range and asks
+             list_employee_time_sessions for that window itself, because the
+             contract filters in SQL. Only the project id and the SAVED business
+             timezone cross this boundary, and no Time Clock data enters
+             EditorShell state, projectConfig or a published build. */
+          <EmployeeTimeReport
+            projectId={projectId}
+            businessTimezone={savedBusinessTimezone}
           />
         ) : editorMode === "edit" && editorSection === "Product Performance" ? (
           <ProductPerformance

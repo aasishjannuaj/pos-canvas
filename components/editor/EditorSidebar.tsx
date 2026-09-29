@@ -12,6 +12,7 @@ const sections: { label: EditorSection; icon: string }[] = [
   { label: "Employees", icon: "👤" },
   { label: "Dashboard", icon: "📊" },
   { label: "Sales Report", icon: "📈" },
+  { label: "Employee Time", icon: "⏱" },
   { label: "Product Performance", icon: "🏆" },
   { label: "Inventory Summary", icon: "📦" },
 ];

@@ -1241,6 +1241,12 @@ export default function EditorPropertiesPanel({
             </p>
           )}
 
+          {editorSection === "Employee Time" && (
+            <p className="text-sm text-neutral-500">
+              Time Clock records are shown in the main content area.
+            </p>
+          )}
+
           {editorSection === "Settings" && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">
