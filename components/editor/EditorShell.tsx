@@ -20,6 +20,7 @@ import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
 import SalesReport from "@/components/dashboard/SalesReport";
 import EmployeeTimeReport from "@/components/dashboard/EmployeeTimeReport";
+import CashActivityReport from "@/components/dashboard/CashActivityReport";
 import EmployeeManagementPanel from "@/components/employees/EmployeeManagementPanel";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
@@ -150,6 +151,8 @@ export type EditorSection =
   | "Sales Report"
   // v1.3 Task 5D — owner-facing Time Clock reporting.
   | "Employee Time"
+  // v1.3 Task 5E — owner-facing cash movement events.
+  | "Cash Activity"
   | "Product Performance"
   | "Inventory Summary";
 
@@ -1946,6 +1949,15 @@ export default function EditorShell({
              timezone cross this boundary, and no Time Clock data enters
              EditorShell state, projectConfig or a published build. */
           <EmployeeTimeReport
+            projectId={projectId}
+            businessTimezone={savedBusinessTimezone}
+          />
+        ) : editorMode === "edit" && editorSection === "Cash Activity" ? (
+          /* v1.3 Task 5E — self-contained: the panel reads the accepted
+             list_cash_movements event stream itself. Only the project id and
+             the SAVED business timezone cross this boundary, and no cash data
+             enters EditorShell state, projectConfig or a published build. */
+          <CashActivityReport
             projectId={projectId}
             businessTimezone={savedBusinessTimezone}
           />
