@@ -84,10 +84,20 @@ function refusal<T extends string>(
 /**
  * One employee, exactly as list_employees projects them.
  *
- * NOTE WHAT IS ABSENT. There is no pin_hash — the column is never selected by
- * the contract, so it cannot appear here — and there is no employeeCode
- * either. That second absence is the server's shape, not an omission made
- * here; lib/employeeAdmin.ts states what it means for the owner.
+ * `employeeCode` IS THE AUTHORITATIVE READ VALUE, added to the contract by
+ * migration 20260929120000. It is the roster's own answer for this employee,
+ * so a reloaded screen no longer has to remember anything: whatever the list
+ * says is what is shown.
+ *
+ * IT IS text OR null, AND NEVER A NUMBER. `001` arrives as the JSON string
+ * "001" and is carried as a string all the way to the screen — an Employee ID
+ * is identity data whose leading zeros are part of it, and any numeric
+ * conversion would turn `001` into `1` and address the wrong person. null is a
+ * legitimate state: an employee who left before Employee IDs existed has none,
+ * and that is reported as unassigned rather than repaired.
+ *
+ * STILL ABSENT: pin_hash and every other credential field. The contract never
+ * selects the column, so none can appear here.
  */
 export type EmployeeSummary = {
   employeeId: string;
@@ -96,6 +106,7 @@ export type EmployeeSummary = {
   active: boolean;
   createdAt: string | null;
   deactivatedAt: string | null;
+  employeeCode: string | null;
 };
 
 export type ListEmployeesErrorCode = "not_authenticated" | "not_found" | "unavailable";
@@ -135,6 +146,10 @@ function parseEmployeeSummary(value: unknown): EmployeeSummary | null {
     active: value.active,
     createdAt: typeof value.createdAt === "string" ? value.createdAt : null,
     deactivatedAt: typeof value.deactivatedAt === "string" ? value.deactivatedAt : null,
+    // Taken as the string it is. Anything that is not a string — JSON null for
+    // a legacy employee, or a malformed value — becomes null, the honest
+    // "unassigned" state. It is never parsed, padded, trimmed or coerced.
+    employeeCode: typeof value.employeeCode === "string" ? value.employeeCode : null,
   };
 }
 

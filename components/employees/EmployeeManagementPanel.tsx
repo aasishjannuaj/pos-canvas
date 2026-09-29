@@ -23,9 +23,16 @@
 //   * every PIN box opens empty and is CLEARED THE MOMENT the server accepts
 //     it, which is why the value lives here rather than inside the row.
 //
-// WHAT THIS SCREEN CANNOT DO, and says so instead of faking: rename an
-// employee, and show an existing Employee ID. Both are properties of the
-// accepted contracts, recorded in EMPLOYEE_ADMIN_LIMITS.
+// WHERE THE EMPLOYEE ID COMES FROM: the list row, every time. list_employees
+// returns `employeeCode` (migration 20260929120000), so a refresh, a remount or
+// any ordinary reload renders the roster's own current answer. Nothing is
+// remembered between loads — the earlier draft of this screen cached codes
+// returned by create/set-code because the contract did not return them on read,
+// and that cache is gone rather than merely unread.
+//
+// WHAT THIS SCREEN STILL CANNOT DO, and says so instead of faking: rename an
+// employee. No accepted contract writes display_name after creation. See
+// EMPLOYEE_ADMIN_LIMITS.
 import { useCallback, useEffect, useState } from "react";
 import AddEmployeeForm from "@/components/employees/AddEmployeeForm";
 import DeactivateEmployeeDialog from "@/components/employees/DeactivateEmployeeDialog";
@@ -41,13 +48,8 @@ import {
   emptyEmployeeDraft,
   findEmployeeDraftProblem,
   groupEmployeesByStatus,
-  rememberEmployeeCode,
 } from "@/lib/employeeAdmin";
-import type {
-  EmployeeDraft,
-  EmployeeDraftProblem,
-  KnownEmployeeCodes,
-} from "@/lib/employeeAdmin";
+import type { EmployeeDraft, EmployeeDraftProblem } from "@/lib/employeeAdmin";
 import {
   CREATE_EMPLOYEE_MESSAGES,
   LIST_EMPLOYEES_MESSAGES,
@@ -88,9 +90,6 @@ export default function EmployeeManagementPanel({
   const [createError, setCreateError] = useState<string | null>(null);
   const [createNotice, setCreateNotice] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
-
-  /** Employee IDs the server confirmed during this visit. Never persisted. */
-  const [knownCodes, setKnownCodes] = useState<KnownEmployeeCodes>({});
 
   const [openEditor, setOpenEditor] = useState<OpenEditor | null>(null);
   /**
@@ -186,9 +185,10 @@ export default function EmployeeManagementPanel({
     // THE PIN IS GONE FROM STATE HERE, on the same tick the server accepted it.
     // emptyEmployeeDraft() rather than a patch, so no field can be forgotten.
     setDraft(emptyEmployeeDraft());
-    setKnownCodes((known) =>
-      rememberEmployeeCode(known, result.employee.employeeId, result.employee.employeeCode)
-    );
+    // The code create_employee returned is reported to the owner right here,
+    // which is the one authoritative moment for it. It is NOT stored: the
+    // reload below brings the roster's own value, and that is what the list
+    // renders from now on.
     setCreateNotice(
       `${result.employee.displayName} was added with Employee ID ${result.employee.employeeCode}.`
     );
@@ -228,9 +228,6 @@ export default function EmployeeManagementPanel({
         return;
       }
 
-      setKnownCodes((known) =>
-        rememberEmployeeCode(known, employeeId, result.employeeCode)
-      );
       setRowNotice({
         employeeId,
         message: `Employee ID is now ${result.employeeCode}.`,
@@ -332,7 +329,7 @@ export default function EmployeeManagementPanel({
       <EmployeeRow
         key={employee.employeeId}
         employee={employee}
-        employeeCodeLabel={describeEmployeeCode(knownCodes, employee.employeeId)}
+        employeeCodeLabel={describeEmployeeCode(employee.employeeCode)}
         openEditor={isOpen ? openEditor.kind : null}
         editorValue={isOpen ? editorValue : ""}
         onEditorValueChange={setEditorValue}
@@ -479,7 +476,6 @@ export default function EmployeeManagementPanel({
                 What this screen cannot change
               </h3>
               <ul className="mt-3 flex list-disc flex-col gap-1.5 pl-5 text-sm leading-relaxed text-neutral-500">
-                <li>{EMPLOYEE_ADMIN_LIMITS.employeeCodeHidden}</li>
                 <li>{EMPLOYEE_ADMIN_LIMITS.rename}</li>
               </ul>
             </section>

@@ -18,6 +18,7 @@ import {
   DEACTIVATION_CONSEQUENCES,
   EMPLOYEE_ADMIN_LIMITS,
   EMPLOYEE_CODE_SHAPE_MESSAGE,
+  EMPLOYEE_CODE_UNASSIGNED_LABEL,
   EMPLOYEE_CODE_TAKEN_MESSAGE,
   EMPLOYEE_NAME_REQUIRED_MESSAGE,
   EMPLOYEE_PIN_SHAPE_MESSAGE,
@@ -27,7 +28,6 @@ import {
   emptyEmployeeDraft,
   findEmployeeDraftProblem,
   groupEmployeesByStatus,
-  rememberEmployeeCode,
 } from "@/lib/employeeAdmin";
 import {
   CREATE_EMPLOYEE_MESSAGES,
@@ -49,6 +49,7 @@ const ADA = {
   active: true,
   createdAt: "2026-09-01T10:00:00Z",
   deactivatedAt: null,
+  employeeCode: "001",
 };
 
 const BO = {
@@ -58,6 +59,8 @@ const BO = {
   active: false,
   createdAt: "2026-09-02T10:00:00Z",
   deactivatedAt: "2026-09-20T17:00:00Z",
+  // A leaver from before Employee IDs existed: legitimately uncoded.
+  employeeCode: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,6 +81,7 @@ describe("reading the employee list", () => {
           active: true,
           createdAt: ADA.createdAt,
           deactivatedAt: null,
+          employeeCode: "001",
         },
         {
           employeeId: BO.employeeId,
@@ -86,6 +90,7 @@ describe("reading the employee list", () => {
           active: false,
           createdAt: BO.createdAt,
           deactivatedAt: BO.deactivatedAt,
+          employeeCode: null,
         },
       ],
     });
@@ -115,6 +120,7 @@ describe("reading the employee list", () => {
       "createdAt",
       "deactivatedAt",
       "displayName",
+      "employeeCode",
       "employeeId",
       "role",
     ]);
@@ -379,31 +385,127 @@ describe("arranging the roster", () => {
   });
 });
 
-describe("the Employee ID column", () => {
-  it("says it was not told, rather than showing a blank or a guess", () => {
-    // list_employees does not return employee_code. A blank cell would read as
-    // "this person has no Employee ID", which is a different and false claim.
-    expect(describeEmployeeCode({}, ADA.employeeId)).toBe("Not shown");
-    expect(describeEmployeeCode({ [ADA.employeeId]: "" }, ADA.employeeId)).toBe("Not shown");
+describe("the Employee ID column reads the list row", () => {
+  it("shows the authoritative code the list returned", () => {
+    expect(describeEmployeeCode("001")).toBe("001");
+    expect(describeEmployeeCode("025")).toBe("025");
+    expect(describeEmployeeCode("999")).toBe("999");
   });
 
-  it("shows an ID the server confirmed during this visit", () => {
-    const known = rememberEmployeeCode({}, ADA.employeeId, "007");
+  it("keeps leading zeros, because they are the identity", () => {
+    // THE WHOLE POINT. `1` and `001` are different Employee IDs to everybody
+    // who types one at a till, so the value must survive as text. Anything
+    // numeric — parseInt, Number, unary +, a numeric format — collapses them.
+    for (const code of ["001", "007", "010", "025", "099"]) {
+      expect(`code ${code}`).toBe(`code ${code}`);
+      expect(describeEmployeeCode(code)).toBe(code);
+      expect(describeEmployeeCode(code)).not.toBe(String(Number(code)));
+      expect(describeEmployeeCode(code)).toHaveLength(3);
+      expect(typeof describeEmployeeCode(code)).toBe("string");
+    }
 
-    expect(describeEmployeeCode(known, ADA.employeeId)).toBe("007");
-    expect(describeEmployeeCode(known, BO.employeeId)).toBe("Not shown");
+    // Stated as the failure it prevents: 001 must never render as 1.
+    expect(describeEmployeeCode("001")).not.toBe("1");
+    expect(describeEmployeeCode("025")).not.toBe("25");
   });
 
-  it("records without mutating what it was given", () => {
-    const before = rememberEmployeeCode({}, ADA.employeeId, "007");
-    const after = rememberEmployeeCode(before, BO.employeeId, "008");
+  it("survives a full parse without being reformatted", () => {
+    // End to end: the RPC body's string reaches the label unchanged.
+    const result = parseListEmployeesResult({
+      ok: true,
+      employees: [
+        { ...ADA, employeeCode: "001" },
+        { ...ADA, employeeId: "x", employeeCode: "025" },
+      ],
+    });
 
-    expect(before).toEqual({ [ADA.employeeId]: "007" });
-    expect(after[BO.employeeId]).toBe("008");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.employees.map((e) => describeEmployeeCode(e.employeeCode))).toEqual([
+      "001",
+      "025",
+    ]);
   });
 
-  it("states plainly that existing IDs are not shown", () => {
-    expect(EMPLOYEE_ADMIN_LIMITS.employeeCodeHidden).toMatch(/not shown/i);
+  it("says a legacy employee is unassigned, and never invents one", () => {
+    expect(describeEmployeeCode(null)).toBe(EMPLOYEE_CODE_UNASSIGNED_LABEL);
+    expect(describeEmployeeCode(undefined)).toBe(EMPLOYEE_CODE_UNASSIGNED_LABEL);
+    expect(describeEmployeeCode("")).toBe(EMPLOYEE_CODE_UNASSIGNED_LABEL);
+
+    expect(EMPLOYEE_CODE_UNASSIGNED_LABEL).toBe("Not assigned");
+    // Never the two wrong answers: 000 is a refused code, 001 is a guess.
+    expect(EMPLOYEE_CODE_UNASSIGNED_LABEL).not.toBe("000");
+    expect(EMPLOYEE_CODE_UNASSIGNED_LABEL).not.toBe("001");
+    expect(EMPLOYEE_CODE_UNASSIGNED_LABEL).not.toBe("Not shown");
+  });
+
+  it("is a pure read, so a null code can mutate nothing", () => {
+    // It takes a value and returns a string. There is no employee to write to,
+    // no client to call with, and nothing to back-fill — the shape of the
+    // function is the guarantee.
+    const employee = { ...BO };
+
+    expect(describeEmployeeCode(employee.employeeCode)).toBe(EMPLOYEE_CODE_UNASSIGNED_LABEL);
+    expect(employee.employeeCode).toBeNull();
+    expect(employee).toEqual(BO);
+  });
+
+  it("gives every employee the code from their own row", () => {
+    const result = parseListEmployeesResult({
+      ok: true,
+      employees: [
+        { ...ADA, employeeId: "a", employeeCode: "001" },
+        { ...ADA, employeeId: "b", employeeCode: "025" },
+        { ...ADA, employeeId: "c", employeeCode: null },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(
+      result.employees.map((e) => [e.employeeId, describeEmployeeCode(e.employeeCode)])
+    ).toEqual([
+      ["a", "001"],
+      ["b", "025"],
+      ["c", "Not assigned"],
+    ]);
+  });
+
+  it("reconstructs a fresh load from the list alone, remembering nothing", () => {
+    // THE RELOAD REQUIREMENT. Two independent parses of two different server
+    // answers, with no state carried between them: the second render shows the
+    // second answer. If any code were cached from a create or a set-code, the
+    // reassigned value below could not win.
+    const first = parseListEmployeesResult({
+      ok: true,
+      employees: [{ ...ADA, employeeCode: "001" }],
+    });
+    const afterReassignment = parseListEmployeesResult({
+      ok: true,
+      employees: [{ ...ADA, employeeCode: "025" }],
+    });
+
+    expect(first.ok && describeEmployeeCode(first.employees[0].employeeCode)).toBe("001");
+    expect(
+      afterReassignment.ok &&
+        describeEmployeeCode(afterReassignment.employees[0].employeeCode)
+    ).toBe("025");
+
+    // And a code that only ever came from a mutation result is not consulted:
+    // describeEmployeeCode takes the row's value and has nowhere else to look.
+    expect(describeEmployeeCode.length).toBe(1);
+  });
+
+  it("no longer claims existing Employee IDs cannot be read", () => {
+    // That statement was true of the pre-correction contract and is false now.
+    const limits = Object.values(EMPLOYEE_ADMIN_LIMITS).join(" ");
+
+    expect(limits).not.toMatch(/not shown|cannot be read|are not shown here/i);
+    // The rename limitation is untouched and still stated.
+    expect(EMPLOYEE_ADMIN_LIMITS.rename).toMatch(/names cannot be changed/i);
+    expect(Object.keys(EMPLOYEE_ADMIN_LIMITS)).toEqual(["rename"]);
   });
 });
 

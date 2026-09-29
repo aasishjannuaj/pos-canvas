@@ -191,11 +191,11 @@ describe("a PIN is typed, sent, and then gone", () => {
   it("holds no PIN in any long-lived structure", () => {
     const model = code(read(MODEL));
 
-    // The pure model is where a cache would naturally be written. It has no
-    // PIN at all — the draft type is the one place the word may appear, and
-    // KnownEmployeeCodes holds Employee IDs, which are not secret.
+    // The pure model is where a cache would naturally be written. It holds no
+    // PIN at all — the draft type is the one place the word may appear — and
+    // since the employeeCode correction it holds no cache of any kind either.
     expect(model).not.toMatch(/pinHash|pin_hash|storePin|cachePin|lastPin/i);
-    expect(model).toContain("KnownEmployeeCodes");
+    expect(model).not.toMatch(/Record<string, string>|new Map\(/);
   });
 
   it("says nothing about a PIN after setting one", () => {
@@ -298,35 +298,97 @@ describe("capabilities the accepted contracts do not provide are stated, not fak
     expect(rpc.match(/p_display_name/g)).toHaveLength(1);
   });
 
-  it("tells the owner both limits on the screen itself", () => {
+  it("tells the owner the rename limit on the screen itself", () => {
     const panel = code(read(PANEL));
 
-    expect(panel).toContain("EMPLOYEE_ADMIN_LIMITS.employeeCodeHidden");
     expect(panel).toContain("EMPLOYEE_ADMIN_LIMITS.rename");
+    // And no longer carries the read limitation that the accepted backend
+    // correction resolved.
+    expect(panel).not.toContain("employeeCodeHidden");
+    expect(panel).not.toContain("Not shown");
   });
 
-  it("shows an Employee ID only when the server has just confirmed one", () => {
+  it("reads each Employee ID off its own list row, with no cache in between", () => {
     const panel = code(read(PANEL));
 
-    expect(panel).toContain("describeEmployeeCode(knownCodes, employee.employeeId)");
+    // The label is the row's value. Not a map, not a remembered code, not a
+    // value carried over from a create or a set-code.
+    expect(panel).toContain("describeEmployeeCode(employee.employeeCode)");
 
-    // THE STRUCTURAL CLAIM, rather than a word search: a LISTED employee has no
-    // code to read. An earlier form of this guard banned /employee\.employeeCode/
-    // across the panel and matched `result.employee.employeeCode` — the code
-    // create_employee legitimately returns, which is the one value this screen
-    // is entitled to show.
+    // The pre-correction cache is GONE, not merely unread: a second source of
+    // truth that nothing reads today is one somebody wires up tomorrow.
+    for (const banned of ["knownCodes", "rememberEmployeeCode", "KnownEmployeeCodes"]) {
+      expect(`panel: ${banned}`).toBe(`panel: ${banned}`);
+      expect(panel).not.toContain(banned);
+    }
+
+    // The contract type carries it, which is what makes a fresh load sufficient.
     const rpc = code(read(RPC));
     const summary = rpc.slice(
       rpc.indexOf("export type EmployeeSummary"),
       rpc.indexOf("export type ListEmployeesErrorCode")
     );
-    expect(summary).toContain("employeeId");
-    expect(summary).not.toContain("employeeCode");
+    expect(summary).toContain("employeeCode: string | null;");
 
-    // And the row renders the label it is handed, never a field off the record.
+    // And the row still renders the label it is handed.
     const row = code(read(ROW));
     expect(row).toContain("employeeCodeLabel");
     expect(row).not.toContain("employee.employeeCode");
+  });
+
+  it("never converts an Employee ID to a number", () => {
+    // `001` → `1` would address the wrong person. The leading zeros are
+    // identity data, so the value stays text from the RPC body to the label.
+    for (const file of TASK_5B_SOURCES) {
+      const source = code(read(file));
+
+      for (const banned of [
+        "parseInt",
+        "parseFloat",
+        "Number(",
+        "toFixed",
+        "toLocaleString",
+        "padStart",
+        "padEnd",
+      ]) {
+        expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+        expect(source).not.toContain(banned);
+      }
+
+      // Unary plus / arithmetic coercion on the code itself.
+      expect(source).not.toMatch(/\+\s*employeeCode|employeeCode\s*[-*/]|\bcode\s*\*\s*1\b/);
+    }
+
+    // The parser takes the string as-is; it does not repair or normalise it.
+    const rpc = code(read(RPC));
+    expect(rpc).toContain(
+      'employeeCode: typeof value.employeeCode === "string" ? value.employeeCode : null'
+    );
+  });
+
+  it("leaves a null Employee ID alone rather than filling it in", () => {
+    const model = code(read(MODEL));
+    const panel = code(read(PANEL));
+
+    // A truthful unassigned label, and never one of the two wrong answers.
+    expect(model).toContain('EMPLOYEE_CODE_UNASSIGNED_LABEL = "Not assigned"');
+    expect(model).not.toMatch(/"000"|'000'/);
+    expect(model).not.toMatch(/\?\?\s*["']0*1["']|\|\|\s*["']0*1["']/);
+
+    // No automatic mutation: nothing calls set_employee_code, or any other
+    // write, in response to reading a null code.
+    expect(model).not.toContain("setEmployeeCode");
+    expect(panel).not.toMatch(/employeeCode === null[\s\S]{0,200}setEmployeeCode/);
+    expect(panel).not.toMatch(/backfill|assignMissing|ensureCode/i);
+
+    // set_employee_code is reachable only from the owner's own editor submit.
+    const calls = [...panel.matchAll(/setEmployeeCode\(/g)];
+    expect(calls).toHaveLength(1);
+    const submit = panel.slice(
+      panel.indexOf("async function handleSubmitEditor"),
+      panel.indexOf("async function handleRoleChange")
+    );
+    expect(submit).toContain("setEmployeeCode(employeeId, editorValue)");
   });
 });
 

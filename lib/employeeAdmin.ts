@@ -10,10 +10,12 @@
 // PIN in any type declared here, and nothing here is cached or persisted. A PIN
 // exists only as an argument to one RPC call and dies with it.
 //
-// THE LIMITS BELOW ARE FINDINGS, NOT CHOICES. Task 5B was authorized to consume
-// the accepted employee contracts and to add no new ones. Two things an owner
-// would reasonably expect are therefore not offered, and both are stated to the
-// owner rather than faked: see EMPLOYEE_ADMIN_LIMITS.
+// THE LIMIT BELOW IS A FINDING, NOT A CHOICE. Task 5B consumes the accepted
+// employee contracts and adds none. One thing an owner would reasonably expect
+// is therefore not offered, and it is stated to the owner rather than faked:
+// see EMPLOYEE_ADMIN_LIMITS. A second limitation lived here until the accepted
+// backend correction (migration 20260929120000) made list_employees return
+// employeeCode; it has been removed, not left standing as obsolete advice.
 import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employeeSession";
 import type { EmployeeRole } from "@/lib/employeeSession";
 
@@ -36,32 +38,25 @@ export const EMPLOYEE_CODE_TAKEN_MESSAGE =
 // ---------------------------------------------------------------------------
 
 /**
- * Capabilities this screen does NOT have, and says so.
+ * The one capability this screen does NOT have, and says so.
  *
- * Both are properties of the accepted backend, established by reading it:
+ * RENAME. The only employee mutations that exist are create_employee,
+ * set_employee_code, set_employee_pin, set_employee_active and
+ * set_employee_role. None of them writes display_name after creation, so there
+ * is no contract to call. Offering a name field that silently did nothing, or
+ * writing employees.display_name directly from the browser, would each be
+ * worse than the absence.
  *
- *   * RENAME — the only employee mutations that exist are create_employee,
- *     set_employee_code, set_employee_pin, set_employee_active and
- *     set_employee_role. None of them writes display_name after creation, so
- *     there is no contract to call. Offering a name field that silently did
- *     nothing, or writing employees.display_name directly from the browser,
- *     would each be worse than the absence.
- *
- *   * READING AN EXISTING EMPLOYEE ID — list_employees projects employeeId,
- *     displayName, role, active, createdAt and deactivatedAt, and no code. The
- *     roster therefore cannot show what an employee's current Employee ID is.
- *     A code IS returned when the owner sets one (create_employee and
- *     set_employee_code both return it), so this screen shows the value it was
- *     just given and does not pretend to know the others.
- *
- * Shown to the owner, not just to a reader of this file: an owner who is not
- * told will conclude the screen is broken, or worse, that a blank means blank.
+ * WHAT WAS HERE AND IS NOW GONE: `employeeCodeHidden`, which told the owner
+ * that existing Employee IDs could not be shown. That was true of the contract
+ * Task 5B was built against and is FALSE of the current one — migration
+ * 20260929120000 added `employeeCode` to list_employees. A limitation notice
+ * that has been resolved is not a harmless leftover: it teaches an owner that
+ * a value they can plainly see is unavailable.
  */
 export const EMPLOYEE_ADMIN_LIMITS = {
   rename:
     "Employee names cannot be changed after an employee is added. Add the employee again under the correct name and deactivate the old record.",
-  employeeCodeHidden:
-    "Existing Employee IDs are not shown here. Set a new Employee ID to see and change it.",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -111,6 +106,8 @@ export type RosterEmployee = {
   active: boolean;
   createdAt: string | null;
   deactivatedAt: string | null;
+  /** The roster's own answer, as text; null when this employee has none. */
+  employeeCode: string | null;
 };
 
 export type EmployeeRoster<T extends RosterEmployee> = {
@@ -150,40 +147,37 @@ export function describeEmployeeStatus(employee: RosterEmployee): string {
 }
 
 // ---------------------------------------------------------------------------
-// Employee IDs this session was told
+// The Employee ID, read from the row it belongs to
 // ---------------------------------------------------------------------------
 
+/** What an employee with no Employee ID reads as. */
+export const EMPLOYEE_CODE_UNASSIGNED_LABEL = "Not assigned";
+
 /**
- * Employee IDs the SERVER returned during this visit, keyed by employee id.
+ * What to show in the Employee ID column.
  *
- * NOT A CACHE OF SOMETHING RETRIEVABLE. Nothing can read an existing Employee
- * ID back (see EMPLOYEE_ADMIN_LIMITS), so this only ever holds a value the
- * server has just confirmed in response to the owner setting it. It lives in
- * React state for the life of the screen and is never persisted — and it holds
- * Employee IDs only, which are not secret: a cashier types one in front of
- * customers all day. No PIN is ever put here.
+ * ONE SOURCE, AND IT IS THE LIST ROW. This takes the value straight off the
+ * employee it was given, so a refresh, a remount or any ordinary reload shows
+ * whatever list_employees currently says. There is deliberately no cache and no
+ * map keyed by employee id: a remembered code is a second source of truth that
+ * would go stale the moment anything changed it elsewhere, and an earlier draft
+ * of this screen carried exactly that (`KnownEmployeeCodes`) because the old
+ * contract returned no code on read. It does now, so the cache is gone rather
+ * than merely unused.
+ *
+ * NOT A NUMBER, AT ANY POINT. The value is returned as it was stored: `001`
+ * stays `"001"` and `025` stays `"025"`. Nothing here parses, pads, trims or
+ * formats it, because the leading zeros ARE the identity — `1` and `001` are
+ * different Employee IDs to everybody who types one at a till.
+ *
+ * NULL IS A TRUTHFUL STATE, NOT A GAP TO FILL. An employee who left before
+ * Employee IDs existed has none. They read as unassigned; they are never shown
+ * `000`, never given an invented `001`, and never mutated to acquire one.
  */
-export type KnownEmployeeCodes = Readonly<Record<string, string>>;
-
-export function rememberEmployeeCode(
-  known: KnownEmployeeCodes,
-  employeeId: string,
-  employeeCode: string
-): KnownEmployeeCodes {
-  return { ...known, [employeeId]: employeeCode };
-}
-
-/**
- * What to show in the Employee ID column: the confirmed value, or the honest
- * statement that this screen was never told it.
- */
-export function describeEmployeeCode(
-  known: KnownEmployeeCodes,
-  employeeId: string
-): string {
-  const code = known[employeeId];
-
-  return typeof code === "string" && code !== "" ? code : "Not shown";
+export function describeEmployeeCode(employeeCode: string | null | undefined): string {
+  return typeof employeeCode === "string" && employeeCode !== ""
+    ? employeeCode
+    : EMPLOYEE_CODE_UNASSIGNED_LABEL;
 }
 
 // ---------------------------------------------------------------------------
