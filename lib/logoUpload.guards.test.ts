@@ -397,6 +397,7 @@ describe("scope stays where it was locked", () => {
       "ProductGridBrowser",
       "ServiceGridBrowser",
       "LiquorStoreBrowser",
+      "RetailStoreBrowser",
     ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("logo");
@@ -614,6 +615,7 @@ describe("the enlargement is global, not per template", () => {
       "ProductGridBrowser",
       "ServiceGridBrowser",
       "LiquorStoreBrowser",
+      "RetailStoreBrowser",
     ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("<header");

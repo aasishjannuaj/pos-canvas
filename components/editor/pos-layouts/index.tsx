@@ -6,11 +6,12 @@ import type { MenuItem } from "@/lib/projectConfig";
 import type { CartModifierSelection } from "@/lib/cart";
 import { normalizeModifierGroups } from "@/lib/modifiers";
 import ModifierSelector from "@/components/runtime/ModifierSelector";
-import { LIQUOR_STORE_TEMPLATE_ID } from "./shared";
+import { LIQUOR_STORE_TEMPLATE_ID, RETAIL_STORE_TEMPLATE_ID } from "./shared";
 import type { ProductBrowserProps } from "./shared";
 import LiquorStoreBrowser from "./LiquorStoreBrowser";
 import MenuGridBrowser from "./MenuGridBrowser";
 import ProductGridBrowser from "./ProductGridBrowser";
+import RetailStoreBrowser from "./RetailStoreBrowser";
 import ServiceGridBrowser from "./ServiceGridBrowser";
 
 type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
@@ -99,6 +100,18 @@ export default function ProductBrowser({
     if (templateId === LIQUOR_STORE_TEMPLATE_ID) {
       return (
         <LiquorStoreBrowser
+          {...layoutProps}
+          barcodeScanningEnabled={barcodeScanningEnabled}
+        />
+      );
+    }
+
+    // v1.3 Lane 2 Retail Store — the same mechanism, one branch later. retail
+    // is still layout: "product-grid", so the switch below is still the generic
+    // product-grid presentation for any template without a dedicated variant.
+    if (templateId === RETAIL_STORE_TEMPLATE_ID) {
+      return (
+        <RetailStoreBrowser
           {...layoutProps}
           barcodeScanningEnabled={barcodeScanningEnabled}
         />

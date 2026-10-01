@@ -88,6 +88,10 @@ describe("the intended scroll container still owns vertical scrolling", () => {
       // category rail above its catalog, so it is MORE important, not less,
       // that the catalog is the element that scrolls.
       "LiquorStoreBrowser.tsx",
+      // v1.3 Lane 2 Retail Store — the same, and more so: Retail also puts the
+      // rail BESIDE the catalog at md, so the catalog must still be the
+      // scroller rather than the row that contains it.
+      "RetailStoreBrowser.tsx",
     ]) {
       const layoutSource = readFileSync(join(layoutsDir, file), "utf-8");
 

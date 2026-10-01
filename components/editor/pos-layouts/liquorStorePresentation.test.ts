@@ -105,13 +105,40 @@ describe("the Liquor Store presentation is selected by templateId, not by layout
     );
   });
 
-  it("retail keeps resolving through the untouched layout switch", () => {
+  // v1.3 Lane 2 Retail Store — this test used to be called "retail keeps
+  // resolving through the untouched layout switch". Every assertion in it still
+  // passed after Retail gained a dedicated presentation, but the NAME had become
+  // false, and a test whose name asserts the opposite of reality is worse than
+  // no test because the next reader trusts the name.
+  //
+  // The generic fallback property it really protects is kept intact and the
+  // dedicated branches are now asserted alongside it, so this is strictly more
+  // than was checked before.
+  it("the generic product-grid arm is still intact and still ProductGridBrowser", () => {
     const source = code(read(SWITCH));
-    // The product-grid arm still points at ProductGridBrowser, and the liquor
-    // branch is an addition above it rather than a replacement inside it.
+    // The product-grid arm still points at ProductGridBrowser, and both
+    // dedicated branches are additions above it rather than replacements
+    // inside it.
     expect(source).toContain('case "product-grid":');
     expect(source).toContain("<ProductGridBrowser {...layoutProps} />");
     expect(source).not.toContain('case "liquor-grid"');
+    expect(source).not.toContain('case "retail-grid"');
+  });
+
+  it("both dedicated presentation branches exist and precede the generic switch", () => {
+    const source = code(read(SWITCH));
+
+    expect(source).toContain("if (templateId === LIQUOR_STORE_TEMPLATE_ID)");
+    expect(source).toContain("if (templateId === RETAIL_STORE_TEMPLATE_ID)");
+
+    const liquorAt = source.indexOf("if (templateId === LIQUOR_STORE_TEMPLATE_ID)");
+    const retailAt = source.indexOf("if (templateId === RETAIL_STORE_TEMPLATE_ID)");
+    const switchAt = source.indexOf("switch (layout)");
+
+    expect(liquorAt).toBeGreaterThan(-1);
+    expect(retailAt).toBeGreaterThan(-1);
+    expect(liquorAt).toBeLessThan(switchAt);
+    expect(retailAt).toBeLessThan(switchAt);
   });
 
   it("an unknown or legacy templateId falls through to today's behavior", () => {
@@ -835,18 +862,25 @@ describe("the All category is opt-in and cannot change existing templates", () =
 // Presentation distinctness
 // ---------------------------------------------------------------------------
 
-describe("the Liquor Store catalog is visibly distinct from generic Retail", () => {
+// v1.3 Lane 2 Retail Store — this block used to call ProductGridBrowser
+// "generic Retail" and bind it to a variable named `retail`. Both assertions
+// still pass, because the generic grid genuinely still has those properties —
+// but "retail" no longer RENDERS this browser, so the block was documenting a
+// falsehood while staying green. The binding and the wording are corrected;
+// every existing assertion is kept, and a Retail-vs-Liquor block is added
+// below, which is a property nothing guarded before.
+describe("the Liquor Store catalog is visibly distinct from the generic product grid", () => {
   const liquor = code(read(BROWSER));
-  const retail = code(read("components/editor/pos-layouts/ProductGridBrowser.tsx"));
+  const generic = code(read("components/editor/pos-layouts/ProductGridBrowser.tsx"));
 
-  it("uses a container-driven grid instead of Retail's fixed three columns", () => {
-    expect(retail).toContain("grid-cols-3");
+  it("uses a container-driven grid instead of the generic fixed three columns", () => {
+    expect(generic).toContain("grid-cols-3");
     expect(liquor).not.toContain("grid-cols-3");
     expect(liquor).toContain("grid-cols-[repeat(auto-fill,minmax(148px,1fr))]");
   });
 
-  it("sets product names substantially larger than Retail's 11px", () => {
-    expect(retail).toContain("text-[11px]");
+  it("sets product names substantially larger than the generic 11px", () => {
+    expect(generic).toContain("text-[11px]");
     expect(liquor).toContain("text-[15px]");
   });
 
@@ -869,5 +903,36 @@ describe("the Liquor Store catalog is visibly distinct from generic Retail", () 
   it("adds no decorative imagery", () => {
     expect(liquor).not.toContain("<img");
     expect(liquor).not.toContain("background-image");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Retail and Liquor are two presentations, not one
+// ---------------------------------------------------------------------------
+
+describe("the two dedicated presentations are distinct implementations", () => {
+  const liquor = code(read(BROWSER));
+  const retail = code(read("components/editor/pos-layouts/RetailStoreBrowser.tsx"));
+  const generic = code(read("components/editor/pos-layouts/ProductGridBrowser.tsx"));
+
+  it("only Retail moves its category rail beside the catalog at md", () => {
+    expect(retail).toContain("md:flex-col");
+    expect(liquor).not.toContain("md:flex-col");
+  });
+
+  it("both rails still scroll horizontally when stacked", () => {
+    expect(retail).toContain("overflow-x-auto");
+    expect(liquor).toContain("overflow-x-auto");
+  });
+
+  it("they use different adaptive grid minimums", () => {
+    expect(liquor).toContain("minmax(148px,1fr)");
+    expect(retail).toContain("minmax(140px,1fr)");
+  });
+
+  it("neither dedicated presentation falls back to the generic fixed columns", () => {
+    expect(generic).toContain("grid-cols-3");
+    expect(liquor).not.toContain("grid-cols-3");
+    expect(retail).not.toContain("grid-cols-3");
   });
 });

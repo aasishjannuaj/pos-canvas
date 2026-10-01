@@ -46,6 +46,8 @@ describe("the interception point is shared, not per-layout", () => {
       // like any other and is held to the same rule: no modifier logic of its
       // own, it goes through ProductBrowser's shared interception.
       "LiquorStoreBrowser",
+      // v1.3 Lane 2 Retail Store — same rule, same reason.
+      "RetailStoreBrowser",
     ]) {
       const source = code(read(`components/editor/pos-layouts/${layout}.tsx`));
       expect(source).not.toContain("modifierGroups");
@@ -54,11 +56,11 @@ describe("the interception point is shared, not per-layout", () => {
   });
 
   it("every layout and presentation variant receives the intercepted handler", () => {
-    // Raised from 3 to 4 by the Liquor Store presentation variant. This must
-    // track the real number of browsers ProductBrowser can render — a browser
-    // that did NOT get layoutProps would be selling outside the shared
-    // modifier path.
-    expect([...browser.matchAll(/\{\.\.\.layoutProps\}/g)]).toHaveLength(4);
+    // 3 -> 4 with the Liquor Store variant, 4 -> 5 with the Retail Store
+    // variant. This must track the real number of browsers ProductBrowser can
+    // render — a browser that did NOT get layoutProps would be selling outside
+    // the shared modifier path.
+    expect([...browser.matchAll(/\{\.\.\.layoutProps\}/g)]).toHaveLength(5);
   });
 });
 

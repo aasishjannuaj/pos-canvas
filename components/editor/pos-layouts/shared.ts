@@ -74,6 +74,22 @@ export function getStockLabel(item: MenuItem): string {
 // downstream of this constant prices, taxes, discounts, or persists anything.
 export const LIQUOR_STORE_TEMPLATE_ID = "liquor-store";
 
+// v1.3 Lane 2 Retail Store — the template id that selects the Retail Store
+// PRESENTATION variant, for exactly the same reason and by exactly the same
+// mechanism as the Liquor constant above.
+//
+// THE RETAIL TEMPLATE IS BEING UPGRADED, NOT REPLACED. "retail" is the id this
+// project has always carried and its layout is still "product-grid": nothing is
+// added to the registry, no seventh template exists, and no PosLayout value is
+// introduced — a new layout would change the canonical hash of every existing
+// retail project for a purely visual change.
+//
+// Pinned by the same kind of guard as the Liquor constant
+// (retailStorePresentation.test.ts), which asserts this string really is a
+// registered template AND that its layout remains "product-grid", so the UI
+// registry and data/templates.ts cannot drift apart silently.
+export const RETAIL_STORE_TEMPLATE_ID = "retail";
+
 // The pseudo-category meaning "do not filter". Deliberately NOT derived from
 // menuItems, so it exists even for an empty menu.
 //
