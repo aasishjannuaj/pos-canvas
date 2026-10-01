@@ -470,23 +470,65 @@ describe("Retail categories stay merchant-driven", () => {
     expect(browser).not.toContain("flex-wrap");
   });
 
-  it("38. the rail becomes vertical beside the catalog at md", () => {
-    expect(browser).toContain("md:flex-col");
-    expect(browser).toContain("md:w-40");
-    expect(browser).toContain("md:overflow-y-auto");
-    expect(browser).toContain("md:border-r");
-    expect(browser).toContain("md:border-b-0");
-    // Same md breakpoint at which the shared runtime moves the cart beside the
-    // catalog, so the rail turns exactly when the panel narrows.
-    expect(code(read(RUNTIME))).toContain("md:flex-row");
-    expect(browser).toContain("md:flex-row");
+  it("38. the rail becomes vertical once THIS panel is wide enough", () => {
+    expect(browser).toContain("@xl:flex-col");
+    expect(browser).toContain("@xl:w-40");
+    expect(browser).toContain("@xl:overflow-y-auto");
+    expect(browser).toContain("@xl:border-r");
+    expect(browser).toContain("@xl:border-b-0");
+    expect(browser).toContain("@xl:flex-row");
+  });
+
+  it("38a. the orientation is a CONTAINER query, never the browser viewport", () => {
+    // THE REGRESSION THIS EXISTS FOR, found by rendered validation:
+    // `md:*` is a VIEWPORT query. The Builder renders this component inside a
+    // ~382px preview frame on a 1280px screen, so a viewport query saw
+    // "desktop" and laid out a 160px vertical rail inside a 382px panel —
+    // 42% of the width gone and a single product column left.
+    //
+    // A narrow embedded Retail panel must never switch to the wide layout just
+    // because the OUTER browser viewport is desktop-sized. So the panel is a
+    // container, and every orientation class is container-relative.
+    expect(browser).toContain('className="@container');
+
+    // NOT ONE viewport-width variant may decide this component's layout — of
+    // any size, not just the `md:` the defect happened to use.
+    //
+    // A hand-written ban list cannot express this. A literal "xl:flex-col" is a
+    // SUBSTRING of the correct "@xl:flex-col", so such a list bans the fix
+    // along with the defect. This matches on the boundary instead: a viewport
+    // variant is preceded by start-of-source, whitespace or a quote, while a
+    // container variant is preceded by "@" and therefore never matches.
+    const viewportVariants = [
+      ...browser.matchAll(/(?:^|[\s"'`])(sm|md|lg|xl|2xl):[a-z0-9-]+/gi),
+    ].map((m) => m[0].trim());
+
+    expect(`${BROWSER} viewport variants: ${viewportVariants.join(", ")}`).toBe(
+      `${BROWSER} viewport variants: `
+    );
+    expect(viewportVariants).toEqual([]);
+
+    // And the container variants that replaced them are actually present.
+    expect(browser).toContain("@xl:flex-col");
+    expect(browser).toContain("@xl:w-40");
+  });
+
+  it("38b-container. the container is an ANCESTOR, not the queried element itself", () => {
+    // An element cannot query its own container, so `@container` must sit on a
+    // wrapper above the row that uses `@xl:flex-row`. If they were the same
+    // element the rail would silently never switch.
+    const containerAt = browser.indexOf('className="@container');
+    const rowAt = browser.indexOf("@xl:flex-row");
+    expect(containerAt).toBeGreaterThan(-1);
+    expect(rowAt).toBeGreaterThan(containerAt);
+    expect(browser).not.toMatch(/className="@container[^"]*@xl:flex-row/);
   });
 
   it("38b. uses ONE category navigation markup, not a desktop and a mobile copy", () => {
     expect([...browser.matchAll(/categories\.map\(/g)]).toHaveLength(1);
     expect([...browser.matchAll(/<nav/g)]).toHaveLength(1);
-    expect(browser).not.toContain("hidden md:flex");
-    expect(browser).not.toContain("md:hidden");
+    expect(browser).not.toContain("hidden @xl:flex");
+    expect(browser).not.toContain("@xl:hidden");
   });
 
   it("39. the selected category stays selected during a search, only bypassed", () => {
@@ -814,8 +856,9 @@ describe("Builder and runtime render the SAME Retail component", () => {
     expect(preview).toContain("barcodeScanningEnabled={barcodeScanningEnabled}");
   });
 
-  it("72. Retail has the md vertical rail", () => {
-    expect(browser).toContain("md:flex-col");
+  it("72. Retail has the container-relative vertical rail", () => {
+    expect(browser).toContain("@container");
+    expect(browser).toContain("@xl:flex-col");
   });
 
   it("73. Retail keeps the narrow horizontal rail", () => {
@@ -831,7 +874,7 @@ describe("Builder and runtime render the SAME Retail component", () => {
 
   it("74b. the catalog owns the vertical scroll, not the row that contains it", () => {
     expect(browser).toContain("flex-1 overflow-y-auto");
-    expect(browser).toContain("flex min-h-0 flex-1 flex-col md:flex-row");
+    expect(browser).toContain("flex min-h-0 flex-1 flex-col @xl:flex-row");
   });
 
   it("75. renders no header and no branding of its own", () => {
@@ -843,8 +886,10 @@ describe("Builder and runtime render the SAME Retail component", () => {
 
   it("76. is a distinct implementation from Liquor", () => {
     const liquor = code(read(LIQUOR));
-    expect(browser).toContain("md:flex-col");
-    expect(liquor).not.toContain("md:flex-col");
+    expect(browser).toContain("@xl:flex-col");
+    expect(liquor).not.toContain("@xl:flex-col");
+    // Liquor is horizontal at every width and needs no container at all.
+    expect(liquor).not.toContain("@container");
     expect(browser).toContain("minmax(140px,1fr)");
     expect(liquor).toContain("minmax(148px,1fr)");
   });

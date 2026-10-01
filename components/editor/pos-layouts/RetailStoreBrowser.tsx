@@ -28,12 +28,24 @@ import type { MenuItem } from "@/components/editor/EditorShell";
 //
 // WHY IT LOOKS DIFFERENT FROM LIQUOR. A liquor counter browses a few deep
 // shelves; a retail floor browses many shallow ones. So the category rail here
-// becomes a VERTICAL list at md and above, where it can show more names at once
-// without stealing catalogue height, and stays horizontal below md where
-// vertical space is the scarce thing. One markup, two orientations — the
-// breakpoint is deliberately the same `md` at which the shared cart moves from
-// stacked to beside the catalogue, so the rail turns the moment the panel
-// narrows. The grid is also denser (140px vs 148px minimum).
+// becomes a VERTICAL list once there is room for one, and stays horizontal when
+// there is not. One markup, two orientations. The grid is also denser (140px vs
+// 148px minimum).
+//
+// THE ORIENTATION FOLLOWS THIS COMPONENT'S OWN WIDTH, NOT THE BROWSER'S.
+// It used to be a viewport query (`md:flex-col`), and rendered validation found
+// why that is wrong: the Builder renders this component inside a ~382px preview
+// frame on a 1280px screen, so a viewport query saw "desktop" and laid out a
+// 160px vertical rail inside a 382px panel — 42% of the width gone, leaving a
+// single product column. The browser viewport is not the thing this layout
+// depends on; the width this component is GIVEN is.
+//
+// So the boundary below is a container, and the rail switches at @xl (576px) of
+// THIS panel. That number is chosen from the real geometry: a till's product
+// panel is the viewport minus the shared 384px cart, so 1024px gives 640px here
+// and 1280px gives 896px — both vertical. The Builder's ~382px frame, a 411px
+// phone, and even a 768px screen (whose panel is only 384px once the cart takes
+// its side) all stay horizontal, which is correct in every one of those cases.
 //
 // SCANNING. The one search field doubles as the scan field, exactly as the
 // accepted Liquor integration does. There is no scanner engine here: a barcode
@@ -204,7 +216,10 @@ export default function RetailStoreBrowser({
   }
 
   return (
-    <>
+    // @container makes THIS panel the thing the layout below responds to, so
+    // the Builder's narrow preview frame and a narrow phone behave the same way
+    // — which is the whole point of the correction described above.
+    <div className="@container flex min-h-0 flex-1 flex-col">
       {/* Search row — ONE field, for both typing and scanning. A second "scan"
           input, a scan mode or a scanner overlay would each force the cashier to
           decide which box to be in before they know what they are holding. */}
@@ -259,18 +274,18 @@ export default function RetailStoreBrowser({
         </div>
       </div>
 
-      {/* Rail beside catalogue at md and above, stacked below it under md. The
-          breakpoint matches the shared runtime's own: at md the cart becomes a
-          right-hand panel, so the catalogue narrows and a vertical rail starts
-          costing width instead of height. */}
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+      {/* Rail beside the catalogue once THIS panel is wide enough, stacked
+          above it when it is not. The @container is on the wrapper rather than
+          on the row itself because an element cannot query its own container —
+          only its descendants can. */}
+      <div className="flex min-h-0 flex-1 flex-col @xl:flex-row">
         {/* ONE category navigation, two orientations by CSS. A second
             desktop-only copy would double the markup and let the two drift.
             Names come from the project's own menuItems — nothing here branches
             on a category name. */}
         <nav
           aria-label="Product categories"
-          className="flex flex-none gap-2 overflow-x-auto border-b border-neutral-200 bg-white px-3 py-2 md:w-40 md:flex-col md:overflow-x-visible md:overflow-y-auto md:border-b-0 md:border-r"
+          className="flex flex-none gap-2 overflow-x-auto border-b border-neutral-200 bg-white px-3 py-2 @xl:w-40 @xl:flex-col @xl:overflow-x-visible @xl:overflow-y-auto @xl:border-b-0 @xl:border-r"
         >
           {categories.map((category) => {
             // While a search is active no pill is "the current view", because
@@ -288,7 +303,7 @@ export default function RetailStoreBrowser({
                   setSearchTerm("");
                   setActiveCategory(category);
                 }}
-                className={`flex min-h-[40px] flex-none items-center rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 md:w-full md:justify-start ${
+                className={`flex min-h-[40px] flex-none items-center rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 @xl:w-full @xl:justify-start ${
                   isActive
                     ? "text-white"
                     : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200"
@@ -403,6 +418,6 @@ export default function RetailStoreBrowser({
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

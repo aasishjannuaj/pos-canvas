@@ -916,8 +916,8 @@ describe("the two dedicated presentations are distinct implementations", () => {
   const generic = code(read("components/editor/pos-layouts/ProductGridBrowser.tsx"));
 
   it("only Retail moves its category rail beside the catalog at md", () => {
-    expect(retail).toContain("md:flex-col");
-    expect(liquor).not.toContain("md:flex-col");
+    expect(retail).toContain("@xl:flex-col");
+    expect(liquor).not.toContain("@xl:flex-col");
   });
 
   it("both rails still scroll horizontally when stacked", () => {
