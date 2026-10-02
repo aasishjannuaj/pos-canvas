@@ -12,6 +12,7 @@ import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AUTO_OPEN_CASH_DRAWER_DEFAULT,
   UNAVAILABLE_CASH_DRAWER,
   createDrawerEventRecord,
   isAutomaticDrawerEligible,
@@ -105,7 +106,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
 
     const outcome = await runAutomaticDrawerEvent({
       event: cash(),
-      platform: "windows",
+      platform: "windows", autoOpenEnabled: true,
       claim: durableClaim,
       capability,
     });
@@ -119,7 +120,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
   it("the identity is the saleRequestId: the record is keyed by it and by nothing else", async () => {
     await runAutomaticDrawerEvent({
       event: cash(),
-      platform: "windows",
+      platform: "windows", autoOpenEnabled: true,
       claim: durableClaim,
       capability: UNAVAILABLE_CASH_DRAWER,
     });
@@ -142,7 +143,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
 
     const outcome = await runAutomaticDrawerEvent({
       event: { saleRequestId: SALE_A, paymentMethod: "card" },
-      platform: "windows",
+      platform: "windows", autoOpenEnabled: true,
       claim,
       capability,
     });
@@ -158,7 +159,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
     const claim = vi.fn(durableClaim);
 
     for (const platform of ["android", "web"] as const) {
-      const outcome = await runAutomaticDrawerEvent({ event: cash(), platform, claim, capability });
+      const outcome = await runAutomaticDrawerEvent({ event: cash(), platform, autoOpenEnabled: true, claim, capability });
 
       expect(outcome).toEqual({ status: "skipped", reason: "platform" });
     }
@@ -173,7 +174,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
 
     const outcome = await runAutomaticDrawerEvent({
       event: cash("  "),
-      platform: "windows",
+      platform: "windows", autoOpenEnabled: true,
       claim,
       capability: UNAVAILABLE_CASH_DRAWER,
     });
@@ -183,11 +184,146 @@ describe("one completed cash sale produces exactly one drawer event", () => {
   });
 });
 
+describe("auto-open is OFF by default, and OFF consumes no claim", () => {
+  it("the production default is off", () => {
+    expect(AUTO_OPEN_CASH_DRAWER_DEFAULT).toBe(false);
+  });
+
+  it("disabled: Windows cash sale returns before the ledger — no claim, no row, no IndexedDB access", async () => {
+    const { capability, requestOpen } = countingDrawer();
+    const claim = vi.fn(durableClaim);
+
+    // Any touch of IndexedDB at all would be recorded here.
+    const real = globalThis.indexedDB;
+    const open = vi.spyOn(real, "open");
+
+    const outcome = await runAutomaticDrawerEvent({
+      event: cash(),
+      platform: "windows",
+      autoOpenEnabled: AUTO_OPEN_CASH_DRAWER_DEFAULT,
+      claim,
+      capability,
+    });
+
+    expect(outcome).toEqual({ status: "skipped", reason: "disabled" });
+    expect(claim).not.toHaveBeenCalled();
+    expect(requestOpen).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+
+    expect(await readAllDrawerEvents()).toHaveLength(0);
+  });
+
+  it("disabled: no capability call, even when the capability reports itself available", async () => {
+    // Hardware availability is not owner enablement: an available drawer is
+    // still not asked while auto-open is off.
+    const { capability, requestOpen } = countingDrawer();
+    expect(capability.available).toBe(true);
+
+    for (let i = 0; i < 3; i += 1) {
+      await runAutomaticDrawerEvent({
+        event: cash(),
+        platform: "windows",
+        autoOpenEnabled: false,
+        claim: durableClaim,
+        capability,
+      });
+    }
+
+    expect(requestOpen).not.toHaveBeenCalled();
+    expect(await readAllDrawerEvents()).toHaveLength(0);
+  });
+
+  it("only a literal true enables", async () => {
+    const claim = vi.fn(durableClaim);
+
+    for (const value of [1, "true", {}, null, undefined]) {
+      const outcome = await runAutomaticDrawerEvent({
+        event: cash(),
+        platform: "windows",
+        autoOpenEnabled: value as unknown as boolean,
+        claim,
+        capability: UNAVAILABLE_CASH_DRAWER,
+      });
+
+      expect(outcome).toEqual({ status: "skipped", reason: "disabled" });
+    }
+
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("enabled + Windows + cash takes the normal claim path", async () => {
+    const { capability, requestOpen } = countingDrawer();
+    const claim = vi.fn(durableClaim);
+
+    const outcome = await runAutomaticDrawerEvent({
+      event: cash(),
+      platform: "windows",
+      autoOpenEnabled: true,
+      claim,
+      capability,
+    });
+
+    expect(outcome).toEqual({ status: "requested", outcome: "opened" });
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(claim).toHaveBeenCalledWith(SALE_A);
+    expect(requestOpen).toHaveBeenCalledTimes(1);
+    expect(await readAllDrawerEvents()).toHaveLength(1);
+  });
+
+  it("enabled + card claims nothing", async () => {
+    const { capability, requestOpen } = countingDrawer();
+    const claim = vi.fn(durableClaim);
+
+    const outcome = await runAutomaticDrawerEvent({
+      event: { saleRequestId: SALE_A, paymentMethod: "card" },
+      platform: "windows",
+      autoOpenEnabled: true,
+      claim,
+      capability,
+    });
+
+    expect(outcome).toEqual({ status: "skipped", reason: "not_cash" });
+    expect(claim).not.toHaveBeenCalled();
+    expect(requestOpen).not.toHaveBeenCalled();
+    expect(await readAllDrawerEvents()).toHaveLength(0);
+  });
+
+  it("the order is cash, then Windows, then enablement — each refusal names its own gate", async () => {
+    const run = (paymentMethod: "cash" | "card", platform: "windows" | "android", autoOpenEnabled: boolean) =>
+      runAutomaticDrawerEvent({
+        event: { saleRequestId: SALE_A, paymentMethod },
+        platform,
+        autoOpenEnabled,
+        claim: durableClaim,
+        capability: UNAVAILABLE_CASH_DRAWER,
+      });
+
+    expect(await run("card", "android", false)).toEqual({ status: "skipped", reason: "not_cash" });
+    expect(await run("cash", "android", false)).toEqual({ status: "skipped", reason: "platform" });
+    expect(await run("cash", "android", true)).toEqual({ status: "skipped", reason: "platform" });
+    expect(await run("cash", "windows", false)).toEqual({ status: "skipped", reason: "disabled" });
+    expect(await readAllDrawerEvents()).toHaveLength(0);
+  });
+
+  it("a sale completed while disabled leaves no row behind", async () => {
+    await runAutomaticDrawerEvent({
+      event: cash(SALE_A),
+      platform: "windows",
+      autoOpenEnabled: false,
+      claim: durableClaim,
+      capability: UNAVAILABLE_CASH_DRAWER,
+    });
+
+    expect(await readAllDrawerEvents()).toHaveLength(0);
+  });
+});
+
 describe("deduplication is durable and keyed by saleRequestId", () => {
   it("the same saleRequestId produces one event in total; a different one produces its own", async () => {
     const { capability, requestOpen } = countingDrawer();
     const run = (id: string) =>
-      runAutomaticDrawerEvent({ event: cash(id), platform: "windows", claim: durableClaim, capability });
+      runAutomaticDrawerEvent({ event: cash(id), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
 
     expect((await run(SALE_A)).status).toBe("requested");
     expect(await run(SALE_A)).toEqual({ status: "already_claimed" });
@@ -202,7 +338,7 @@ describe("deduplication is durable and keyed by saleRequestId", () => {
     const { capability, requestOpen } = countingDrawer();
 
     for (let i = 0; i < 5; i += 1) {
-      await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
+      await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
     }
 
     expect(requestOpen).toHaveBeenCalledTimes(1);
@@ -214,7 +350,7 @@ describe("deduplication is durable and keyed by saleRequestId", () => {
 
     const outcomes = await Promise.all(
       Array.from({ length: 8 }, () =>
-        runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability })
+        runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability })
       )
     );
 
@@ -239,7 +375,7 @@ describe("deduplication is durable and keyed by saleRequestId", () => {
   it("a restart retains the claim: a fresh connection still refuses the same sale", async () => {
     const { capability, requestOpen } = countingDrawer();
 
-    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
+    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
 
     // Every claim opens and closes its own connection, so the second run below
     // is a new connection to the same persisted database — what a remount or a
@@ -250,7 +386,7 @@ describe("deduplication is durable and keyed by saleRequestId", () => {
 
     const second = await runAutomaticDrawerEvent({
       event: cash(),
-      platform: "windows",
+      platform: "windows", autoOpenEnabled: true,
       claim: durableClaim,
       capability,
     });
@@ -270,7 +406,7 @@ describe("failure and unknown never re-kick", () => {
         throw new Error("storage exploded");
       },
     ]) {
-      const outcome = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim, capability });
+      const outcome = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim, capability });
 
       expect(outcome).toEqual({ status: "claim_failed" });
     }
@@ -290,8 +426,8 @@ describe("failure and unknown never re-kick", () => {
       throw new Error("drawer exploded");
     });
 
-    const first = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
-    const second = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
+    const first = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
+    const second = await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
 
     expect(first).toEqual({ status: "requested", outcome: "unknown" });
     expect(second).toEqual({ status: "already_claimed" });
@@ -301,8 +437,8 @@ describe("failure and unknown never re-kick", () => {
   it("an `unknown` answer leaves the claim standing, so the sale is never re-kicked", async () => {
     const { capability, requestOpen } = countingDrawer(async () => "unknown");
 
-    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
-    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability });
+    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
+    await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability });
 
     expect(requestOpen).toHaveBeenCalledTimes(1);
     expect(await readAllDrawerEvents()).toHaveLength(1);
@@ -312,7 +448,7 @@ describe("failure and unknown never re-kick", () => {
     const { capability } = countingDrawer(async () => "kicked" as unknown as "opened");
 
     expect(
-      await runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability })
+      await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability })
     ).toEqual({ status: "requested", outcome: "unknown" });
   });
 
@@ -324,7 +460,7 @@ describe("failure and unknown never re-kick", () => {
     await expect(
       runAutomaticDrawerEvent({
         event: cash(),
-        platform: "windows",
+        platform: "windows", autoOpenEnabled: true,
         claim: async () => {
           throw new Error("ledger exploded");
         },
@@ -333,7 +469,7 @@ describe("failure and unknown never re-kick", () => {
     ).resolves.toEqual({ status: "claim_failed" });
 
     await expect(
-      runAutomaticDrawerEvent({ event: cash(), platform: "windows", claim: durableClaim, capability })
+      runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability })
     ).resolves.toEqual({ status: "requested", outcome: "unknown" });
   });
 });

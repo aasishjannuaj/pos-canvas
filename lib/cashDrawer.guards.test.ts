@@ -208,6 +208,11 @@ describe("only the real DeviceApp runtime wires the coordinator", () => {
     expect(handler).toContain("runAutomaticDrawerEvent(");
     expect(handler).toContain("claim: claimAutomaticDrawerEvent");
     expect(handler).toContain("capability: UNAVAILABLE_CASH_DRAWER");
+    // AUTO-OPEN OFF in production until the authoritative per-device setting
+    // exists (Checkpoint 1B). No literal true anywhere in the wiring.
+    expect(handler).toContain("autoOpenEnabled: AUTO_OPEN_CASH_DRAWER_DEFAULT,");
+    expect(handler).not.toMatch(/autoOpenEnabled:\s*true/);
+    expect(code(read(DRAWER))).toContain("export const AUTO_OPEN_CASH_DRAWER_DEFAULT = false;");
     expect(handler).toContain("isNativeShell: isCapacitorNativeShell()");
     expect(handler).toContain("isWindowsShell: isWindowsShell()");
   });
@@ -317,17 +322,24 @@ describe("eligibility is cash only and the platform is Windows only", () => {
     );
   });
 
-  it("the coordinator checks platform and eligibility BEFORE the claim, and the claim BEFORE the capability", () => {
+  it("the coordinator checks cash, then Windows, then enablement BEFORE the claim, and the claim BEFORE the capability", () => {
+    // CORRECTED IN 1A: the locked order is cash -> windows -> enabled -> claim
+    // -> capability. A disabled device must return before the ledger.
     const run = functionBody(drawer, "export async function runAutomaticDrawerEvent(");
-    const platform = run.indexOf("isAutomaticDrawerPlatform(platform)");
     const eligible = run.indexOf("isAutomaticDrawerEligible(event.paymentMethod)");
+    const platform = run.indexOf("isAutomaticDrawerPlatform(platform)");
+    const enabled = run.indexOf("if (autoOpenEnabled !== true) {");
     const claim = run.indexOf("await claim(event.saleRequestId)");
     const notClaimed = run.indexOf('if (claimed !== "claimed")');
     const capability = run.indexOf("capability.requestOpen(");
 
-    expect(platform).toBeGreaterThan(-1);
-    expect(eligible).toBeGreaterThan(platform);
-    expect(claim).toBeGreaterThan(eligible);
+    expect(eligible).toBeGreaterThan(-1);
+    expect(platform).toBeGreaterThan(eligible);
+    expect(enabled).toBeGreaterThan(platform);
+    expect(claim).toBeGreaterThan(enabled);
+    expect(run.match(/autoOpenEnabled !== true/g) ?? []).toHaveLength(1);
+    // Configuration and hardware availability are separate questions.
+    expect(run).not.toContain("capability.available");
     expect(notClaimed).toBeGreaterThan(claim);
     expect(capability).toBeGreaterThan(notClaimed);
     // Asked once. No loop, no retry, no timer.

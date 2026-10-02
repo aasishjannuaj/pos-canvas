@@ -60,6 +60,19 @@ export function isAutomaticDrawerPlatform(platform: DevicePlatform): boolean {
   return platform === "windows";
 }
 
+/**
+ * Whether the owner has turned automatic drawer opening ON for this device.
+ *
+ * CONFIGURATION, NOT HARDWARE. This is the owner's decision; whether a drawer
+ * can physically be reached is CashDrawerCapability.available, a separate
+ * question answered elsewhere. Neither may stand in for the other.
+ *
+ * OFF IS THE LOCKED DEFAULT. Checkpoint 1A has no authoritative per-device
+ * setting, so production wiring passes this constant and no till claims a
+ * drawer event. Checkpoint 1B replaces it with the device's cached setting.
+ */
+export const AUTO_OPEN_CASH_DRAWER_DEFAULT = false;
+
 // ---------------------------------------------------------------------------
 // The durable ledger record
 // ---------------------------------------------------------------------------
@@ -150,7 +163,7 @@ export const UNAVAILABLE_CASH_DRAWER: CashDrawerCapability = Object.freeze({
 // ---------------------------------------------------------------------------
 
 export type AutomaticDrawerOutcome =
-  | { status: "skipped"; reason: "platform" | "not_cash" | "invalid_identity" }
+  | { status: "skipped"; reason: "not_cash" | "platform" | "disabled" | "invalid_identity" }
   | { status: "already_claimed" }
   | { status: "claim_failed" }
   | { status: "requested"; outcome: CashDrawerOpenOutcome };
@@ -160,8 +173,11 @@ export type AutomaticDrawerOutcome =
  *
  * The order is the safety property:
  *
- *   platform     -> Android and web stop here, before the ledger.
  *   eligibility  -> card stops here, before the ledger.
+ *   platform     -> Android and web stop here, before the ledger.
+ *   enablement   -> a device whose owner has not turned auto-open ON stops
+ *                   here: no IndexedDB access, no drawer-events row, no
+ *                   capability call. A disabled device consumes no claim.
  *   claim        -> one atomic, durable insert keyed by saleRequestId. Only
  *                   the caller whose insert committed continues; a duplicate,
  *                   a concurrent loser, a replay after restart and a failed
@@ -174,17 +190,23 @@ export type AutomaticDrawerOutcome =
 export async function runAutomaticDrawerEvent(input: {
   event: CashDrawerSaleEvent;
   platform: DevicePlatform;
+  /** The owner's per-device setting. Only a literal `true` enables. */
+  autoOpenEnabled: boolean;
   claim: ClaimDrawerEvent;
   capability: CashDrawerCapability;
 }): Promise<AutomaticDrawerOutcome> {
-  const { event, platform, claim, capability } = input;
+  const { event, platform, autoOpenEnabled, claim, capability } = input;
+
+  if (!isAutomaticDrawerEligible(event.paymentMethod)) {
+    return { status: "skipped", reason: "not_cash" };
+  }
 
   if (!isAutomaticDrawerPlatform(platform)) {
     return { status: "skipped", reason: "platform" };
   }
 
-  if (!isAutomaticDrawerEligible(event.paymentMethod)) {
-    return { status: "skipped", reason: "not_cash" };
+  if (autoOpenEnabled !== true) {
+    return { status: "skipped", reason: "disabled" };
   }
 
   if (typeof event.saleRequestId !== "string" || event.saleRequestId.trim() === "") {

@@ -140,7 +140,11 @@ import {
 import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
-import { UNAVAILABLE_CASH_DRAWER, runAutomaticDrawerEvent } from "@/lib/cashDrawer";
+import {
+  AUTO_OPEN_CASH_DRAWER_DEFAULT,
+  UNAVAILABLE_CASH_DRAWER,
+  runAutomaticDrawerEvent,
+} from "@/lib/cashDrawer";
 import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
@@ -2822,6 +2826,10 @@ export default function DeviceApp() {
    * The platform comes from the shells' own bridges, the same signals pairing
    * uses, and fails closed to "web". Android and web are refused before the
    * ledger is touched. The capability is the 1A no-op: there is no drawer yet.
+   *
+   * AUTO-OPEN IS OFF. There is no authoritative per-device setting until
+   * Checkpoint 1B, so this passes the locked default and the coordinator
+   * returns before the ledger: no till consumes a drawer-event claim in 1A.
    */
   const handleSaleCompleted: PosRuntimeOnSaleCompleted = useCallback((event) => {
     void runAutomaticDrawerEvent({
@@ -2830,6 +2838,7 @@ export default function DeviceApp() {
         isNativeShell: isCapacitorNativeShell(),
         isWindowsShell: isWindowsShell(),
       }).platform,
+      autoOpenEnabled: AUTO_OPEN_CASH_DRAWER_DEFAULT,
       claim: claimAutomaticDrawerEvent,
       capability: UNAVAILABLE_CASH_DRAWER,
     });
