@@ -48,6 +48,7 @@ const PAIRING: DevicePairing = {
   platform: "android",
   createdAt: null,
   revokedAt: null,
+  cashDrawerEnabled: false,
 };
 
 function config(): GeneratedPosConfig {

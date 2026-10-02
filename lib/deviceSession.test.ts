@@ -28,6 +28,7 @@ const PAIRING: DevicePairing = {
   platform: "android",
   createdAt: "2026-08-01T00:00:00Z",
   revokedAt: null,
+  cashDrawerEnabled: false,
 };
 
 function validConfig() {

@@ -45,6 +45,7 @@ function assertionAt(iso: string, overrides: Record<string, unknown> = {}) {
       buildJobId: BUILD_A,
       deviceName: "POS Device",
       platform: "windows",
+      cashDrawerEnabled: false,
       verifiedAt: iso,
     }),
     ...overrides,

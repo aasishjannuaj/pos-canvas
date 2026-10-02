@@ -37,6 +37,7 @@ const PAIRING: DevicePairing = {
   platform: "android",
   createdAt: null,
   revokedAt: null,
+  cashDrawerEnabled: false,
 };
 
 const PAIRED_AT = Date.parse("2026-08-20T08:00:00.000Z");

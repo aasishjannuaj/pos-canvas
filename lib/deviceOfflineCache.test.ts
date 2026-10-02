@@ -229,6 +229,7 @@ describe("a pairing assertion is validated before it is believed", () => {
     buildJobId: BUILD_A,
     deviceName: "POS Device",
     platform: "windows",
+    cashDrawerEnabled: false,
     verifiedAt: "2026-08-18T12:00:00.000Z",
   });
 

@@ -208,10 +208,16 @@ describe("only the real DeviceApp runtime wires the coordinator", () => {
     expect(handler).toContain("runAutomaticDrawerEvent(");
     expect(handler).toContain("claim: claimAutomaticDrawerEvent");
     expect(handler).toContain("capability: UNAVAILABLE_CASH_DRAWER");
-    // AUTO-OPEN OFF in production until the authoritative per-device setting
-    // exists (Checkpoint 1B). No literal true anywhere in the wiring.
-    expect(handler).toContain("autoOpenEnabled: AUTO_OPEN_CASH_DRAWER_DEFAULT,");
+    // SUPERSEDED BY Cash Drawer 1B. 1A pinned the wiring to the locked-off
+    // AUTO_OPEN_CASH_DRAWER_DEFAULT because no authoritative setting existed.
+    // 1B supplies it: the owner's per-device value on the pairing the till is
+    // running under, through the EXISTING readyPairingRef. The surviving
+    // properties: exactly that expression, no literal true anywhere in the
+    // wiring, and the locked default itself still off.
+    expect(handler).toContain("autoOpenEnabled: readyPairingRef.current?.cashDrawerEnabled === true,");
+    expect(handler.match(/autoOpenEnabled:/g) ?? []).toHaveLength(1);
     expect(handler).not.toMatch(/autoOpenEnabled:\s*true/);
+    expect(handler).not.toMatch(/cashDrawerEnabled\s*(?:\?\?|\|\|)\s*true/);
     expect(code(read(DRAWER))).toContain("export const AUTO_OPEN_CASH_DRAWER_DEFAULT = false;");
     expect(handler).toContain("isNativeShell: isCapacitorNativeShell()");
     expect(handler).toContain("isWindowsShell: isWindowsShell()");

@@ -66,6 +66,17 @@ export type DevicePairing = {
   platform: string | null;
   createdAt: string | null;
   revokedAt: string | null;
+  /**
+   * v1.3 Cash Drawer Checkpoint 1B — the owner turned automatic cash drawer
+   * opening ON for this device.
+   *
+   * ON DevicePairing, unlike the update offer, because it is a property of the
+   * device that SHOULD survive into an offline start: it is cached with the
+   * pairing assertion and governs drawer behaviour under the same 7-day lease
+   * as offline sales. Only a literal `true` from the server or the cache makes
+   * it true; everything else is false.
+   */
+  cashDrawerEnabled: boolean;
 };
 
 export type DeviceState =
@@ -287,6 +298,10 @@ export function parsePairingState(value: unknown): PairingStateResult {
       platform: readString(raw, "platform"),
       createdAt: readString(raw, "created_at"),
       revokedAt,
+      // Cash Drawer 1B — literal true only, and never for a revoked device.
+      // The server already gates on revocation and platform; this makes the
+      // revocation half true on the client too, so neither side alone decides.
+      cashDrawerEnabled: raw.cash_drawer_enabled === true && revokedAt === null,
     },
     // `active` is derived from revoked_at rather than trusted from the
     // payload's own boolean, so the two can never disagree in the device's
@@ -623,6 +638,9 @@ export async function decideOfflineFallback(input: {
       // authorization is the lease, and nothing else.
       createdAt: null,
       revokedAt: null,
+      // Cash Drawer 1B — the last authoritative value, cached at the same
+      // moment as lastVerifiedAt and so bounded by the same lease.
+      cashDrawerEnabled: assertion.assertion.cashDrawerEnabled,
     },
     config: config.record.configSnapshot,
     offline: {

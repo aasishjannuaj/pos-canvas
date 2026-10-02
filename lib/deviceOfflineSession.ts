@@ -96,6 +96,7 @@ export async function persistDeviceCache(input: {
         buildJobId: input.pairing.buildJobId,
         deviceName: input.pairing.deviceName,
         platform: input.pairing.platform,
+        cashDrawerEnabled: input.pairing.cashDrawerEnabled,
         verifiedAt: input.verifiedAt,
       })
     );

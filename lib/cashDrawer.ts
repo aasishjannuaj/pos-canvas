@@ -67,9 +67,12 @@ export function isAutomaticDrawerPlatform(platform: DevicePlatform): boolean {
  * can physically be reached is CashDrawerCapability.available, a separate
  * question answered elsewhere. Neither may stand in for the other.
  *
- * OFF IS THE LOCKED DEFAULT. Checkpoint 1A has no authoritative per-device
- * setting, so production wiring passes this constant and no till claims a
- * drawer event. Checkpoint 1B replaces it with the device's cached setting.
+ * OFF IS THE LOCKED DEFAULT. Checkpoint 1A had no authoritative per-device
+ * setting and passed this constant in production. Since Checkpoint 1B the
+ * production value is the owner's per-device setting on the running pairing
+ * (paired_devices.cash_drawer_enabled, via get_device_pairing_state and the
+ * offline pairing assertion), which is false whenever it is missing. This
+ * constant remains the documented meaning of "no setting".
  */
 export const AUTO_OPEN_CASH_DRAWER_DEFAULT = false;
 

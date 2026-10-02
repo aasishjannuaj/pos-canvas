@@ -97,6 +97,17 @@ export type CachedPairingAssertion = {
    * server-sourced then, and evaluateLease already refuses nonsense values.
    */
   lastVerifiedAt: string;
+  /**
+   * v1.3 Cash Drawer Checkpoint 1B — the owner's automatic-drawer setting as
+   * of lastVerifiedAt.
+   *
+   * ADDED WITHOUT A SCHEMA-VERSION BUMP, by Control Room decision. A version 1
+   * record written before this field existed simply lacks it and reads as
+   * false, which is already the fail-closed answer; bumping would instead
+   * discard every existing cache and stop a till that updated while offline
+   * from starting offline at all. Only a literal `true` reads as true.
+   */
+  cashDrawerEnabled: boolean;
 };
 
 /** The immutable pinned snapshot, plus what proves it is unaltered and ours. */
@@ -281,6 +292,7 @@ export function buildPairingAssertion(input: {
   buildJobId: string;
   deviceName: string | null;
   platform: string | null;
+  cashDrawerEnabled: boolean;
   verifiedAt: string;
 }): CachedPairingAssertion {
   return {
@@ -292,6 +304,7 @@ export function buildPairingAssertion(input: {
     deviceName: input.deviceName,
     platform: input.platform,
     lastVerifiedAt: input.verifiedAt,
+    cashDrawerEnabled: input.cashDrawerEnabled === true,
   };
 }
 
@@ -396,6 +409,9 @@ export function readPairingAssertion(
       deviceName: readNullableString(raw.deviceName),
       platform: readNullableString(raw.platform),
       lastVerifiedAt,
+      // Cash Drawer 1B — a v1 record from before the field existed lacks it,
+      // and anything that is not literally true is false.
+      cashDrawerEnabled: raw.cashDrawerEnabled === true,
     },
   };
 }

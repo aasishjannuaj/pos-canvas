@@ -68,6 +68,7 @@ const pairing: DevicePairing = {
   platform: "windows",
   createdAt: null,
   revokedAt: null,
+  cashDrawerEnabled: false,
 };
 
 const session: OfflineCheckoutSession = {
@@ -185,6 +186,7 @@ async function seedCache(): Promise<void> {
       buildJobId: BUILD,
       deviceName: "POS Device",
       platform: "windows",
+      cashDrawerEnabled: false,
       verifiedAt: VERIFIED_AT,
     })
   );

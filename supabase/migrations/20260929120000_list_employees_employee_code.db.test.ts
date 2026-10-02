@@ -175,6 +175,13 @@ function freshDatabase(name: string, withMigration: boolean): void {
     // Filenames begin with a fixed-width timestamp, so a lexicographic compare
     // is a chronological one.
     if (!withMigration && file >= MIGRATION) continue;
+    // AND "WITH the migration" means the database as it was right AFTER it --
+    // so every LATER migration is skipped as well. Without this the
+    // "nothing else in the schema moved" comparison below measures every
+    // migration added after this one, and fails the moment the next one lands
+    // (first exposed by Cash Drawer 1B, 20261002120000). Narrowed, not weakened:
+    // it still proves exactly what this migration changed.
+    if (withMigration && file > MIGRATION) continue;
     if (STORAGE_ONLY_MIGRATIONS.has(file)) continue;
 
     runSqlFile(name, join(migrationsDir, file));

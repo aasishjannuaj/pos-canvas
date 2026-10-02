@@ -140,11 +140,7 @@ import {
 import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
-import {
-  AUTO_OPEN_CASH_DRAWER_DEFAULT,
-  UNAVAILABLE_CASH_DRAWER,
-  runAutomaticDrawerEvent,
-} from "@/lib/cashDrawer";
+import { UNAVAILABLE_CASH_DRAWER, runAutomaticDrawerEvent } from "@/lib/cashDrawer";
 import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
@@ -2827,9 +2823,12 @@ export default function DeviceApp() {
    * uses, and fails closed to "web". Android and web are refused before the
    * ledger is touched. The capability is the 1A no-op: there is no drawer yet.
    *
-   * AUTO-OPEN IS OFF. There is no authoritative per-device setting until
-   * Checkpoint 1B, so this passes the locked default and the coordinator
-   * returns before the ledger: no till consumes a drawer-event claim in 1A.
+   * Cash Drawer 1B — AUTO-OPEN IS THE OWNER'S PER-DEVICE SETTING, read from
+   * the pairing this till is running under. Online that is the server's
+   * answer from the last authoritative start or reconnect; offline it is the
+   * same value as cached with the pairing assertion, under the same lease. No
+   * ready pairing (unpaired, revoked, starting up) means null, which is false,
+   * and a disabled device returns before the drawer-event ledger is touched.
    */
   const handleSaleCompleted: PosRuntimeOnSaleCompleted = useCallback((event) => {
     void runAutomaticDrawerEvent({
@@ -2838,7 +2837,7 @@ export default function DeviceApp() {
         isNativeShell: isCapacitorNativeShell(),
         isWindowsShell: isWindowsShell(),
       }).platform,
-      autoOpenEnabled: AUTO_OPEN_CASH_DRAWER_DEFAULT,
+      autoOpenEnabled: readyPairingRef.current?.cashDrawerEnabled === true,
       claim: claimAutomaticDrawerEvent,
       capability: UNAVAILABLE_CASH_DRAWER,
     });

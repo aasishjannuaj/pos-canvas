@@ -53,6 +53,7 @@ const runtimePairing: DevicePairing = {
   platform: "windows",
   createdAt: null,
   revokedAt: null,
+  cashDrawerEnabled: false,
 };
 
 function assertion(overrides: Record<string, unknown> = {}) {
@@ -64,6 +65,7 @@ function assertion(overrides: Record<string, unknown> = {}) {
       buildJobId: BUILD,
       deviceName: "POS Device",
       platform: "windows",
+      cashDrawerEnabled: false,
       verifiedAt: VERIFIED_AT,
     }),
     ...overrides,

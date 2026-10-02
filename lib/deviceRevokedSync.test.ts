@@ -50,6 +50,7 @@ const PAIRING: DevicePairing = {
   platform: "android",
   createdAt: null,
   revokedAt: new Date(REVOKED_AT).toISOString(),
+  cashDrawerEnabled: false,
 };
 
 let seq = 0;
