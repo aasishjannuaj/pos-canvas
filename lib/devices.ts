@@ -40,6 +40,22 @@ export type PairedDeviceSummary = {
    */
   offeredBuildJobId: string | null;
   offeredAt: string | null;
+  /**
+   * Cash Drawer 1B/1D — the owner's per-register automatic-drawer setting.
+   *
+   * CONFIGURATION, NOT HARDWARE, AND NOT A PROMISE. It says what the owner has
+   * asked for on this ONE register; whether a drawer can physically be reached
+   * is a different question, answered on the device and never substituted for
+   * this one. The authoritative value is `paired_devices.cash_drawer_enabled`,
+   * which the accepted 1B migration created NOT NULL DEFAULT false — so a
+   * register nobody has configured reads false, which is also the locked
+   * product default.
+   *
+   * Boolean rather than nullable because there is no third state. A row that
+   * cannot tell us — a query written before the column existed — reads false,
+   * the safe answer, rather than becoming unmappable.
+   */
+  cashDrawerEnabled: boolean;
 };
 
 // The exact narrow row shape lib/devicePairing.server.ts selects. Note the
@@ -60,6 +76,10 @@ export type PairedDeviceRow = {
   // "no offer" rather than becoming unmappable.
   offered_build_job_id?: string | null;
   offered_at?: string | null;
+  // Cash Drawer 1D — optional for the same reason the offer columns are: a
+  // query written before the column existed simply omits it, and must keep
+  // reading as OFF rather than becoming unmappable.
+  cash_drawer_enabled?: boolean | null;
 };
 
 function isNonEmptyString(value: unknown): value is string {
@@ -106,6 +126,11 @@ export function mapPairedDeviceRow(
     revokedAt: row.revoked_at,
     // An empty string is not an offer. Normalised here so no caller has to
     // decide whether "" means anything.
+    // STRICT === true, not truthiness. The column is NOT NULL DEFAULT false in
+    // the accepted 1B migration, so anything that is not literally true — an
+    // absent column, a null, a surprise — is OFF. Automatic drawer opening
+    // must never be switched on by a value we could not read properly.
+    cashDrawerEnabled: row.cash_drawer_enabled === true,
     offeredBuildJobId: isNonEmptyString(row.offered_build_job_id)
       ? row.offered_build_job_id
       : null,
@@ -266,6 +291,114 @@ const DEVICE_UPDATE_STATE_LABELS: Record<DeviceUpdateState, string | null> = {
 /** null means render no configuration chip at all for this row. */
 export function getDeviceUpdateStateLabel(state: DeviceUpdateState): string | null {
   return DEVICE_UPDATE_STATE_LABELS[state];
+}
+
+// ---------------------------------------------------------------------------
+// Cash Drawer 1D — which registers the owner may configure a drawer on
+// ---------------------------------------------------------------------------
+
+/**
+ * What the owner is told when the setting could not be written.
+ *
+ * SAYS THAT NOTHING CHANGED, because nothing did: the write is the only thing
+ * that moves the value, and a failed write leaves the register exactly as it
+ * was. An owner who is not told that will reasonably assume the opposite and
+ * walk away believing a drawer will open when it will not.
+ *
+ * One definition, shared by the server wrapper and the screen, so the two can
+ * never tell the owner different things about the same failure.
+ */
+export const CASH_DRAWER_UPDATE_FAILED_MESSAGE =
+  "Cash drawer setting could not be updated. Nothing changed. Refresh and try again.";
+
+/**
+ * What the owner is told when the write succeeded but the re-read did not.
+ *
+ * THE ONE CASE WHERE WE GENUINELY DO NOT KNOW. The register was changed, and
+ * then the authoritative list could not be fetched, so the value on screen is
+ * the OLD one and we cannot say what the new one is. Guessing would be the
+ * worst available answer, so the row says so and refuses another change until
+ * a Refresh re-establishes the truth.
+ */
+export const CASH_DRAWER_STALE_MESSAGE =
+  "Saved, but the device list could not be reloaded, so the setting shown may be out of date. Refresh before changing it again.";
+
+/**
+ * The one quiet note about how a register learns of a change.
+ *
+ * NO PUSH, NO POLLING, NO REALTIME exists in this product, so the copy must
+ * not imply any of them. A till reads its settings when it next refreshes
+ * them, and an offline till keeps what it last saved until it reconnects or
+ * its offline authorization expires — which is the behaviour the accepted 1B
+ * pairing cache actually has.
+ */
+export const CASH_DRAWER_PROPAGATION_NOTE =
+  "Changes take effect the next time this register refreshes its device settings. If it is offline, it may keep its last saved setting until it reconnects or its offline authorization expires.";
+
+/**
+ * The one platform with an automatic drawer path in v1.3.
+ *
+ * DELIBERATELY NOT IMPORTED FROM lib/cashDrawer.ts, and that is an
+ * architectural rule rather than a convenience. An accepted Checkpoint 1A
+ * guard pins the importers of the runtime coordinator to exactly the device
+ * runtime — "the owner runtime and the Builder never reach it" — so the
+ * Builder's device list may not reach into the till's sale path to ask this
+ * question. The two agree on the answer today and are tested separately,
+ * because they are different questions: the coordinator asks whether to open a
+ * drawer after a sale, and this asks whether to offer the owner a switch.
+ */
+const CASH_DRAWER_PLATFORM = "windows";
+
+/**
+ * Is this register one the owner may turn automatic opening ON for?
+ *
+ * TWO CONDITIONS, BOTH REQUIRED. The register must be ACTIVE — a revoked or
+ * unpaired till has no operational settings to change, and offering a switch
+ * there would imply it still takes sales — and it must be a Windows register,
+ * because Android and an ordinary browser till have no automatic drawer path
+ * at all in v1.3.
+ *
+ * `platform` is compared case-insensitively after trimming because it is text
+ * the device reported, not an enum this table constrains.
+ */
+export function canConfigureCashDrawer(device: PairedDeviceSummary): boolean {
+  return (
+    isPairedDeviceActive(device) &&
+    isNonEmptyString(device.platform) &&
+    device.platform.trim().toLowerCase() === CASH_DRAWER_PLATFORM
+  );
+}
+
+/**
+ * Why a register has no drawer switch — so the screen can say the true reason.
+ *
+ * FOUR ANSWERS, AND ONLY ONE HAS A CONTROL. They are kept apart because they
+ * are different facts and an owner acts differently on each:
+ *
+ *   * `configurable` — an active Windows register. The only switch.
+ *   * `unsupported_platform` — an active Android or browser till. A platform
+ *     fact the owner cannot change, and explicitly NOT a permissions problem.
+ *   * `revoked` — the owner cut this register off. Settings are moot, and the
+ *     stored value must not be presented as if it still governed anything.
+ *   * `none` — an UNPAIRED register, which renders no drawer block at all.
+ *     Feature 25.1 is emphatic that revoked and unpaired are different events;
+ *     showing the revoked sentence here would tell an owner their till was cut
+ *     off when it simply removed itself. Saying nothing is the honest option,
+ *     and it invents no new treatment for the unpaired row.
+ */
+export type CashDrawerConfigState =
+  | "configurable"
+  | "unsupported_platform"
+  | "revoked"
+  | "none";
+
+export function resolveCashDrawerConfigState(
+  device: PairedDeviceSummary
+): CashDrawerConfigState {
+  if (device.status === "revoked") return "revoked";
+  if (device.status === "unpaired") return "none";
+
+  return canConfigureCashDrawer(device) ? "configurable" : "unsupported_platform";
 }
 
 // A device with no name is still identifiable in the owner's list.

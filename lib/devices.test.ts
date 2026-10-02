@@ -40,6 +40,10 @@ describe("mapPairedDeviceRow", () => {
       // offer, which is what it was before those columns existed.
       offeredBuildJobId: null,
       offeredAt: null,
+      // Cash Drawer 1D — and a row selected without cash_drawer_enabled reads
+      // as OFF, which is both what it was before the column existed and the
+      // locked product default.
+      cashDrawerEnabled: false,
     });
   });
 
@@ -78,8 +82,14 @@ describe("mapPairedDeviceRow", () => {
     // purpose. Feature 26.3 added the two offer fields, which name builds this
     // owner already owns and can already list through listProjectBuildJobs —
     // they carry no identity and widen nothing.
+    //
+    // Cash Drawer 1D added cashDrawerEnabled, made on purpose and on the same
+    // test: it is the owner's own setting on the owner's own register, carries
+    // no identity, and is already theirs to read and change. It is a boolean
+    // about equipment, not about a person.
     expect(Object.keys(device).sort()).toEqual([
       "buildJobId",
+      "cashDrawerEnabled",
       "createdAt",
       "deviceName",
       "id",

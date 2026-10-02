@@ -231,6 +231,9 @@ describe("paired device mapping feeding the list", () => {
     // who performed the revocation.
     expect(Object.keys(device ?? {}).sort()).toEqual([
       "buildJobId",
+      // Cash Drawer 1D — the owner's own equipment setting on their own
+      // register. A boolean about a drawer, not about a person.
+      "cashDrawerEnabled",
       "createdAt",
       "deviceName",
       "id",

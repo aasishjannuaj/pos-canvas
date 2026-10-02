@@ -14,6 +14,7 @@ import {
   getPairedDeviceDisplayName,
   getPairedDeviceStatusLabel,
   isPairedDeviceActive,
+  resolveCashDrawerConfigState,
   resolveDeviceUpdateState,
 } from "@/lib/devices";
 import type { PairedDeviceSummary } from "@/lib/devices";
@@ -42,6 +43,26 @@ type DeviceRowProps = {
    * can do anything at all.
    */
   anyOfferInFlight: boolean;
+  /**
+   * Cash Drawer 1D — the owner's request to change this register's setting.
+   *
+   * The row never changes the value itself. It reports the intent and goes on
+   * rendering `device.cashDrawerEnabled`, which only moves when an
+   * authoritative re-read says so.
+   */
+  onCashDrawerChange: (device: PairedDeviceSummary, enabled: boolean) => void;
+  /** This row's drawer setting is the one in flight. */
+  isCashDrawerUpdating: boolean;
+  /**
+   * ANY drawer change is in flight, or the list is stale after one.
+   *
+   * Two reasons, one prop, because they have the same consequence: a further
+   * drawer change must not be attempted. Separate from `anyOfferInFlight` so a
+   * configuration offer and a drawer setting never disable each other.
+   */
+  cashDrawerLocked: boolean;
+  /** This row's failure, already a first-party sentence. */
+  cashDrawerError: string | null;
 };
 
 export default function DeviceRow({
@@ -52,10 +73,16 @@ export default function DeviceRow({
   onOfferUpdate,
   isOffering,
   anyOfferInFlight,
+  onCashDrawerChange,
+  isCashDrawerUpdating,
+  cashDrawerLocked,
+  cashDrawerError,
 }: DeviceRowProps) {
   const active = isPairedDeviceActive(device);
   const updateState = resolveDeviceUpdateState(device, latestBuildJobId);
   const updateLabel = getDeviceUpdateStateLabel(updateState);
+  const drawerState = resolveCashDrawerConfigState(device);
+  const drawerControlId = `cash-drawer-${device.id}`;
 
   return (
     <li
@@ -151,6 +178,74 @@ export default function DeviceRow({
           </button>
         )}
       </div>
+
+      {/* Cash Drawer 1D — this register's automatic-drawer setting.
+          `basis-full` so it sits beside the actions where the row is wide and
+          drops onto its own line when it is not; the existing flex-wrap row
+          does the rest, and neither Revoke nor Offer update moves. */}
+      {drawerState !== "none" && (
+        <div className="basis-full border-t border-neutral-100 pt-3">
+          {drawerState === "configurable" ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* A real checkbox: keyboard-operable, announced as a checkbox,
+                    and its ON/OFF state is the control's own, never conveyed
+                    by colour alone. */}
+                <input
+                  id={drawerControlId}
+                  type="checkbox"
+                  checked={device.cashDrawerEnabled}
+                  disabled={cashDrawerLocked}
+                  aria-busy={isCashDrawerUpdating}
+                  aria-describedby={`${drawerControlId}-description`}
+                  onChange={(event) => onCashDrawerChange(device, event.target.checked)}
+                  className="h-4 w-4 rounded border-neutral-300 text-neutral-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 disabled:cursor-not-allowed"
+                />
+                <label
+                  htmlFor={drawerControlId}
+                  className="text-xs font-medium text-neutral-800"
+                >
+                  Auto-open cash drawer
+                </label>
+                {/* The pending word, beside the control rather than replacing
+                    it: the confirmed state stays visible the whole time. */}
+                {isCashDrawerUpdating && (
+                  <span className="text-xs text-neutral-500">Updating…</span>
+                )}
+              </div>
+              <p
+                id={`${drawerControlId}-description`}
+                className="mt-1 text-xs text-neutral-500"
+              >
+                For this register only. Opens automatically after successful cash
+                sales on Windows.
+              </p>
+            </>
+          ) : drawerState === "unsupported_platform" ? (
+            <>
+              {/* Named, not hidden, and not dressed up as something the owner
+                  could fix. There is no control here because there is nothing
+                  to turn on, which is a fact about the platform. */}
+              <p className="text-xs font-medium text-neutral-800">
+                Auto-open cash drawer
+              </p>
+              <p className="mt-1 text-xs text-neutral-500">
+                Automatic drawer opening is supported on Windows registers only.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-neutral-500">
+              Cash drawer settings are unavailable for revoked registers.
+            </p>
+          )}
+
+          {cashDrawerError !== null && (
+            <p role="alert" className="mt-2 text-xs text-red-700">
+              {cashDrawerError}
+            </p>
+          )}
+        </div>
+      )}
     </li>
   );
 }

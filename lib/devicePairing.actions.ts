@@ -3,6 +3,7 @@
 import { isValidUuid } from "@/lib/buildJobs";
 import type { CreatePairingTokenResult } from "@/lib/devicePairing";
 import { createPairingFailure } from "@/lib/devicePairing";
+import { CASH_DRAWER_UPDATE_FAILED_MESSAGE } from "@/lib/devices";
 import type { PairedDeviceSummary } from "@/lib/devices";
 import {
   cancelDevicePairingToken,
@@ -11,6 +12,7 @@ import {
   offerDeviceConfigUpdate,
   offerDeviceConfigUpdateToAll,
   revokePairedDevice,
+  setOwnerDeviceCashDrawerEnabled,
 } from "@/lib/devicePairing.server";
 import type { BulkOfferResult } from "@/lib/devicePairing.server";
 
@@ -138,6 +140,35 @@ export async function offerDeviceUpdateToAll(
   }
 
   return offerDeviceConfigUpdateToAll(projectId);
+}
+
+/**
+ * Cash Drawer 1D — turns automatic drawer opening on or off for one register.
+ *
+ * TAKES A DEVICE AND A BOOLEAN, AND NOTHING ELSE. There is no owner id, no
+ * project id and no platform parameter on this function, so a caller cannot
+ * name a register it should not touch, cannot claim to be somebody else, and
+ * cannot assert that a device is a Windows one. Ownership is re-resolved from
+ * auth.uid() inside set_device_cash_drawer_enabled, and the Windows question
+ * is a presentation decision this boundary has no reason to trust a client
+ * about.
+ *
+ * The UUID check fails early rather than authorizing: a malformed id would
+ * otherwise reach Postgres as invalid-input-syntax instead of as a row that
+ * does not match, the same correction offerDeviceUpdate above carries.
+ *
+ * `enabled` must be a real boolean. A truthy string would otherwise be sent
+ * to a NOT NULL boolean column and mean something nobody chose.
+ */
+export async function setDeviceCashDrawerEnabled(
+  deviceId: string,
+  enabled: boolean
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!isValidUuid(deviceId) || typeof enabled !== "boolean") {
+    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
+  }
+
+  return setOwnerDeviceCashDrawerEnabled(deviceId, enabled);
 }
 
 /**

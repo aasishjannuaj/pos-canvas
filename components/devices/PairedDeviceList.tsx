@@ -6,6 +6,7 @@
 // polling: a device pairs seconds after the owner reads a code out, so one
 // button covers the only moment the list is meaningfully stale.
 import DeviceRow from "@/components/devices/DeviceRow";
+import { CASH_DRAWER_PROPAGATION_NOTE } from "@/lib/devices";
 import type { PairedDeviceSummary } from "@/lib/devices";
 
 type PairedDeviceListProps = {
@@ -43,6 +44,23 @@ type PairedDeviceListProps = {
   bulkOffering: boolean;
   /** The counts sentence from the last bulk offer. */
   bulkNotice: string | null;
+  /** Cash Drawer 1D — passed straight through; this list derives nothing. */
+  onCashDrawerChange: (device: PairedDeviceSummary, enabled: boolean) => void;
+  cashDrawerDeviceId: string | null;
+  /**
+   * A drawer change is in flight, or one succeeded and the re-read did not —
+   * either way no further drawer change may be attempted until the list is
+   * authoritative again.
+   */
+  cashDrawerLocked: boolean;
+  /** Keyed by device: a failure belongs to the row that caused it. */
+  cashDrawerErrors: Record<string, string>;
+  /**
+   * Shown once, above the rows. The staleness sentence after a successful
+   * write whose re-read failed — kept out of the per-row errors because it is
+   * a statement about the whole list, not about one register.
+   */
+  cashDrawerStaleMessage: string | null;
 };
 
 export default function PairedDeviceList({
@@ -61,6 +79,11 @@ export default function PairedDeviceList({
   onOfferUpdateToAll,
   bulkOffering,
   bulkNotice,
+  onCashDrawerChange,
+  cashDrawerDeviceId,
+  cashDrawerLocked,
+  cashDrawerErrors,
+  cashDrawerStaleMessage,
 }: PairedDeviceListProps) {
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-6">
@@ -132,6 +155,26 @@ export default function PairedDeviceList({
         </p>
       )}
 
+      {/* Cash Drawer 1D — the staleness banner. A write landed and the re-read
+          did not, so what the rows show may be the OLD value and we will not
+          pretend otherwise. Further drawer changes stay locked until Refresh. */}
+      {cashDrawerStaleMessage !== null && (
+        <p
+          role="alert"
+          className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          {cashDrawerStaleMessage}
+        </p>
+      )}
+
+      {/* Cash Drawer 1D — said ONCE for the whole list, not on every row.
+          There is no push, no polling and no Realtime in this product, so the
+          sentence describes what actually happens: the register picks the
+          setting up the next time it refreshes its device settings. */}
+      <p className="mt-4 text-xs leading-relaxed text-neutral-500">
+        {CASH_DRAWER_PROPAGATION_NOTE}
+      </p>
+
       {devices.length === 0 && errorMessage === null ? (
         <p className="mt-4 text-sm text-neutral-500">
           {isLoading
@@ -150,6 +193,10 @@ export default function PairedDeviceList({
               onOfferUpdate={onOfferUpdate}
               isOffering={offeringDeviceId === device.id}
               anyOfferInFlight={offeringDeviceId !== null || bulkOffering}
+              onCashDrawerChange={onCashDrawerChange}
+              isCashDrawerUpdating={cashDrawerDeviceId === device.id}
+              cashDrawerLocked={cashDrawerLocked}
+              cashDrawerError={cashDrawerErrors[device.id] ?? null}
             />
           ))}
         </ul>

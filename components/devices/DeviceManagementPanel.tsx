@@ -37,9 +37,12 @@ import {
   offerDeviceUpdateToAll,
   requestDevicePairingToken,
   revokeDevice,
+  setDeviceCashDrawerEnabled,
 } from "@/lib/devicePairing.actions";
 import type { PairedDeviceSummary } from "@/lib/devices";
 import {
+  CASH_DRAWER_STALE_MESSAGE,
+  CASH_DRAWER_UPDATE_FAILED_MESSAGE,
   canOfferDeviceUpdate,
   describeBulkOfferOutcome,
   selectOfferableDevices,
@@ -114,6 +117,35 @@ export default function DeviceManagementPanel({
   const [bulkOffering, setBulkOffering] = useState(false);
   /** The counts sentence from the last bulk offer, or null. */
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+
+  // Cash Drawer 1D — the owner's per-register drawer setting, mid-change.
+  //
+  // NO OPTIMISTIC STATE HERE, deliberately: there is no "requested value" to
+  // render, because the row keeps showing device.cashDrawerEnabled until an
+  // authoritative re-read replaces the whole list. The only things tracked are
+  // WHICH row is working, what went wrong, and whether the list can still be
+  // trusted.
+  const [cashDrawerDeviceId, setCashDrawerDeviceId] = useState<string | null>(null);
+  const [cashDrawerErrors, setCashDrawerErrors] = useState<Record<string, string>>({});
+  /**
+   * Set when a write succeeded but the re-read did not.
+   *
+   * It latches: until the owner refreshes, the displayed setting may be the
+   * old one and no further drawer change is allowed. Recovering authoritative
+   * state is the only way out, which is why Refresh clears it and nothing else
+   * does.
+   */
+  const [cashDrawerStale, setCashDrawerStale] = useState(false);
+  /**
+   * The latch the handler actually reads.
+   *
+   * `cashDrawerDeviceId` drives the label; it cannot drive the guard. React
+   * state is not written synchronously, so two changes dispatched in one tick
+   * both read the same `null` and both proceed — Feature 26.2 shipped exactly
+   * that hole and staging fired five requests through it. A ref is written the
+   * instant it is set, so the second one in the same tick loses.
+   */
+  const cashDrawerRef = useRef(false);
 
   const [deviceToRevoke, setDeviceToRevoke] = useState<PairedDeviceSummary | null>(
     null
@@ -229,6 +261,86 @@ export default function DeviceManagementPanel({
    * server's counts are the truth — which is why the notice below is built
    * from what came back, not from what was displayed.
    */
+  // PLACED BEFORE THE OFFER HANDLERS DELIBERATELY. lib/deviceOffer.test.ts
+  // asserts that the offer handler does not patch rows locally by slicing this
+  // file from `async function handleOfferUpdate` to `return (` and banning
+  // `setDevices(` inside it. That window spans every handler between the two,
+  // so a drawer handler placed after it would trip an accepted guard about a
+  // different feature. Sitting above the window keeps that guard exactly as
+  // strict as it was, and keeps this re-read honest.
+  /**
+   * Cash Drawer 1D — the owner turns automatic opening on or off.
+   *
+   * THE SEQUENCE IS LOCKED AND IS NOT OPTIMISTIC:
+   *
+   *   confirmed state → pending → accepted RPC → success →
+   *   authoritative re-read → new confirmed state
+   *
+   * While it runs the row keeps rendering `device.cashDrawerEnabled`, which is
+   * still the old value, with the control disabled and "Updating…" beside it.
+   * Nothing on screen moves until the re-read replaces the list, so the owner
+   * is never shown a setting the database has not confirmed.
+   *
+   * THREE OUTCOMES, THREE HONEST ANSWERS:
+   *   * the RPC fails → the old state stands and the row says nothing changed;
+   *   * the RPC succeeds and the re-read succeeds → the list, and with it the
+   *     control, moves to whatever the database now says;
+   *   * the RPC succeeds and the re-read FAILS → we genuinely do not know what
+   *     is on screen any more. The list is marked stale, the owner is told, and
+   *     further drawer changes are refused until a Refresh recovers the truth.
+   *     Guessing the value would be the one unacceptable answer.
+   */
+  async function handleCashDrawerChange(
+    device: PairedDeviceSummary,
+    enabled: boolean
+  ) {
+    // Synchronous latch first: two changes dispatched in the same tick would
+    // both read the same React state and both proceed.
+    if (cashDrawerRef.current || cashDrawerStale || projectId === null) {
+      return;
+    }
+
+    cashDrawerRef.current = true;
+    setCashDrawerDeviceId(device.id);
+    setCashDrawerErrors((errors) => {
+      const next = { ...errors };
+
+      delete next[device.id];
+
+      return next;
+    });
+
+    let result: Awaited<ReturnType<typeof setDeviceCashDrawerEnabled>>;
+
+    try {
+      result = await setDeviceCashDrawerEnabled(device.id, enabled);
+    } catch {
+      result = { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
+    }
+
+    if (!result.ok) {
+      // The old confirmed state is already what the row is rendering, so there
+      // is nothing to roll back — that is the point of not committing early.
+      cashDrawerRef.current = false;
+      setCashDrawerDeviceId(null);
+      setCashDrawerErrors((errors) => ({ ...errors, [device.id]: result.message }));
+      return;
+    }
+
+    const reread = await listProjectPairedDevices(projectId);
+
+    cashDrawerRef.current = false;
+    setCashDrawerDeviceId(null);
+
+    if (reread.ok) {
+      setDevices(reread.devices);
+      setListError(null);
+      return;
+    }
+
+    setCashDrawerStale(true);
+  }
+
   async function handleOfferUpdateToAll() {
     if (
       offeringRef.current ||
@@ -512,6 +624,10 @@ export default function DeviceManagementPanel({
             errorMessage={listError}
             onRefresh={() => {
               setIsLoading(true);
+              // Cash Drawer 1D — recovering authoritative state is the ONLY
+              // exit from the stale latch, and this is that recovery.
+              setCashDrawerStale(false);
+              setCashDrawerErrors({});
               void refreshAll();
             }}
             onRevoke={(device) => {
@@ -528,6 +644,13 @@ export default function DeviceManagementPanel({
             onOfferUpdateToAll={() => void handleOfferUpdateToAll()}
             bulkOffering={bulkOffering}
             bulkNotice={bulkNotice}
+            onCashDrawerChange={(device, enabled) =>
+              void handleCashDrawerChange(device, enabled)
+            }
+            cashDrawerDeviceId={cashDrawerDeviceId}
+            cashDrawerLocked={cashDrawerDeviceId !== null || cashDrawerStale}
+            cashDrawerErrors={cashDrawerErrors}
+            cashDrawerStaleMessage={cashDrawerStale ? CASH_DRAWER_STALE_MESSAGE : null}
           />
         )}
       </div>

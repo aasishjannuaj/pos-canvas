@@ -9,7 +9,7 @@ import {
 } from "@/lib/devicePairing";
 import type { CreatePairingTokenResult } from "@/lib/devicePairing";
 import type { PairedDeviceSummary } from "@/lib/devices";
-import { mapPairedDeviceRow } from "@/lib/devices";
+import { CASH_DRAWER_UPDATE_FAILED_MESSAGE, mapPairedDeviceRow } from "@/lib/devices";
 import type { PairedDeviceRow } from "@/lib/devices";
 import { selectOfferableDevices } from "@/lib/devices";
 import { selectLatestSucceededBuildId } from "@/lib/devicePairing.owner";
@@ -231,8 +231,12 @@ export async function getProjectPairedDevices(projectId: string): Promise<{
     // Feature 26.3 — the two offer columns are additive. Both name builds this
     // owner already owns and can already list, so neither widens what the
     // browser can learn; auth_user_id and owner_id remain unselected.
+    // Cash Drawer 1D — cash_drawer_enabled is additive on the same terms: the
+    // owner's own setting on their own register, carrying no identity. This
+    // stays the ONE owner device query, so the drawer setting is read here
+    // rather than through a second one.
     .select(
-      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at, unpaired_at, offered_build_job_id, offered_at"
+      "id, project_id, build_job_id, device_name, platform, created_at, last_seen_at, revoked_at, unpaired_at, offered_build_job_id, offered_at, cash_drawer_enabled"
     )
     .eq("project_id", projectId)
     .order("created_at", { ascending: false });
@@ -284,6 +288,59 @@ export async function revokePairedDevice(
   }
 
   return { ok: true, alreadyRevoked: result.already_revoked === true };
+}
+
+/**
+ * Cash Drawer 1D — turns automatic drawer opening on or off for ONE register.
+ *
+ * OWNERSHIP IS THE DATABASE'S. set_device_cash_drawer_enabled is SECURITY
+ * DEFINER, resolves the owner from auth.uid(), refuses a caller that is itself
+ * a paired device, and matches the register on `owner_id = auth.uid()` in the
+ * WHERE clause — so a device belonging to somebody else simply does not match.
+ * No owner id and no project id is passed, so there is none to forge, and the
+ * ordinary cookie-scoped client is sufficient. No service-role client is used
+ * here or anywhere in this module.
+ *
+ * THE DATABASE VALUE REMAINS AUTHORITATIVE. This function reports whether the
+ * write was accepted. It does not return the new setting for display, and the
+ * caller must re-read the device list rather than assume: the accepted value
+ * is whatever the next authoritative read says it is.
+ *
+ * The raw Postgres message is never returned — it names the register and the
+ * failing check, and a refusal here must not become an oracle for which device
+ * ids exist, the same reason revoke and offer collapse their refusals.
+ */
+export async function setOwnerDeviceCashDrawerEnabled(
+  deviceId: string,
+  enabled: boolean
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (typeof deviceId !== "string" || deviceId.trim() === "") {
+    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
+  }
+
+  if (typeof enabled !== "boolean") {
+    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
+  }
+
+  const supabase = await createClient();
+
+  const { error } = await supabase.rpc("set_device_cash_drawer_enabled", {
+    p_device_id: deviceId,
+    p_enabled: enabled,
+  });
+
+  if (error) {
+    console.error(
+      JSON.stringify({
+        event: "device_cash_drawer_update_failed",
+        deviceId,
+        category: "rpc_failed",
+      })
+    );
+    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
+  }
+
+  return { ok: true };
 }
 
 /**

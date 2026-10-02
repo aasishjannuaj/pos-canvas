@@ -75,6 +75,10 @@ function device(overrides: Partial<PairedDeviceSummary> = {}): PairedDeviceSumma
     revokedAt: null,
     offeredBuildJobId: null,
     offeredAt: null,
+    // Cash Drawer 1D — OFF by default, matching the column's NOT NULL DEFAULT
+    // false. These suites are about offers, not drawers; the field is here so
+    // the fixture is a complete PairedDeviceSummary, nothing more.
+    cashDrawerEnabled: false,
     ...overrides,
   };
 }
