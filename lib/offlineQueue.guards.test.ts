@@ -66,9 +66,13 @@ describe("the queue is backed by IndexedDB, not memory", () => {
   it("adds a dedicated store at database version 2", () => {
     const store = code(read(STORE));
 
-    expect(store).toContain("export const OFFLINE_DB_VERSION = 2");
+    // SUPERSEDED BY Cash Drawer 1A: version 3 and a third store (the
+    // drawer-events ledger). The queue store itself is unchanged, and the
+    // store count stays closed so a fourth cannot appear unnoticed.
+    expect(store).toContain("export const OFFLINE_DB_VERSION = 3");
     expect(store).toContain('export const SALE_QUEUE_STORE = "sale-queue"');
-    expect((store.match(/createObjectStore\(/g) ?? []).length).toBe(2);
+    expect(store).toContain('export const DRAWER_EVENT_STORE = "drawer-events"');
+    expect((store.match(/createObjectStore\(/g) ?? []).length).toBe(3);
   });
 
   it("never drops or recreates the 24.5A cache store", () => {

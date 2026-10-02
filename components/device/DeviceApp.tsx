@@ -140,6 +140,8 @@ import {
 import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
+import { UNAVAILABLE_CASH_DRAWER, runAutomaticDrawerEvent } from "@/lib/cashDrawer";
+import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
   readUncertainSale,
@@ -200,6 +202,7 @@ import type {
   PosRuntimeCompleteSale,
   PosRuntimeResolveOnlineSale,
   PosRuntimeDiscardOfflineSaleDraft,
+  PosRuntimeOnSaleCompleted,
   PosRuntimeQueueOfflineSale,
 } from "@/lib/posRuntimeHost";
 
@@ -2670,7 +2673,7 @@ export default function DeviceApp() {
 
       void refreshSaleStatus();
 
-      return { ok: true, receipt: outcome.receipt };
+      return { ok: true, receipt: outcome.receipt, saleRequestId: drafted.draft.saleRequestId };
     },
     [refreshSaleStatus]
   );
@@ -2806,6 +2809,31 @@ export default function DeviceApp() {
     setUncertainSale(null);
     await refreshSaleStatus();
   }, [refreshSaleStatus]);
+
+  /**
+   * v1.3 Cash Drawer Checkpoint 1A — the automatic drawer event for a sale that
+   * has ALREADY succeeded.
+   *
+   * THE ONLY PLACE THE COORDINATOR IS WIRED. PosRuntime calls this from its two
+   * success branches and from nowhere else; sync, Sales History, reprint and
+   * the owner/Builder hosts never reach it. Fire-and-forget: the coordinator
+   * never throws, and nothing it answers is allowed back into the sale.
+   *
+   * The platform comes from the shells' own bridges, the same signals pairing
+   * uses, and fails closed to "web". Android and web are refused before the
+   * ledger is touched. The capability is the 1A no-op: there is no drawer yet.
+   */
+  const handleSaleCompleted: PosRuntimeOnSaleCompleted = useCallback((event) => {
+    void runAutomaticDrawerEvent({
+      event,
+      platform: resolveDeviceIdentity({
+        isNativeShell: isCapacitorNativeShell(),
+        isWindowsShell: isWindowsShell(),
+      }).platform,
+      claim: claimAutomaticDrawerEvent,
+      capability: UNAVAILABLE_CASH_DRAWER,
+    });
+  }, []);
 
   const handleSaleRejected = useCallback(
     (rejection: { message: string | null; failure?: DeviceFailureKind }) => {
@@ -3353,6 +3381,8 @@ export default function DeviceApp() {
               armOnlineSale={armOnlineSale}
               resolveOnlineSale={resolveOnlineSale}
               persistedUncertainSale={uncertainSale}
+              // v1.3 Cash Drawer Checkpoint 1A — told once per succeeded sale.
+              onSaleCompleted={handleSaleCompleted}
               cartLineCountRef={liveCartLineCountRef}
             />
           </div>

@@ -177,6 +177,13 @@ export type PosRuntimeQueueOfflineSale = (input: {
        * Never a reason to report a failed sale.
        */
       receipt: ProvisionalReceipt | null;
+      /**
+       * v1.3 Cash Drawer Checkpoint 1A — the identity the durable record was
+       * saved under. Returned separately from the receipt because the receipt
+       * may be null while the sale is saved, and the completion hook must still
+       * know which sale just became durable.
+       */
+      saleRequestId: string;
     }
   | { ok: false; message: string }
 >;
@@ -225,3 +232,23 @@ export type PosRuntimeArmOnlineSale = (sale: UncertainSale) => Promise<boolean>;
  * taken ownership of the same key. Never on a rejection.
  */
 export type PosRuntimeResolveOnlineSale = () => Promise<void>;
+
+/**
+ * v1.3 Cash Drawer Checkpoint 1A — told once a sale has SUCCEEDED.
+ *
+ * Online: after the server's authoritative receipt is in hand and the runtime
+ * has crossed into its success view. Offline: after the host reports the sale
+ * durably saved. Never from payment selection, a Pay press, planning, arming,
+ * dispatch, a rejection or an unanswered request — and never from sync, which
+ * does not run through PosRuntime at all.
+ *
+ * OPTIONAL and null by default: the owner runtime and the Builder preview pass
+ * nothing and are unchanged. Only DeviceApp supplies one.
+ *
+ * Fire-and-forget. The sale is already complete when this is called; nothing
+ * the host does here can change, delay or undo it.
+ */
+export type PosRuntimeOnSaleCompleted = (event: {
+  saleRequestId: string;
+  paymentMethod: PaymentMethod;
+}) => void;

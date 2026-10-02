@@ -669,8 +669,11 @@ describe("packaging changed no financial behaviour", () => {
   it("the offline database schema is unchanged", () => {
     const store = code(read("lib/deviceOfflineStore.ts"));
 
+    // SUPERSEDED BY Cash Drawer 1A: v2 -> v3 adds the drawer-events ledger,
+    // additively. Packaging still changed nothing; the surviving property is
+    // that the database and the two financial stores keep their names.
     expect(store).toContain('export const OFFLINE_DB_NAME = "pos-canvas-device"');
-    expect(store).toContain("export const OFFLINE_DB_VERSION = 2");
+    expect(store).toContain("export const OFFLINE_DB_VERSION = 3");
     expect(store).toContain('export const CACHE_STORE = "device-cache"');
     expect(store).toContain('export const SALE_QUEUE_STORE = "sale-queue"');
   });

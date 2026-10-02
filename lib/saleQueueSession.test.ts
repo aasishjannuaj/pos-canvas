@@ -84,7 +84,10 @@ describe("the database upgrades from v1 to v2 without losing anything", () => {
     if (!opened.ok) return;
 
     expect(opened.value.version).toBe(OFFLINE_DB_VERSION);
-    expect(OFFLINE_DB_VERSION).toBe(2);
+    // SUPERSEDED BY Cash Drawer 1A: v3 (drawer-events ledger). The v1 -> current
+    // upgrade below is what this describe block protects, and it still must
+    // keep everything a v1 device held.
+    expect(OFFLINE_DB_VERSION).toBe(3);
     expect(opened.value.objectStoreNames.contains(CACHE_STORE)).toBe(true);
     expect(opened.value.objectStoreNames.contains(SALE_QUEUE_STORE)).toBe(true);
 
@@ -112,7 +115,7 @@ describe("the database upgrades from v1 to v2 without losing anything", () => {
 
     if (!upgraded.ok) return;
 
-    expect(upgraded.value.version).toBe(2);
+    expect(upgraded.value.version).toBe(OFFLINE_DB_VERSION);
     expect(upgraded.value.objectStoreNames.contains(SALE_QUEUE_STORE)).toBe(true);
 
     const assertion = await readPairingAssertionRecord(upgraded.value);
@@ -147,7 +150,7 @@ describe("the database upgrades from v1 to v2 without losing anything", () => {
     const second = await openOfflineDb();
 
     expect(second.ok).toBe(true);
-    expect(second.ok === true && second.value.version).toBe(2);
+    expect(second.ok === true && second.value.version).toBe(OFFLINE_DB_VERSION);
 
     if (second.ok) second.value.close();
   });

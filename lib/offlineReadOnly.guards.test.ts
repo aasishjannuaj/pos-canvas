@@ -157,8 +157,13 @@ describe("checkout is impossible while running from cache", () => {
     const app = code(read(DEVICE_APP));
     const occurrences = app.match(/saleRequestId/g) ?? [];
 
-    expect(occurrences).toHaveLength(2);
+    // SUPERSEDED BY Cash Drawer 1A: two more occurrences, both in ONE
+    // pass-through — queueOfflineSale RETURNS the id the durable record was
+    // saved under so PosRuntime's completion hook knows which sale it was.
+    // Still minted and persisted elsewhere; still never stored here.
+    expect(occurrences).toHaveLength(4);
     expect(app).toContain("saleRequestId: input.saleRequestId");
+    expect(app).toContain("saleRequestId: drafted.draft.saleRequestId }");
     expect(app).not.toContain("writeCacheKey");
   });
 });

@@ -988,9 +988,14 @@ describe("the cashier is told the truth about what is waiting", () => {
     const store = code(read("lib/deviceOfflineStore.ts"));
 
     // No second database, no version bump, no third object store.
+    // SUPERSEDED BY Cash Drawer 1A: the version bump and third store are the
+    // drawer-events ledger. The surviving property is the one this test is
+    // about — the uncertain-sale record still lives in device-cache, in the
+    // same single database, with no store of its own.
     expect(store).toContain('export const OFFLINE_DB_NAME = "pos-canvas-device"');
-    expect(store).toContain("export const OFFLINE_DB_VERSION = 2");
-    expect((store.match(/createObjectStore\(/g) ?? [])).toHaveLength(2);
+    expect(store).toContain("export const OFFLINE_DB_VERSION = 3");
+    expect((store.match(/createObjectStore\(/g) ?? [])).toHaveLength(3);
+    expect(store).not.toMatch(/createObjectStore\([^)]*uncertain/i);
     expect(store).toContain("UNCERTAIN_SALE_KEY");
   });
 

@@ -31,8 +31,14 @@ export const OFFLINE_DB_NAME = "pos-canvas-device";
  * keeps both, and the only observable change is that a second store now exists.
  * onupgradeneeded runs for exactly the version steps a given browser is behind,
  * so a fresh install and a v1 device converge on the same v2 schema.
+ *
+ * v1.3 Cash Drawer Checkpoint 1A — bumped from 2 to 3 to add the drawer-event
+ * ledger. ADDITIVE IN EXACTLY THE SAME WAY: device-cache and sale-queue are
+ * neither dropped nor migrated, so a v2 device keeps its pinned config, its
+ * uncertain-sale record and every queued sale, and a v1 device and a fresh
+ * install converge on the same v3 schema.
  */
-export const OFFLINE_DB_VERSION = 2;
+export const OFFLINE_DB_VERSION = 3;
 
 /**
  * The single object store 24.5A creates.
@@ -53,6 +59,17 @@ export const CACHE_STORE = "device-cache";
  * enforces, not something application code has to remember to check.
  */
 export const SALE_QUEUE_STORE = "sale-queue";
+
+/**
+ * v1.3 Cash Drawer Checkpoint 1A — one record per automatic drawer event.
+ *
+ * KEYED BY saleRequestId ITSELF, as the primary key. That makes "one sale, at
+ * most one automatic drawer event" a property of the storage engine: an `add`
+ * of a key that already exists is refused with a ConstraintError inside the
+ * same transaction, so two callers — duplicate callbacks, concurrent tasks, a
+ * replay after restart — cannot both win. See insertDrawerEventClaim.
+ */
+export const DRAWER_EVENT_STORE = "drawer-events";
 
 /** Index names, spelled once so a typo cannot silently fall back to a scan. */
 export const SALE_QUEUE_REQUEST_ID_INDEX = "by-sale-request-id";
@@ -131,6 +148,11 @@ export function openOfflineDb(
         // FIFO ordering without loading and sorting the whole queue.
         queue.createIndex(SALE_QUEUE_QUEUED_AT_INDEX, "queuedAt", { unique: false });
       }
+
+      // v1.3 Cash Drawer Checkpoint 1A. The key path IS the uniqueness rule.
+      if (!db.objectStoreNames.contains(DRAWER_EVENT_STORE)) {
+        db.createObjectStore(DRAWER_EVENT_STORE, { keyPath: "saleRequestId" });
+      }
     };
 
     request.onsuccess = () => {
@@ -138,10 +160,12 @@ export function openOfflineDb(
 
       // A database that exists but lacks a store means an interrupted upgrade or
       // a hand-edited profile. Treat it as unusable rather than reading from a
-      // store that is not there. BOTH are required from 24.5C onwards.
+      // store that is not there. BOTH are required from 24.5C onwards, and the
+      // drawer ledger from Cash Drawer 1A.
       if (
         !db.objectStoreNames.contains(CACHE_STORE) ||
-        !db.objectStoreNames.contains(SALE_QUEUE_STORE)
+        !db.objectStoreNames.contains(SALE_QUEUE_STORE) ||
+        !db.objectStoreNames.contains(DRAWER_EVENT_STORE)
       ) {
         db.close();
         settle({ ok: false, reason: "failed" });
@@ -377,6 +401,66 @@ export async function countQueuedSaleRecords(
   db: IDBDatabase
 ): Promise<OfflineStoreResult<number>> {
   return withStore<number>(db, SALE_QUEUE_STORE, "readonly", (store) => store.count());
+}
+
+// ---------------------------------------------------------------------------
+// v1.3 Cash Drawer Checkpoint 1A — the drawer-event claim
+// ---------------------------------------------------------------------------
+
+export type DrawerEventInsertResult =
+  | { ok: true }
+  | { ok: false; reason: "exists" | "failed" };
+
+/**
+ * Atomically claims ONE drawer event: inserts the record unless its
+ * saleRequestId already has one.
+ *
+ * ONE `add`, IN ONE TRANSACTION, AND NOTHING ELSE. There is deliberately no
+ * read before it. A read-then-write would let two callers both read "absent"
+ * and both proceed; `add` against the key path makes the check and the write a
+ * single operation the storage engine serialises, so exactly one caller
+ * commits and every other gets a ConstraintError.
+ *
+ * RESOLVES ON COMMIT, not on the request's success. A request can succeed and
+ * its transaction still abort, so `ok` is reported only from `oncomplete` —
+ * the point at which the record is actually durable. A caller that is told
+ * `ok` may act on the claim; one that is told anything else must not.
+ */
+export function insertDrawerEventClaim(
+  db: IDBDatabase,
+  record: { saleRequestId: string }
+): Promise<DrawerEventInsertResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let constraint = false;
+    const settle = (result: DrawerEventInsertResult): void => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+
+    try {
+      const transaction = db.transaction(DRAWER_EVENT_STORE, "readwrite", {
+        durability: "strict",
+      });
+
+      transaction.oncomplete = () => settle({ ok: true });
+      transaction.onabort = () => settle({ ok: false, reason: constraint ? "exists" : "failed" });
+      transaction.onerror = () => {
+        // Let the abort report it; onerror fires first and may not yet know
+        // which request failed.
+      };
+
+      const request = transaction.objectStore(DRAWER_EVENT_STORE).add(record);
+
+      request.onerror = () => {
+        constraint = request.error?.name === "ConstraintError";
+      };
+    } catch {
+      settle({ ok: false, reason: "failed" });
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

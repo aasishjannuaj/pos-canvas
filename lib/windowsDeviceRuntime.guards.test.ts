@@ -432,7 +432,9 @@ describe("the installer carries the runtime and nothing customer-specific", () =
   it("the offline database schema is unchanged", () => {
     const store = code(read("lib/deviceOfflineStore.ts"));
 
-    expect(store).toContain("export const OFFLINE_DB_VERSION = 2");
+    // SUPERSEDED BY Cash Drawer 1A: v2 -> v3 adds the drawer-events ledger,
+    // additively; the two financial stores are untouched.
+    expect(store).toContain("export const OFFLINE_DB_VERSION = 3");
     expect(store).toContain('export const CACHE_STORE = "device-cache"');
     expect(store).toContain('export const SALE_QUEUE_STORE = "sale-queue"');
   });

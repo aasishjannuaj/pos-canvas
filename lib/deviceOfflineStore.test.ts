@@ -15,6 +15,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   CACHE_STORE,
+  DRAWER_EVENT_STORE,
   SALE_QUEUE_STORE,
   OFFLINE_DB_NAME,
   OFFLINE_DB_VERSION,
@@ -54,14 +55,16 @@ describe("the database is created with the expected shape", () => {
     db.close();
   });
 
-  it("holds exactly the two approved stores", () => {
+  it("holds exactly the three approved stores", () => {
     // SUPERSEDED BY 24.5C. This used to assert that ONLY device-cache existed,
     // on the grounds that an unused queue store would be an empty promise.
     // 24.5C designed and built the queue, so the store is real now — but the
     // list stays closed, so a third store cannot appear unnoticed.
+    // SUPERSEDED BY Cash Drawer 1A: the third store is the drawer-events
+    // ledger. Still a closed list — a fourth cannot appear unnoticed.
     return open().then((db) => {
       expect(Array.from(db.objectStoreNames).sort()).toEqual(
-        [CACHE_STORE, SALE_QUEUE_STORE].sort()
+        [CACHE_STORE, SALE_QUEUE_STORE, DRAWER_EVENT_STORE].sort()
       );
       db.close();
     });

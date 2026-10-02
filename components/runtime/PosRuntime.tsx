@@ -61,6 +61,7 @@ import type {
   PosRuntimeArmOnlineSale,
   PosRuntimeDiscardOfflineSaleDraft,
   PosRuntimeResolveOnlineSale,
+  PosRuntimeOnSaleCompleted,
   PosRuntimeOnSaleRejected,
   PosRuntimeQueueOfflineSale,
   PosRuntimeRefreshStock,
@@ -186,6 +187,14 @@ type PosRuntimeProps = {
   armOnlineSale?: PosRuntimeArmOnlineSale | null;
   resolveOnlineSale?: PosRuntimeResolveOnlineSale | null;
   persistedUncertainSale?: UncertainSale | null;
+
+  /**
+   * v1.3 Cash Drawer Checkpoint 1A — told once per SUCCEEDED sale, after the
+   * success boundary on each path. See PosRuntimeOnSaleCompleted. Null — the
+   * default, and what the owner runtime and the Builder preview pass — means
+   * nothing is told and nothing changes.
+   */
+  onSaleCompleted?: PosRuntimeOnSaleCompleted | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -212,6 +221,7 @@ export default function PosRuntime({
   armOnlineSale = null,
   resolveOnlineSale = null,
   persistedUncertainSale = null,
+  onSaleCompleted = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
@@ -493,6 +503,24 @@ export default function PosRuntime({
     setReceiptOpen(false);
   }
 
+  // v1.3 Cash Drawer Checkpoint 1A — tells the host a sale has SUCCEEDED.
+  //
+  // Called only from the two success branches of completeSale below, each time
+  // AFTER that branch has crossed into the success view. A host that throws
+  // here cannot reach the sale: it is already complete, and the throw is
+  // swallowed so the success view stays exactly as it is.
+  function reportSaleCompleted(saleRequestId: string, paymentMethod: PaymentMethod) {
+    if (onSaleCompleted === null) {
+      return;
+    }
+
+    try {
+      onSaleCompleted({ saleRequestId, paymentMethod });
+    } catch {
+      // Drawer truth is not sale truth.
+    }
+  }
+
   async function completeSale() {
     // Feature 24.5A — THE OFFLINE FENCE, and it is deliberately the very first
     // statement in this function.
@@ -642,6 +670,10 @@ export default function PosRuntime({
       // Informational only, on the success screen: the sale is saved either
       // way, and this says nothing about whether it was recorded.
       setSaleSaveError(saved.receipt === null ? OFFLINE_RECEIPT_UNAVAILABLE_NOTE : null);
+      // v1.3 Cash Drawer Checkpoint 1A — the OFFLINE completion point. Only
+      // here, after the durable save answered ok; never before it, and never
+      // from sync, which submits from storage without coming through here.
+      reportSaleCompleted(saved.saleRequestId, selectedPaymentMethod);
       return;
     }
 
@@ -799,6 +831,12 @@ export default function PosRuntime({
     // there is no window where Complete Sale could be clicked again for a
     // sale that already succeeded — mirrors EditorShell's completeSale.
     setCheckoutStatus("success");
+
+    // v1.3 Cash Drawer Checkpoint 1A — the ONLINE completion point. Past the
+    // authoritative receipt and the success lock above, and before the stock
+    // refresh, whose failure is not a failed sale. The payment method is the
+    // SERVER's record of it, not the button that was selected.
+    reportSaleCompleted(plan.request.id, receipt.paymentMethod);
 
     // Feature 16.4A — a host with no live stock source (a paired device, which
     // cannot read `projects` under RLS) passes null. The sale is complete and
