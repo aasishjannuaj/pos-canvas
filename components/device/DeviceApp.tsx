@@ -140,7 +140,8 @@ import {
 import DeviceOfflineBanner from "@/components/device/DeviceOfflineBanner";
 import { isCapacitorNativeShell } from "@/lib/nativeShell";
 import { isWindowsShell } from "@/lib/windowsShell";
-import { UNAVAILABLE_CASH_DRAWER, runAutomaticDrawerEvent } from "@/lib/cashDrawer";
+import { runAutomaticDrawerEvent } from "@/lib/cashDrawer";
+import { resolveCashDrawerCapability } from "@/lib/windowsCashDrawer";
 import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
@@ -2839,7 +2840,10 @@ export default function DeviceApp() {
       }).platform,
       autoOpenEnabled: readyPairingRef.current?.cashDrawerEnabled === true,
       claim: claimAutomaticDrawerEvent,
-      capability: UNAVAILABLE_CASH_DRAWER,
+      // Cash Drawer 1C — the Windows shell's hardware bridge where it exists,
+      // the 1A no-op everywhere else. Called by the coordinator only after the
+      // cash, live-Windows, owner-setting and durable-claim gates above.
+      capability: resolveCashDrawerCapability(),
     });
   }, []);
 

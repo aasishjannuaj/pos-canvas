@@ -255,7 +255,7 @@ describe("each document kind gets exactly one bridge", () => {
   const preload = code(read(PRELOAD));
 
   it("the hosted page receives the identity fact and nothing else", () => {
-    const identityBranch = preload.slice(preload.indexOf("} else {"));
+    const identityBranch = preload.slice(preload.indexOf("} else {"), preload.indexOf("const isPackagedRuntime"));
 
     expect(identityBranch).toContain("Object.freeze({ isWindowsShell: true })");
     expect(identityBranch).not.toContain("ipcRenderer");
@@ -276,12 +276,21 @@ describe("each document kind gets exactly one bridge", () => {
     // One `if/else`, so no document can ever receive both.
     expect(preload).toContain("if (isLocalPage) {");
     expect(preload).toContain("} else {");
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(2);
+    // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
+    // app: is never file:, so the retry and drawer bridges never meet; the
+    // identity branch (sliced up to that block) still carries only the fact.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(3);
+    expect(preload).toContain("if (isPackagedRuntime) {");
   });
 
   it("exposes no Node, IPC, filesystem, shell, or environment access", () => {
+    // SUPERSEDED BY Cash Drawer 1C: exactly ONE invoke exists — the drawer
+    // channel, with no arguments — asserted below. Everything else stays banned.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
+
     for (const banned of [
-      "ipcRenderer.invoke",
       "require(\"fs\")",
       "require(\"path\")",
       "require(\"child_process\")",
@@ -299,7 +308,7 @@ describe("each document kind gets exactly one bridge", () => {
   });
 
   it("hands the page no function on the identity bridge", () => {
-    const identityBranch = preload.slice(preload.indexOf("} else {"));
+    const identityBranch = preload.slice(preload.indexOf("} else {"), preload.indexOf("const isPackagedRuntime"));
     expect(identityBranch).not.toMatch(/:\s*\(\s*\)\s*=>/);
     expect(identityBranch).not.toContain("function");
   });

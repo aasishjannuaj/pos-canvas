@@ -133,8 +133,39 @@ export type ClaimDrawerEvent = (saleRequestId: string) => Promise<DrawerEventCla
 /**
  * What a drawer request reports. `unknown` covers every case where the answer
  * was not learned, including a capability that threw.
+ *
+ * v1.3 Cash Drawer Checkpoint 1C — the statuses the Windows hardware bridge can
+ * answer, replacing 1A's provisional "opened". There is deliberately NO
+ * "opened": software can prove the spooler accepted the command, never that
+ * the drawer physically moved.
+ *
+ *   sent           — the five validated bytes went through the spooler's whole
+ *                    lifecycle. Not proof of movement.
+ *   not_configured — no installed printer matches a validated profile, or more
+ *                    than one does. Nothing was sent.
+ *   failed         — refused before any byte could be written.
+ *   unknown        — anything else, including a timeout or a throw.
+ *   unavailable    — no drawer on this device (no bridge, untrusted caller).
+ *
+ * NONE OF THEM IS EVER RETRIED. The drawer event was claimed before the call.
  */
-export type CashDrawerOpenOutcome = "opened" | "unavailable" | "unknown";
+export type CashDrawerOpenOutcome = "sent" | "not_configured" | "failed" | "unknown" | "unavailable";
+
+/** Every status a capability may legitimately answer, for validating a reply. */
+export const CASH_DRAWER_OPEN_OUTCOMES: readonly CashDrawerOpenOutcome[] = Object.freeze([
+  "sent",
+  "not_configured",
+  "failed",
+  "unknown",
+  "unavailable",
+]);
+
+/** A reply that is not one of the known statuses is `unknown`. */
+export function normalizeCashDrawerOutcome(value: unknown): CashDrawerOpenOutcome {
+  return (CASH_DRAWER_OPEN_OUTCOMES as readonly unknown[]).includes(value)
+    ? (value as CashDrawerOpenOutcome)
+    : "unknown";
+}
 
 /**
  * THE ENTIRE SURFACE A FUTURE DRAWER IMPLEMENTATION GETS.
@@ -237,7 +268,7 @@ export async function runAutomaticDrawerEvent(input: {
 
     return {
       status: "requested",
-      outcome: outcome === "opened" || outcome === "unavailable" ? outcome : "unknown",
+      outcome: normalizeCashDrawerOutcome(outcome),
     };
   } catch {
     // The claim stands. Whatever the drawer did is unknown, and an unknown is

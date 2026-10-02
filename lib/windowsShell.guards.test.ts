@@ -392,7 +392,9 @@ describe("the preload is minimal and carries no payload", () => {
     // they are mutually exclusive: the retry capability for the local fallback,
     // the identity fact for the hosted page. Neither document sees both.
     const exposures = preload.match(/exposeInMainWorld\(/g) ?? [];
-    expect(exposures).toHaveLength(2);
+    // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
+    expect(exposures).toHaveLength(3);
+    expect(preload).toContain('exposeInMainWorld(\n    "posCanvasCashDrawer"');
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
     expect(preload).toContain('exposeInMainWorld(\n    "posCanvasDesktop"');
   });
@@ -405,7 +407,10 @@ describe("the preload is minimal and carries no payload", () => {
 
   it("does not hand the page ipcRenderer, invoke, or Node", () => {
     expect(preload).not.toContain("exposeInMainWorld(\"ipcRenderer\"");
-    expect(preload).not.toContain("ipcRenderer.invoke");
+    // SUPERSEDED BY Cash Drawer 1C: one invoke, the drawer channel, no arguments.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
     expect(preload).not.toMatch(/require\(["'](fs|path|child_process|os)["']\)/);
     expect(preload).not.toContain("process.env");
   });

@@ -21,6 +21,7 @@ import {
 } from "@/lib/cashDrawer";
 import type {
   CashDrawerCapability,
+  CashDrawerOpenOutcome,
   CashDrawerSaleEvent,
   ClaimDrawerEvent,
 } from "@/lib/cashDrawer";
@@ -51,7 +52,9 @@ function cash(saleRequestId = SALE_A): CashDrawerSaleEvent {
 }
 
 /** A capability that counts how often it is asked. */
-function countingDrawer(answer: () => Promise<"opened" | "unavailable" | "unknown"> = async () => "opened") {
+// SUPERSEDED BY Cash Drawer 1C: 1A's provisional success status is retired —
+// no software can prove a drawer moved — and "sent" is the success answer.
+function countingDrawer(answer: () => Promise<CashDrawerOpenOutcome> = async () => "sent") {
   const requestOpen = vi.fn<CashDrawerCapability["requestOpen"]>(answer);
   const capability: CashDrawerCapability = { available: true, requestOpen };
 
@@ -111,7 +114,7 @@ describe("one completed cash sale produces exactly one drawer event", () => {
       capability,
     });
 
-    expect(outcome).toEqual({ status: "requested", outcome: "opened" });
+    expect(outcome).toEqual({ status: "requested", outcome: "sent" });
     expect(requestOpen).toHaveBeenCalledTimes(1);
     expect(requestOpen).toHaveBeenCalledWith({ saleRequestId: SALE_A });
     expect(await readAllDrawerEvents()).toHaveLength(1);
@@ -264,7 +267,7 @@ describe("auto-open is OFF by default, and OFF consumes no claim", () => {
       capability,
     });
 
-    expect(outcome).toEqual({ status: "requested", outcome: "opened" });
+    expect(outcome).toEqual({ status: "requested", outcome: "sent" });
     expect(claim).toHaveBeenCalledTimes(1);
     expect(claim).toHaveBeenCalledWith(SALE_A);
     expect(requestOpen).toHaveBeenCalledTimes(1);
@@ -445,7 +448,7 @@ describe("failure and unknown never re-kick", () => {
   });
 
   it("an unrecognised capability answer is treated as unknown", async () => {
-    const { capability } = countingDrawer(async () => "kicked" as unknown as "opened");
+    const { capability } = countingDrawer(async () => "kicked" as unknown as "sent");
 
     expect(
       await runAutomaticDrawerEvent({ event: cash(), platform: "windows", autoOpenEnabled: true, claim: durableClaim, capability })

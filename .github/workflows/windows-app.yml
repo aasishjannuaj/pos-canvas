@@ -188,6 +188,28 @@ jobs:
       - name: Build the NSIS installer
         run: npm run build:windows
 
+      # v1.3 Cash Drawer Checkpoint 1C — the cash drawer's Win32 bridge loads
+      # koffi's native binary at runtime, and a .node file cannot be loaded
+      # from inside app.asar. package.json unpacks koffi; this proves the
+      # Windows x64 binary actually landed OUTSIDE the archive, and that the
+      # pinned version is the one packaged. It does not run it: whether the
+      # drawer opens is proven on real hardware (Checkpoint 1E), never here.
+      - name: Verify the cash drawer native module is packaged
+        shell: pwsh
+        run: |
+          $unpacked = "dist/win-unpacked/resources/app.asar.unpacked/node_modules"
+          $binary = Get-ChildItem -Path "$unpacked/@koromix/koffi-win32-x64" -Recurse -Filter "koffi.node" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $binary) {
+            Write-Host "koffi win32-x64 native binary not found under $unpacked"
+            exit 1
+          }
+          $koffiVersion = (Get-Content "$unpacked/koffi/package.json" | ConvertFrom-Json).version
+          if ($koffiVersion -ne "3.3.2") {
+            Write-Host "Packaged koffi is $koffiVersion, expected the pinned 3.3.2"
+            exit 1
+          }
+          Write-Host "koffi $koffiVersion native binary: $($binary.FullName)"
+
       # ------------------------------------------------------------------
       # Verification. The filename is part of the contract — the product's
       # release metadata (Feature 23.6) will reference it — so an unexpected

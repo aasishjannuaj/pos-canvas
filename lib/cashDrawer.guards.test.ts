@@ -194,7 +194,17 @@ describe("only the real DeviceApp runtime wires the coordinator", () => {
       return source.includes('from "@/lib/cashDrawer"') || source.includes('from "@/lib/cashDrawerSession"');
     });
 
-    expect(importers.sort()).toEqual([DEVICE_APP, DRAWER_SESSION].sort());
+    // SUPERSEDED BY Cash Drawer 1C: lib/windowsCashDrawer.ts — the renderer
+    // adapter for the Windows hardware bridge — imports the capability types
+    // and the no-op. It in turn is imported by DeviceApp alone, so the
+    // coordinator is still reachable only from the one wiring point.
+    expect(importers.sort()).toEqual([DEVICE_APP, DRAWER_SESSION, "lib/windowsCashDrawer.ts"].sort());
+
+    const adapterImporters = productionFiles.filter((f) =>
+      code(read(f)).includes('from "@/lib/windowsCashDrawer"')
+    );
+
+    expect(adapterImporters).toEqual([DEVICE_APP]);
   });
 
   it("DeviceApp's handler is wired once, to PosRuntime, with the 1A no-op capability", () => {
@@ -207,7 +217,13 @@ describe("only the real DeviceApp runtime wires the coordinator", () => {
 
     expect(handler).toContain("runAutomaticDrawerEvent(");
     expect(handler).toContain("claim: claimAutomaticDrawerEvent");
-    expect(handler).toContain("capability: UNAVAILABLE_CASH_DRAWER");
+    // SUPERSEDED BY Cash Drawer 1C: the 1A no-op is replaced by the RESOLVED
+    // capability — the Windows bridge where the shell exposes one, the no-op
+    // everywhere else. Still passed only to the coordinator, which calls it
+    // only after cash, live Windows, the owner setting and the durable claim;
+    // the handler itself never opens anything.
+    expect(handler).toContain("capability: resolveCashDrawerCapability(),");
+    expect(handler).not.toMatch(/requestOpen\(|openCashDrawer\(|posCanvasCashDrawer/);
     // SUPERSEDED BY Cash Drawer 1B. 1A pinned the wiring to the locked-off
     // AUTO_OPEN_CASH_DRAWER_DEFAULT because no authoritative setting existed.
     // 1B supplies it: the owner's per-device value on the pairing the till is
@@ -432,21 +448,47 @@ describe("the shared boundary carries no hardware parameter and 1A contacts no h
       ...walk("native-device").filter((f) => !isTest(f)),
     ];
 
+    // SUPERSEDED BY Cash Drawer 1C: the validated command now exists in
+    // production — exactly ONCE, as data in the one validated profile, inside
+    // the Windows shell's main-process hardware layer. Nowhere else: not the
+    // renderer, not the shared runtime, not Android, not any other shell file.
+    const PROFILE_FILE = join("windows-shell", "cashDrawerProfiles.mjs");
+
+    expect(sources).toContain(PROFILE_FILE);
+
     for (const file of sources) {
       const source = read(file).toLowerCase();
+      const hexCount = source.split(hexArray).length - 1;
 
       expect(`${file}: kick`).toBe(`${file}: kick`);
       expect(source).not.toContain(spaced.toLowerCase());
-      expect(source).not.toContain(hexArray);
+      expect(`${file}: ${hexCount}`).toBe(`${file}: ${file === PROFILE_FILE ? 1 : 0}`);
     }
   });
 
-  it("the Windows shell gained no drawer IPC", () => {
+  it("the Windows shell's drawer code lives only in the designated 1C modules", () => {
+    // SUPERSEDED BY Cash Drawer 1C, which adds the authorized hardware bridge.
+    // The surviving property: drawer code exists only in these files, and the
+    // shell's other modules (protocol, navigation, server URL) know nothing of it.
+    const allowed = new Set(
+      [
+        "main.mjs",
+        "preload.js",
+        "cashDrawerProfiles.mjs",
+        "cashDrawerRaw.mjs",
+        "cashDrawerIpc.mjs",
+        "win32Spooler.mjs",
+      ].map((f) => join("windows-shell", f))
+    );
+
     for (const file of walk("windows-shell").filter((f) => !isTest(f))) {
       const source = read(file);
 
       expect(`${file}: drawer`).toBe(`${file}: drawer`);
-      expect(source.toLowerCase()).not.toContain("drawer");
+
+      if (!allowed.has(file)) {
+        expect(source.toLowerCase()).not.toContain("drawer");
+      }
     }
   });
 

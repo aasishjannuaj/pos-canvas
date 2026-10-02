@@ -411,7 +411,12 @@ describe("the splash weakens no Feature 23 control", () => {
     expect(preload).toContain("if (isOfflineFallbackPage) {");
 
     // Still exactly two exposures, still mutually exclusive.
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(2);
+    // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas —
+    // a scheme the splash (file:) never has, so the splash still gets nothing.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(3);
+    expect(preload).toContain(
+      'const isPackagedRuntime =\n  window.location.protocol === "app:" && window.location.host === "poscanvas";'
+    );
   });
 
   it("still pins the production URL and the DevTools rule", () => {

@@ -27,11 +27,19 @@
       "serverUrl.mjs",
       "navigationPolicy.mjs",
       "appProtocol.mjs",
+      "cashDrawerProfiles.mjs",
+      "cashDrawerRaw.mjs",
+      "cashDrawerIpc.mjs",
+      "win32Spooler.mjs",
       "offline.html",
       "package.json",
       "splash.html",
       "splash-mark.png",
       "runtime/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/koffi/**",
+      "node_modules/@koromix/koffi-win32-x64/**"
     ],
     "win": {
       "target": [
@@ -52,5 +60,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "POS Canvas"
     }
+  },
+  "dependencies": {
+    "koffi": "3.3.2"
   }
 }

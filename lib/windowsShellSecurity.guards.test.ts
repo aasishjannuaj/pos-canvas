@@ -466,7 +466,8 @@ describe("the bridge is invisible to the hosted page", () => {
   it("still exposes the retry key alone, carrying nothing", () => {
     // Feature 23.3 added a SECOND exposure, but on the other branch: the hosted
     // page gets identity, the fallback gets retry, and the two never meet.
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(2);
+    // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(3);
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
     expect(preload).toContain('ipcRenderer.send("pos-canvas-shell:retry")');
     // No second argument means no destination can cross.
@@ -474,7 +475,13 @@ describe("the bridge is invisible to the hosted page", () => {
   });
 
   it("hands the page no general IPC or Node access", () => {
-    expect(preload).not.toContain("ipcRenderer.invoke");
+    // SUPERSEDED BY Cash Drawer 1C: one invoke, the drawer channel, no
+    // arguments, inside the app://poscanvas block — not a general IPC handle.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
+    expect(preload.slice(preload.indexOf("if (isPackagedRuntime) {"))).toContain("ipcRenderer.invoke");
+    expect(preload.slice(0, preload.indexOf("if (isPackagedRuntime) {"))).not.toContain("ipcRenderer.invoke");
     expect(preload).not.toMatch(/exposeInMainWorld\(\s*["']ipc/);
     expect(preload).not.toMatch(/require\(["'](fs|path|child_process|os|net)["']\)/);
     expect(preload).not.toContain("process.env");
@@ -488,7 +495,9 @@ describe("the bridge is invisible to the hosted page", () => {
       preload.indexOf("if (isLocalPage) {"),
       preload.indexOf("} else {")
     );
-    const identityBranch = preload.slice(preload.indexOf("} else {"));
+    // SUPERSEDED BY Cash Drawer 1C: the branch ends where the separately-gated
+    // drawer block begins; the identity branch itself is unchanged.
+    const identityBranch = preload.slice(preload.indexOf("} else {"), preload.indexOf("const isPackagedRuntime"));
 
     expect(retryBranch).toContain('exposeInMainWorld("posCanvasShell"');
     expect(retryBranch).not.toContain("posCanvasDesktop");

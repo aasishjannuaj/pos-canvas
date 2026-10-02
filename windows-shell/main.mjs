@@ -27,6 +27,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readDesktopServerUrl } from "./serverUrl.mjs";
 import { createNavigationPolicy } from "./navigationPolicy.mjs";
 import { APP_ORIGIN, APP_SCHEME, resolveAppAssetPath } from "./appProtocol.mjs";
+import {
+  CASH_DRAWER_CHANNEL,
+  createOpenCashDrawerHandler,
+  isTrustedCashDrawerSender,
+} from "./cashDrawerIpc.mjs";
 
 const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
@@ -156,6 +161,12 @@ if (!hasSingleInstanceLock) {
 /** Resolved once, at startup, and never re-read. */
 let resolvedServer = null;
 
+/**
+ * v1.3 Cash Drawer Checkpoint 1C — the ids of the windows THIS shell created.
+ * A drawer request is honoured only from one of them.
+ */
+const shellWindowIds = new Set();
+
 /** Built once from the resolved URL. */
 let navigationPolicy = null;
 
@@ -245,6 +256,13 @@ function createWindow() {
   // Feature 24.3 — with the splash loaded from disk first, "something to look
   // at" now arrives in milliseconds and is the POS Canvas brand screen, so this
   // fires almost immediately instead of waiting on the network.
+  // Cash Drawer 1C — registered for the window's lifetime, and only for it.
+  const windowId = window.id;
+  shellWindowIds.add(windowId);
+  window.on("closed", () => {
+    shellWindowIds.delete(windowId);
+  });
+
   window.once("ready-to-show", () => {
     window.show();
   });
@@ -465,6 +483,35 @@ ipcMain.on(RETRY_CHANNEL, (event) => {
     loadDeviceRuntime(window);
   }
 });
+
+/**
+ * v1.3 Cash Drawer Checkpoint 1C — posCanvasCashDrawer.openCashDrawer().
+ *
+ * THE LISTENER TAKES ONLY THE EVENT. There is no payload parameter, so nothing
+ * the renderer sends can reach printer code. Every decision lives in
+ * cashDrawerIpc.mjs and is unit-tested; this is wiring.
+ *
+ *   isTrusted      — main frame, app://poscanvas, one of OUR windows, win32.
+ *                    Anything else answers `unavailable` with no printer work.
+ *   listQueueNames — Electron's own enumeration; only the OS names are used.
+ *   loadSpooler    — koffi and winspool.drv, imported lazily on first use, so
+ *                    the shell boots without loading any native code.
+ */
+const handleOpenCashDrawer = createOpenCashDrawerHandler({
+  isTrusted: (event) =>
+    isTrustedCashDrawerSender({
+      senderFrame: event.senderFrame,
+      mainFrame: event.sender.mainFrame,
+      senderWindowId: BrowserWindow.fromWebContents(event.sender)?.id ?? null,
+      shellWindowIds,
+      platform: process.platform,
+    }),
+  listQueueNames: async (event) =>
+    (await event.sender.getPrintersAsync()).map((printer) => printer.name),
+  loadSpooler: () => import("./win32Spooler.mjs").then((module) => module.loadWin32Spooler()),
+});
+
+ipcMain.handle(CASH_DRAWER_CHANNEL, (event) => handleOpenCashDrawer(event));
 
 // ---------------------------------------------------------------------------
 // Lifecycle

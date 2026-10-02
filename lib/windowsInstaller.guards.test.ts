@@ -308,6 +308,12 @@ describe("the packaged binary is universal", () => {
     expect(shellPackage.build.files.sort()).toEqual([
       // Feature 24.5F — the app://poscanvas protocol resolver.
       "appProtocol.mjs",
+      // Cash Drawer 1C — the main-process hardware bridge: the validated
+      // profile, the RAW job, the IPC trust check, the Win32 binding. Shell
+      // code, identical in every installer; no queue or device is configured.
+      "cashDrawerIpc.mjs",
+      "cashDrawerProfiles.mjs",
+      "cashDrawerRaw.mjs",
       "main.mjs",
       "navigationPolicy.mjs",
       "offline.html",
@@ -326,6 +332,7 @@ describe("the packaged binary is universal", () => {
       // branding, identical in every installer; nothing customer-specific.
       "splash-mark.png",
       "splash.html",
+      "win32Spooler.mjs",
     ]);
   });
 

@@ -107,3 +107,33 @@ if (isLocalPage) {
     Object.freeze({ isWindowsShell: true })
   );
 }
+
+// v1.3 Cash Drawer Checkpoint 1C — the ONE capability the POS page is given,
+// and a deliberate, narrow exception to "the hosted page cannot reach a
+// main-process action at all" above.
+//
+// A THIRD GLOBAL, NOT AN ADDITION TO posCanvasDesktop. That object is a fact
+// the platform detection reads, and it stays one frozen boolean. This one is a
+// capability, kept apart for the same reason the other two are.
+//
+// ONLY THE PACKAGED RUNTIME GETS IT: scheme `app:` and host `poscanvas`, the
+// values in appProtocol.mjs (a sandboxed preload cannot import them). Not the
+// splash, not the offline fallback, not a development server's http(s) origin.
+// The main process checks the sending frame again, independently.
+//
+// IT CARRIES NOTHING. openCashDrawer takes no parameters and invokes the
+// channel with no arguments, so anything a caller passes is dropped here:
+// no sale id, no bytes, no printer, no path, no address, no pulse. Which queue
+// and which command are decided in the main process from built-in, physically
+// validated data. The answer is one of the status strings, nothing more.
+const isPackagedRuntime =
+  window.location.protocol === "app:" && window.location.host === "poscanvas";
+
+if (isPackagedRuntime) {
+  contextBridge.exposeInMainWorld(
+    "posCanvasCashDrawer",
+    Object.freeze({
+      openCashDrawer: () => ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer"),
+    })
+  );
+}
