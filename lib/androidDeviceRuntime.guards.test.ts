@@ -50,6 +50,25 @@ function packagedBundle(): string | null {
   return js.length === 0 ? null : readFileSync(join(dir, js[0]), "utf-8");
 }
 
+/**
+ * The built runtime's entry document, when one is present. Absent on a clean
+ * checkout, exactly like packagedBundle() above.
+ *
+ * WHY THIS EXISTS AT ALL. The boot test below read index.html directly, with no
+ * presence check, while both of its siblings in the same group gated on
+ * packagedBundle(). So on a pristine checkout — where the packaged runtime is a
+ * gitignored artifact nobody has built yet — that one test threw ENOENT and
+ * failed the whole suite for a missing OPTIONAL artifact. This applies the
+ * group's existing policy to the file the test actually reads: index.html is
+ * checked rather than the assets directory, so a half-built runtime cannot slip
+ * past the gate and throw anyway.
+ */
+function packagedEntryHtml(): string | null {
+  const html = join(PACKAGED, "index.html");
+
+  return exists(html) ? read(html) : null;
+}
+
 // ---------------------------------------------------------------------------
 // The app boots from itself
 // ---------------------------------------------------------------------------
@@ -273,7 +292,9 @@ describe("the packaged bundle contains a POS and no server", () => {
   });
 
   it("needs nothing from the hosted app in order to boot", () => {
-    const html = readFileSync(join(repoRoot, PACKAGED, "index.html"), "utf-8");
+    const html = packagedEntryHtml();
+
+    if (html === null) return;
 
     // Every script and stylesheet the document loads is relative and local.
     const refs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((m) => m[1]);

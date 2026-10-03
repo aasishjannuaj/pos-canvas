@@ -48,11 +48,33 @@ const DRAWER_TOKENS = [
   "drawer-events",
 ];
 
+/**
+ * Generated output that is not authored source, excluded BY PATH.
+ *
+ * `npm run windows:runtime` builds the shared device bundle into
+ * windows-shell/runtime/. That is gitignored artifact, it is named in the
+ * shell's electron-builder `files`, and it legitimately contains the DeviceApp's
+ * drawer code — because packaging that code is its entire job. Scanning it made
+ * the designated-module guard below fail on any machine that had ever built the
+ * installer while a pristine checkout passed, which means the guard was
+ * reporting on local build state rather than on where drawer code is authored.
+ *
+ * BY PATH, NOT BY BASENAME, AND THAT DISTINCTION IS LOAD-BEARING. Adding
+ * "runtime" to the basename list below would also skip components/runtime/,
+ * which holds PosRuntime.tsx and is exactly what productionFiles must keep
+ * scanning — silently retiring the guards on the completed-sale report, the
+ * coordinator's importers and window.print(). So one path is excluded, by
+ * value, and the invariant itself is left alone.
+ */
+const GENERATED_NOT_AUTHORED = new Set([join("windows-shell", "runtime")]);
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     if (entry === "node_modules" || entry === ".next" || entry === "build" || entry === "dist") continue;
 
     const path = join(dir, entry);
+
+    if (GENERATED_NOT_AUTHORED.has(path)) continue;
 
     if (statSync(path).isDirectory()) walk(path, out);
     else if (/\.(ts|tsx|js|mjs|cjs)$/.test(entry)) out.push(path);
