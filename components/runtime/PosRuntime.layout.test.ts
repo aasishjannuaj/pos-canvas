@@ -99,3 +99,163 @@ describe("the intended scroll container still owns vertical scrolling", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.3 RC-polish — the Search / Scan focus request
+//
+// SOURCE-LEVEL, AND THAT IS A REAL LIMIT. This repository has no DOM test
+// environment, so none of these prove that a caret moved. What they prove is
+// the thing that was actually at risk: that focus is requested at exactly two
+// moments and cannot be requested at any other, which is a property of where
+// the increment sits rather than of the browser's behaviour.
+// ---------------------------------------------------------------------------
+
+describe("the Search / Scan focus request", () => {
+  const closeCheckout = markup.slice(
+    markup.indexOf("function closeCheckout()"),
+    markup.indexOf("function selectPaymentMethod(")
+  );
+
+  it("is a monotonic counter, not a boolean", () => {
+    // A flag already `true` would make the second consecutive sale request
+    // nothing. The value is meaningless; only the change matters.
+    expect(markup).toContain("const [scanFocusRequest, setScanFocusRequest] = useState(0);");
+    expect(closeCheckout).toContain("setScanFocusRequest((previous) => previous + 1);");
+  });
+
+  it("is requested from exactly one place in the whole runtime", () => {
+    expect([...markup.matchAll(/setScanFocusRequest\(/g)]).toHaveLength(1);
+    expect(closeCheckout).toContain("setScanFocusRequest(");
+  });
+
+  it("is requested only when a COMPLETED sale is dismissed", () => {
+    expect(closeCheckout).toContain('if (checkoutStatus === "success") {');
+
+    // The success check comes first, so no other dismissal path can reach it.
+    expect(closeCheckout.indexOf('checkoutStatus === "success"')).toBeLessThan(
+      closeCheckout.indexOf("setScanFocusRequest(")
+    );
+  });
+
+  it("cannot be requested by a cancel", () => {
+    // closeCheckout IS the cancel path — the same function the Cancel control
+    // calls — so the guard above is what separates the two. The reset to
+    // "idle" must happen AFTER the guard, or a cancel would read as a success.
+    expect(closeCheckout.indexOf('checkoutStatus === "success"')).toBeLessThan(
+      closeCheckout.indexOf('setCheckoutStatus("idle")')
+    );
+  });
+
+  it("cannot be requested by a failed or errored sale", () => {
+    // Nothing on a failure path touches it: the only call site is inside the
+    // success-guarded branch asserted above.
+    for (const failurePath of [
+      "setSaleSaveError",
+      "onSaleRejected",
+      "setCheckoutStatus(\"error\")",
+    ]) {
+      const at = markup.indexOf(failurePath);
+
+      if (at === -1) continue;
+
+      const window = markup.slice(at, at + 400);
+
+      expect(`${failurePath} does not request focus`).toBe(
+        `${failurePath} does not request focus`
+      );
+      expect(window).not.toContain("setScanFocusRequest");
+    }
+  });
+
+  it("is handed to the product browser and nowhere else", () => {
+    expect(markup).toContain("scanFocusRequest={scanFocusRequest}");
+    expect([...markup.matchAll(/scanFocusRequest=\{/g)]).toHaveLength(1);
+  });
+
+  it("is the runtime's only focus mechanism", () => {
+    // PosRuntime must not reach into the field itself, and must not acquire a
+    // second way to move the caret.
+    for (const banned of [
+      "autoFocus",
+      ".focus()",
+      "document.activeElement",
+      "forwardRef",
+      "useImperativeHandle",
+    ]) {
+      expect(`${banned} is absent from PosRuntime`).toBe(`${banned} is absent from PosRuntime`);
+      expect(markup).not.toContain(banned);
+    }
+  });
+
+  it("is not polled, timed or re-asserted", () => {
+    const stateBlock = markup.slice(
+      markup.indexOf("const [scanFocusRequest"),
+      markup.indexOf("function closeCheckout()")
+    );
+
+    for (const banned of ["setInterval", "requestAnimationFrame"]) {
+      expect(`${banned} does not drive focus`).toBe(`${banned} does not drive focus`);
+      expect(stateBlock).not.toContain(banned);
+    }
+  });
+});
+
+describe("the Builder preview does not request focus", () => {
+  const preview = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "editor", "EditorPreview.tsx"),
+    "utf-8"
+  );
+
+  it("omits scanFocusRequest entirely, so the owner keeps the caret", () => {
+    // ABSENCE, not detection. The browsers' effect returns early when the prop
+    // is undefined, so the Builder never pulls focus out of a field the owner
+    // is typing in — and no device or environment check exists anywhere.
+    expect(preview).not.toContain("scanFocusRequest");
+  });
+});
+
+describe("Liquor and Retail focus identically", () => {
+  const layoutsDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "editor",
+    "pos-layouts"
+  );
+
+  const browsers = ["LiquorStoreBrowser.tsx", "RetailStoreBrowser.tsx"].map((name) => ({
+    name,
+    src: readFileSync(join(layoutsDir, name), "utf-8"),
+  }));
+
+  it("both declare the same optional inbound prop", () => {
+    for (const { name, src } of browsers) {
+      expect(`${name} declares scanFocusRequest`).toBe(`${name} declares scanFocusRequest`);
+      expect(src).toContain("scanFocusRequest?: number;");
+    }
+  });
+
+  it("both focus the same way, through their own private ref", () => {
+    for (const { name, src } of browsers) {
+      expect(`${name} focus mechanism`).toBe(`${name} focus mechanism`);
+      expect(src).toContain("const searchInputRef = useRef<HTMLInputElement>(null);");
+      expect(src).toContain("ref={searchInputRef}");
+      expect(src).toContain("searchInputRef.current?.focus();");
+      expect(src).toContain("}, [scanFocusRequest]);");
+      expect(src).toContain("if (scanFocusRequest === undefined) {");
+    }
+  });
+
+  it("the switch forwards the request to both, and only to those two", () => {
+    const index = readFileSync(join(layoutsDir, "index.tsx"), "utf-8");
+
+    expect([...index.matchAll(/scanFocusRequest=\{scanFocusRequest\}/g)]).toHaveLength(2);
+    // The grids have no Search / Scan field and must not receive it.
+    for (const grid of ["ProductGridBrowser", "ServiceGridBrowser", "MenuGridBrowser"]) {
+      const at = index.indexOf(`<${grid} {...layoutProps}`);
+
+      expect(`${grid} receives no focus request`).toBe(`${grid} receives no focus request`);
+      expect(at).toBeGreaterThan(-1);
+      expect(index.slice(at, at + 120)).not.toContain("scanFocusRequest");
+    }
+  });
+});

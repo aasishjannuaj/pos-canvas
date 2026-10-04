@@ -189,6 +189,28 @@ export function resolveCatalogItems(input: {
  * menuItems passed in. A stale or removed id resolves to null rather than to
  * whatever now sits in that position.
  */
+export type BarcodeActivation =
+  /** An exact, usable match. `item` is the CURRENT catalogue entry. */
+  | { status: "activated"; item: MenuItem }
+  /**
+   * The index was usable and this value is simply not in it.
+   *
+   * THE ONLY OUTCOME A CALLER MAY EVER REPORT TO THE CASHIER, and even then
+   * only together with a fact this function does not have — see the note below
+   * about why "not in the index" is not the same as "worth complaining about".
+   */
+  | { status: "not_found" }
+  /**
+   * The question could not be answered safely, so nothing was activated.
+   *
+   * Covers a catalogue the shared builder refused (a duplicated barcode) and an
+   * id the catalogue no longer has. Deliberately NOT merged with `not_found`:
+   * a duplicate is a configuration fault that would sell one product at
+   * another's price, and telling a cashier "no matching product" about it would
+   * be a lie that hides a real problem.
+   */
+  | { status: "unavailable" };
+
 export function resolveBarcodeActivation(input: {
   /** The catalogue as it is now. */
   menuItems: readonly MenuItem[];
@@ -196,19 +218,24 @@ export function resolveBarcodeActivation(input: {
   index: BarcodeIndexResult;
   /** The complete, untouched field value. */
   value: string;
-}): MenuItem | null {
+}): BarcodeActivation {
   // FAIL SAFE on a catalogue the shared builder refused. A duplicated barcode
   // resolves to two products, and picking either sells one at the other's
   // price based on array order nobody can see.
   if (!input.index.ok) {
-    return null;
+    return { status: "unavailable" };
   }
 
   const itemId = lookupBarcode(input.index.lookup, input.value);
 
   if (itemId === null) {
-    return null;
+    return { status: "not_found" };
   }
 
-  return input.menuItems.find((item) => item.id === itemId) ?? null;
+  const item = input.menuItems.find((candidate) => candidate.id === itemId);
+
+  // A durable id the catalogue no longer has. Unsafe rather than missing: the
+  // value DID match a barcode, so "not found" would send the cashier looking
+  // for a typo that is not there.
+  return item === undefined ? { status: "unavailable" } : { status: "activated", item };
 }

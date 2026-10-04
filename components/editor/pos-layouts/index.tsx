@@ -42,6 +42,28 @@ type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
    * one, so it is passed beside the shared spread instead of inside it.
    */
   barcodeScanningEnabled: boolean;
+  /**
+   * v1.3 RC-polish — a monotonic request to focus the Search / Scan field.
+   *
+   * A NONCE, NOT A FLAG, AND NOT A CALLBACK. The host increments it; the
+   * browser's effect depends on it. That is the whole mechanism: there is no
+   * imperative handle, no forwarded ref, and no focus callback travelling back
+   * up, so nothing above the browser can reach the input and nothing below can
+   * ask for focus at a moment the host did not choose.
+   *
+   * OPTIONAL, AND OMITTING IT IS WHAT KEEPS THE BUILDER STILL. The live till
+   * (PosRuntime) passes it, so the field is focused on mount and again after a
+   * completed sale. EditorPreview does not pass it, so the effect returns
+   * without touching focus and the Builder's own inputs keep the caret. This is
+   * deliberately an absent prop rather than a device or environment check —
+   * there is no device-class detection anywhere in this path.
+   *
+   * Passed beside the shared spread for the same reason as
+   * barcodeScanningEnabled: Menu Grid, Product Grid and Service Grid have no
+   * Search / Scan field and must not gain a focus concept because two variants
+   * have one.
+   */
+  scanFocusRequest?: number;
   // Feature 18.2 — hosts receive the chosen selections alongside the item.
   // Omitted for a product with no modifier groups, so existing callers that
   // ignore the second argument keep working unchanged.
@@ -63,6 +85,7 @@ export default function ProductBrowser({
   layout,
   templateId,
   barcodeScanningEnabled,
+  scanFocusRequest,
   ...props
 }: ProductBrowserSwitchProps) {
   // Feature 18.2 — the single shared interception point.
@@ -102,6 +125,7 @@ export default function ProductBrowser({
         <LiquorStoreBrowser
           {...layoutProps}
           barcodeScanningEnabled={barcodeScanningEnabled}
+          scanFocusRequest={scanFocusRequest}
         />
       );
     }
@@ -114,6 +138,7 @@ export default function ProductBrowser({
         <RetailStoreBrowser
           {...layoutProps}
           barcodeScanningEnabled={barcodeScanningEnabled}
+          scanFocusRequest={scanFocusRequest}
         />
       );
     }

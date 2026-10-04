@@ -118,4 +118,73 @@ body {
     .receipt-print-area:not([data-print-exclusive]) * {
     visibility: hidden;
   }
+
+  /* v1.3 RC-polish — the Cash Drop slips, and why they outrank everything.
+
+     THE DROP IS STRICTLY DOMINANT. The rule above arbitrates between an
+     exclusive area and non-exclusive ones, which was enough while exactly one
+     screen claimed exclusivity. The Cash Movement panel is a second
+     full-viewport overlay, and it can sit ABOVE a still-mounted PosRuntime
+     whose Sales-history detail has already claimed the valueless marker — two
+     exclusive areas, both at `left: 0; top: 0`, overprinting into garbage and
+     handing a cashier a sale receipt fused with a cash slip.
+
+     So this marker carries a VALUE, and `:not([data-print-exclusive="cash-movement"])`
+     suppresses the other claimant too. `[data-print-exclusive]` in the rule
+     above still matches this element — attribute presence, not value — so the
+     drop is never suppressed by it, and when no drop is mounted this block's
+     :has() does not match and nothing above changes. */
+  body:has(.receipt-print-area[data-print-exclusive="cash-movement"])
+    .receipt-print-area:not([data-print-exclusive="cash-movement"]),
+  body:has(.receipt-print-area[data-print-exclusive="cash-movement"])
+    .receipt-print-area:not([data-print-exclusive="cash-movement"]) * {
+    visibility: hidden;
+  }
+
+  /* STATIC, DELIBERATELY, AND DECLARED AFTER `.receipt-print-area`.
+
+     A receipt is one page, so absolute positioning at the page origin is fine
+     for it. Two slips are two pages, and a page break inside an absolutely
+     positioned box is not reliably honoured — the second slip would land on
+     top of the first instead of on its own page. Normal flow is what makes
+     `break-before: page` below actually mean something. */
+  .cash-drop-print-area {
+    position: static;
+    max-width: 320px;
+    padding: 12px;
+  }
+
+  /* ONE SLIP PER PAGE, so an 80mm roll feeds twice and the cashier can tear
+     them apart: copy 1 goes with the cash, copy 2 stays for the store. The
+     break is BEFORE each slip after the first, so a single slip never emits a
+     trailing blank page. */
+  .cash-drop-slip {
+    break-inside: avoid;
+  }
+
+  .cash-drop-slip + .cash-drop-slip {
+    break-before: page;
+  }
+
+  .cash-drop-slip-title {
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .cash-drop-slip-amount {
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  .cash-drop-slip-copy,
+  .cash-drop-slip-id {
+    font-size: 11px;
+  }
+
+  /* Space to actually sign in. Copy 1 is handed over with the money, so the
+     line has to survive being printed on a narrow roll. */
+  .cash-drop-slip-signature {
+    margin-top: 24px;
+    font-size: 11px;
+  }
 }

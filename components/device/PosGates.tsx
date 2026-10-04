@@ -12,7 +12,7 @@
 // and call callbacks.
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EmployeeSession } from "@/lib/employeeSession";
 import type { LoginEmployee } from "@/lib/employeeSession";
 import type { RosterState } from "@/lib/employeeRoster";
@@ -913,6 +913,47 @@ export function CashMovementPanel({
   const [noteText, setNoteText] = useState("");
   const [reviewing, setReviewing] = useState(false);
 
+  // v1.3 RC-polish — which movement has already been sent to the printer.
+  //
+  // A REF AND NOT STATE, because printing must not re-render anything, and
+  // because this exists purely to make the effect below idempotent. React may
+  // render this panel many times holding the same `result`; the drop must reach
+  // the printer once per MOVEMENT, not once per render.
+  const printedMovementIdRef = useRef<string | null>(null);
+
+  // v1.3 RC-polish — the two Cash Drop slips.
+  //
+  // DOWNSTREAM OF AUTHORITY, AND NOTHING ELSE. This runs only because `result`
+  // already arrived: the movement is recorded, the server rendered the amount
+  // and the instant, and the ledger is settled whatever happens next. It takes
+  // no decision, writes nothing, and returns nothing.
+  //
+  // CASH DROP ONLY. Paid In and Paid Out produce no slip, and the condition is
+  // here at the call site rather than inside a shared receipt component on
+  // purpose — a slip parameterised by movement type would quietly start
+  // printing for all three the moment somebody reused it.
+  //
+  // FIRE AND FORGET. window.print() is not awaited and its outcome is never
+  // inspected, matching the rule the receipt print paths already follow. A
+  // printer that is out of paper, offline or cancelled leaves an authoritative
+  // cash movement that simply has no slip — which is a paper problem, not a
+  // money problem. Nothing here can reverse the movement, retry the request,
+  // mint another request id or write a second record: none of those things is
+  // reachable from this component.
+  useEffect(() => {
+    if (result === null || !result.ok || result.movementType !== "cash_drop") {
+      return;
+    }
+
+    if (printedMovementIdRef.current === result.movementId) {
+      return;
+    }
+
+    printedMovementIdRef.current = result.movementId;
+
+    window.print();
+  }, [result]);
+
   // THE SERVER'S ANSWER, SHOWN AS IT CAME. The amount and the instant are the
   // ones that were stored, so what the employee reads matches the record.
   if (result !== null && result.ok) {
@@ -930,6 +971,47 @@ export function CashMovementPanel({
             Done
           </button>
         </div>
+
+        {/* v1.3 RC-polish — the printed Cash Drop record: TWO slips, one print
+            job. Copy 1 travels with the dropped cash, copy 2 stays for the
+            store. Two slips in one job, NOT a driver copy count: the web
+            platform has no way to ask for N copies, so asking for two pages is
+            the only way to get two slips deterministically.
+
+            `receipt-print-area` is reused so the existing off-screen-on-screen
+            and reveal-in-print rules apply unchanged.
+            data-print-exclusive="cash-movement" is a STRONGER claim than the
+            valueless marker Sales history uses: this panel is a full-viewport
+            overlay that can sit above a still-mounted PosRuntime, so while it
+            is showing nothing else may print — see app/globals.css. Without
+            that, a cashier with a receipt still open would be handed the sale
+            and the drop superimposed at the same origin.
+
+            Only fields the server already returned appear here. No PIN, no
+            credential, no hash, no expected cash, no drawer arithmetic. */}
+        {result.movementType === "cash_drop" && (
+          <div
+            className="receipt-print-area cash-drop-print-area"
+            data-print-exclusive="cash-movement"
+          >
+            {["Copy 1 — with the cash", "Copy 2 — store record"].map((copyLabel) => (
+              <section className="cash-drop-slip" key={copyLabel}>
+                <h2 className="cash-drop-slip-title">
+                  {getCashMovementLabel(result.movementType)}
+                </h2>
+                <p className="cash-drop-slip-copy">{copyLabel}</p>
+                <p className="cash-drop-slip-amount">{result.amount}</p>
+                {result.note !== null && <p>{result.note}</p>}
+                <p>{result.employeeName}</p>
+                <p>{result.occurredAt}</p>
+                <p className="cash-drop-slip-id">{result.movementId}</p>
+                <p className="cash-drop-slip-signature">
+                  Employee Signature: __________________
+                </p>
+              </section>
+            ))}
+          </div>
+        )}
       </div>
     );
   }

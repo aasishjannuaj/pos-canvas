@@ -367,9 +367,26 @@ describe("Enter is handled on the field, and only on the field", () => {
       "document.addEventListener",
       "window.addEventListener",
       "addEventListener",
-      "useEffect",
     ]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
       expect(browser).not.toContain(banned);
+    }
+  });
+
+  it("RC-polish: the one effect in this file installs nothing and only focuses", () => {
+    // NARROWED, NOT DROPPED. `useEffect` used to be banned outright, as a
+    // proxy for "no global listener is ever installed". The listener bans
+    // above are the actual protection and they stay; what is permitted now is
+    // exactly one effect whose entire body focuses the field.
+    expect([...browser.matchAll(/useEffect\(/g)]).toHaveLength(1);
+
+    const effect = browser.slice(browser.indexOf("useEffect("));
+    const body = effect.slice(0, effect.indexOf("}, ["));
+
+    expect(body).toContain("searchInputRef.current?.focus()");
+    for (const banned of ["addEventListener", "setInterval", "setTimeout", "requestAnimationFrame"]) {
+      expect(`effect: ${banned}`).toBe(`effect: ${banned}`);
+      expect(body).not.toContain(banned);
     }
   });
 
@@ -419,7 +436,7 @@ describe("an accepted Enter activates through the shared path exactly once", () 
 
   it("clears the field and calls the normal onAddToCart, once", () => {
     expect(handler).toContain("setSearchTerm(\"\");");
-    expect(handler).toContain("onAddToCart(currentItem);");
+    expect(handler).toContain("onAddToCart(activation.item);");
     expect([...handler.matchAll(/onAddToCart\(/g)]).toHaveLength(1);
   });
 
@@ -509,44 +526,71 @@ describe("resolveBarcodeActivation", () => {
   ];
   const index = buildBarcodeIndex(CODED);
 
+  /**
+   * The three outcomes, asserted as outcomes.
+   *
+   * WHY NOT `toBeNull()` ANY MORE. The RC-polish contract replaced one `null`
+   * that meant three different things with a named union, and the whole point
+   * is that `not_found` ("this value is not in the catalogue") and
+   * `unavailable` ("the catalogue could not be asked safely") are no longer
+   * interchangeable. Asserting only "nothing activated" would pass for either
+   * and would not notice them swapping, which is exactly the regression the
+   * split exists to prevent.
+   */
+  const activated = (value: string, menuItems: MenuItem[] = CODED, idx = index) => {
+    const result = resolveBarcodeActivation({ menuItems, index: idx, value });
+
+    expect(result.status).toBe("activated");
+
+    // Narrowing for the caller; the assertion above is what actually fails.
+    if (result.status !== "activated") throw new Error("unreachable");
+
+    return result.item;
+  };
+
+  const statusOf = (value: string, menuItems: MenuItem[] = CODED, idx = index) =>
+    resolveBarcodeActivation({ menuItems, index: idx, value }).status;
+
   it("resolves an exact hit to the current item", () => {
-    const hit = resolveBarcodeActivation({ menuItems: CODED, index, value: "012345678905" });
-    expect(hit?.id).toBe("b1");
+    expect(activated("012345678905").id).toBe("b1");
   });
 
   it("preserves leading zeros — the zero-stripped value is a different code", () => {
-    expect(
-      resolveBarcodeActivation({ menuItems: CODED, index, value: "12345678905" })
-    ).toBeNull();
+    // NOT_FOUND, specifically: the index was perfectly usable and this is
+    // simply a different code. Reporting it as `unavailable` would hide a
+    // genuine "no such product".
+    expect(statusOf("12345678905")).toBe("not_found");
   });
 
   it("is case-sensitive, because Code 39/128 alphabets are", () => {
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "A1b2" })?.id).toBe("b2");
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "a1B2" })).toBeNull();
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "a1b2" })).toBeNull();
+    expect(activated("A1b2").id).toBe("b2");
+    expect(statusOf("a1B2")).toBe("not_found");
+    expect(statusOf("a1b2")).toBe("not_found");
   });
 
   it("does not activate on a prefix", () => {
-    expect(
-      resolveBarcodeActivation({ menuItems: CODED, index, value: "01234567890" })
-    ).toBeNull();
+    expect(statusOf("01234567890")).toBe("not_found");
   });
 
   it("does not activate on a partial or extended value", () => {
     for (const value of ["2345678905", "0123456789051", "0123 45678905"]) {
-      expect(resolveBarcodeActivation({ menuItems: CODED, index, value })).toBeNull();
+      expect(`${value} is not found`).toBe(`${value} is not found`);
+      expect(statusOf(value)).toBe("not_found");
     }
   });
 
   it("does not activate on a manual-search match", () => {
     // "IPA" finds a product in the search box; it is not that product's code.
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "IPA" })).toBeNull();
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "lager" })).toBeNull();
+    // This is THE case that must stay silent in presentation, and it is
+    // `not_found` — which is why `not_found` alone may never drive a warning.
+    expect(statusOf("IPA")).toBe("not_found");
+    expect(statusOf("lager")).toBe("not_found");
   });
 
-  it("returns null for an empty or whitespace value", () => {
+  it("reports not_found for an empty or whitespace value", () => {
     for (const value of ["", "   "]) {
-      expect(resolveBarcodeActivation({ menuItems: CODED, index, value })).toBeNull();
+      expect(`${JSON.stringify(value)} is not found`).toBe(`${JSON.stringify(value)} is not found`);
+      expect(statusOf(value)).toBe("not_found");
     }
   });
 
@@ -556,43 +600,64 @@ describe("resolveBarcodeActivation", () => {
     const repriced = CODED.map((i) =>
       i.id === "b1" ? { ...i, price: 99.99, name: "Domestic Lager 6-Pack (new)" } : i
     );
-    const hit = resolveBarcodeActivation({
-      menuItems: repriced,
-      index,
-      value: "012345678905",
-    });
-    expect(hit?.price).toBe(99.99);
+    const hit = activated("012345678905", repriced);
+
+    expect(hit.price).toBe(99.99);
     expect(hit).toBe(repriced[0]); // the current object, not the indexed one
   });
 
-  it("activates nothing when the id no longer exists in the catalogue", () => {
+  it("is UNAVAILABLE, not not_found, when the id no longer exists", () => {
+    // THE DISTINCTION THAT MATTERS. The value DID match a barcode; the product
+    // behind it has gone. Calling that "no matching product" would send a
+    // cashier hunting for a typo that is not there.
     const without = CODED.filter((i) => i.id !== "b1");
-    expect(
-      resolveBarcodeActivation({ menuItems: without, index, value: "012345678905" })
-    ).toBeNull();
+
+    expect(statusOf("012345678905", without)).toBe("unavailable");
   });
 
-  it("FAILS SAFE on a duplicated catalogue rather than picking a winner", () => {
+  it("FAILS SAFE as UNAVAILABLE on a duplicated catalogue rather than picking a winner", () => {
     const dupes: MenuItem[] = [
       item({ id: "d1", name: "Cheap", price: 1, barcode: "999" }),
       item({ id: "d2", name: "Expensive", price: 99, barcode: "999" }),
     ];
     const refused = buildBarcodeIndex(dupes);
+
     expect(refused.ok).toBe(false);
-    expect(
-      resolveBarcodeActivation({ menuItems: dupes, index: refused, value: "999" })
-    ).toBeNull();
+    // A configuration fault, never reported to the cashier as a missing
+    // product: one of these would sell at the other's price.
+    expect(statusOf("999", dupes, refused)).toBe("unavailable");
   });
 
-  it("resolves nothing at all when the capability is disabled", () => {
+  it("activates nothing when the capability is disabled", () => {
+    // The builder yields an EMPTY BUT USABLE index when disabled, so the
+    // honest answer here is not_found: this function cannot tell "switched
+    // off" from "no product has a barcode", and lib/barcode.ts is unchanged.
+    // Nothing activates either way, and the component's own
+    // `barcodeScanningEnabled` reject (asserted separately) is what actually
+    // enforces the capability — this is defence in depth behind it.
     const off = buildBarcodeIndex(CODED, { enabled: false });
-    expect(
-      resolveBarcodeActivation({ menuItems: CODED, index: off, value: "012345678905" })
-    ).toBeNull();
+
+    expect(statusOf("012345678905", CODED, off)).not.toBe("activated");
+    expect(statusOf("012345678905", CODED, off)).toBe("not_found");
   });
 
   it("ignores an item with no barcode", () => {
-    expect(resolveBarcodeActivation({ menuItems: CODED, index, value: "b4" })).toBeNull();
+    expect(statusOf("b4")).toBe("not_found");
+  });
+
+  it("returns one of exactly three statuses, and nothing else", () => {
+    const seen = new Set<string>();
+
+    for (const value of ["012345678905", "A1b2", "nope", "", "IPA"]) {
+      seen.add(statusOf(value));
+    }
+    seen.add(statusOf("012345678905", CODED.filter((i) => i.id !== "b1")));
+
+    for (const status of seen) {
+      expect(["activated", "not_found", "unavailable"]).toContain(status);
+    }
+    // All three are actually reachable from this catalogue.
+    expect(seen).toEqual(new Set(["activated", "not_found", "unavailable"]));
   });
 
   it("never mutates its inputs", () => {
@@ -602,7 +667,7 @@ describe("resolveBarcodeActivation", () => {
   });
 });
 
-describe("a miss is indistinguishable from ordinary search", () => {
+describe("a miss is named in logic but still silent in the component", () => {
   const raw = read(BROWSER);
   const browser = code(raw);
 
@@ -631,7 +696,7 @@ describe("a miss is indistinguishable from ordinary search", () => {
     );
     // The miss branch is a bare return: it clears nothing and sets nothing.
     const missBranch = handler.slice(
-      handler.indexOf("if (currentItem === null)"),
+      handler.indexOf('if (activation.status !== "activated")'),
       handler.indexOf("setSearchTerm(\"\");")
     );
     expect(missBranch).toContain("return;");
@@ -651,10 +716,82 @@ describe("a miss is indistinguishable from ordinary search", () => {
 describe("no focus stealing and no global scanner architecture", () => {
   const browser = code(read(BROWSER));
 
-  it("never focuses itself", () => {
-    for (const banned of ["autoFocus", ".focus()", "useRef", "createRef", "tabIndex={-1}"]) {
+  /**
+   * RC-polish narrowed this rule from "never focuses itself" to "never steals
+   * focus", which is what it always meant.
+   *
+   * The field may be focused when the HOST asks — on activation, and once after
+   * a completed sale. What stays forbidden is every mechanism that could take
+   * focus at a moment the cashier did not choose: autoFocus (fires on any
+   * mount, including the Builder's), polling, a timer, a listener, reading
+   * document.activeElement, or re-asserting focus from onFocus/onBlur.
+   */
+  it("never steals focus", () => {
+    for (const banned of [
+      "autoFocus",
+      "createRef",
+      "tabIndex={-1}",
+      "document.activeElement",
+      "setInterval",
+      "setTimeout",
+      "requestAnimationFrame",
+      "onFocus",
+      "onBlur",
+      "blur()",
+    ]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
       expect(browser).not.toContain(banned);
     }
+  });
+
+  it("holds exactly one ref, for the Search / Scan input, and never shares it", () => {
+    expect([...browser.matchAll(/useRef[(<]/g)]).toHaveLength(1);
+    expect(browser).toContain("const searchInputRef = useRef<HTMLInputElement>(null)");
+    expect(browser).toContain("ref={searchInputRef}");
+
+    // The ref must not escape: no forwarding, no imperative handle, no
+    // callback that hands the element or a focus function to a parent.
+    for (const banned of [
+      "forwardRef",
+      "useImperativeHandle",
+      "onFocusRequest",
+      "onSearchRef",
+      "inputRef={",
+    ]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
+      expect(browser).not.toContain(banned);
+    }
+  });
+
+  it("focuses exactly once, from the nonce effect only", () => {
+    expect([...browser.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
+    // The dependency is the nonce — not [] (which could never fire again) and
+    // not a value that changes on ordinary renders.
+    expect(browser).toContain("}, [scanFocusRequest]);");
+  });
+
+  it("does nothing when the host does not ask — this is what keeps the Builder still", () => {
+    // An ABSENT prop, not a device or environment check. EditorPreview simply
+    // omits it, so the effect returns before touching focus.
+    expect(browser).toContain("if (scanFocusRequest === undefined) {");
+
+    const effect = browser.slice(browser.indexOf("useEffect("));
+    const body = effect.slice(0, effect.indexOf("}, ["));
+
+    expect(body.indexOf("scanFocusRequest === undefined")).toBeLessThan(
+      body.indexOf("searchInputRef.current?.focus()")
+    );
+
+    for (const banned of ["isCapacitor", "navigator.", "ontouchstart", "matchMedia", "userAgent"]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
+      expect(browser).not.toContain(banned);
+    }
+  });
+
+  it("the focus request is an inbound number and nothing else", () => {
+    expect(browser).toContain("scanFocusRequest?: number;");
+    // No local state drives focus: the browser cannot ask for it itself.
+    expect(browser).not.toContain("setScanFocusRequest");
   });
 
   it("installs no global listener and no scanner engine", () => {

@@ -279,6 +279,23 @@ export default function PosRuntime({
   const [uncertainSale, setUncertainSale] = useState<UncertainSale | null>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
 
+  /**
+   * v1.3 RC-polish — how many times the Search / Scan field has been asked to
+   * take focus.
+   *
+   * A COUNTER, NOT A BOOLEAN, because the request has to be repeatable. Two
+   * sales in a row must produce two distinct asks, and a flag that was already
+   * `true` would produce one. It only ever increases; its value means nothing,
+   * only the change does.
+   *
+   * IT LIVES HERE AND NOT IN THE BROWSER because the browser cannot see the
+   * event. A completed sale is dismissed in an overlay that sits above a
+   * product panel which never unmounted, so nothing down there changes when
+   * the cashier presses Done — which is exactly why this exists rather than a
+   * mount effect.
+   */
+  const [scanFocusRequest, setScanFocusRequest] = useState(0);
+
   // Feature 14.3 — seeded from the server-loaded starting count
   // (getProjectOrders().orders.length, capped at 20 — see
   // app/runtime/[id]/page.tsx for the known MVP limitation this carries),
@@ -462,6 +479,26 @@ export default function PosRuntime({
   }
 
   function closeCheckout() {
+    // THE ONE PLACE FOCUS IS REQUESTED, and it is guarded on success.
+    //
+    // `checkoutStatus` is still the status of the attempt being dismissed,
+    // because this runs before the reset below. So a sale that SUCCEEDED
+    // returns the cashier to the selling screen ready to scan the next
+    // customer's first item, while a cancel ("idle"), a decline, a failed save
+    // or an error leaves the caret exactly where the cashier put it — they are
+    // mid-recovery, and yanking focus into a search box is the last thing that
+    // should happen to them.
+    //
+    // The only other thing that can focus the field is mounting, which the
+    // gates already cause when the selling surface becomes active again.
+    //
+    // Written as line comments on purpose: a /** */ block opening immediately
+    // after a `{` reads as a JSX `{/* ... */}` comment to the regex strippers
+    // several guards use, and makes them swallow real markup.
+    if (checkoutStatus === "success") {
+      setScanFocusRequest((previous) => previous + 1);
+    }
+
     setCheckoutOpen(false);
     setSelectedPaymentMethod(null);
     setCheckoutStatus("idle");
@@ -949,6 +986,7 @@ export default function PosRuntime({
             layout={config.project.layout}
             templateId={config.project.templateId}
             barcodeScanningEnabled={isBarcodeScanningEnabled(config.features)}
+            scanFocusRequest={scanFocusRequest}
             menuItems={menuItems}
             selectedItemId={null}
             editorMode="preview"

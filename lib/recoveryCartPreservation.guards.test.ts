@@ -230,7 +230,22 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
     }
   });
 
-  it("no template introduces one either", () => {
+  /**
+   * The two Search / Scan fields are the ONE reviewed exception, and they are
+   * named rather than pattern-matched.
+   *
+   * v1.3 RC-polish — Control Room authorised a controlled focus mechanism on
+   * the Liquor and Retail search fields: the field takes focus when the live
+   * till asks, on activation and once after a completed sale. Nothing else in
+   * either tree may focus anything, and the exception is spelled out file by
+   * file so a third template cannot inherit it by being added to a directory.
+   */
+  const FOCUS_EXCEPTIONS = [
+    "components/editor/pos-layouts/LiquorStoreBrowser.tsx",
+    "components/editor/pos-layouts/RetailStoreBrowser.tsx",
+  ];
+
+  const layoutAndRuntimeFiles = (): string[] => {
     const walk = (dir: string): string[] => {
       const out: string[] = [];
 
@@ -244,7 +259,11 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
       return out;
     };
 
-    for (const file of [...walk("components/editor/pos-layouts"), ...walk("components/runtime")]) {
+    return [...walk("components/editor/pos-layouts"), ...walk("components/runtime")];
+  };
+
+  it("no template introduces one either", () => {
+    for (const file of layoutAndRuntimeFiles()) {
       const source = code(read(file));
 
       // v1.3 Feature 1E-B — "barcode" was removed from this list, and ONLY
@@ -258,8 +277,7 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
       // onKeyDown is a prop on an element inside the inert subtree, and
       // `inert` makes that subtree unfocusable and non-interactive, so it
       // cannot fire while an overlay is up. A document/window listener could,
-      // which is why every one of them stays banned — along with any .focus()
-      // that could drag focus back out of inert.
+      // which is why every one of them stays banned.
       //
       // NOT a blanket addEventListener ban: PosRuntime legitimately registers
       // `beforeunload`, which warns about losing a cart and cannot mutate one.
@@ -270,14 +288,87 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
         "addEventListener(\"key",
         "addEventListener('key",
         "document.addEventListener",
-        ".focus()",
         "autoFocus",
         "wedge",
       ]) {
         expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
         expect(source).not.toContain(banned);
       }
+
+      // v1.3 RC-polish — `.focus()` moved out of the list above so the two
+      // reviewed Search / Scan fields can keep their controlled mechanism.
+      // EVERY OTHER FILE, including the whole of components/runtime, is still
+      // forbidden from focusing anything: a focus call outside the exception
+      // is exactly the thing that could drag focus back out of `inert`.
+      if (!FOCUS_EXCEPTIONS.includes(file)) {
+        expect(`${file}: .focus()`).toBe(`${file}: .focus()`);
+        expect(source).not.toContain(".focus()");
+      }
+
+      // NEITHER TREE MAY REFOCUS BY ANY OTHER ROUTE, exception or not. These
+      // are the mechanisms that would turn a one-shot request into focus
+      // stealing, or would hand the element to something that could focus it
+      // from outside the component.
+      for (const banned of [
+        "document.activeElement",
+        "setInterval",
+        "setTimeout",
+        "requestAnimationFrame",
+        "onFocus",
+        "onBlur",
+        "forwardRef",
+        "useImperativeHandle",
+      ]) {
+        expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+        expect(source).not.toContain(banned);
+      }
     }
+  });
+
+  it("the runtime itself focuses nothing at all", () => {
+    // Stated separately from the loop because it is the half that protects
+    // `inert`: PosRuntime owns the focus REQUEST (a number it hands down) and
+    // must never own the act. Every file under components/runtime is covered
+    // by the loop above; this pins the one that matters by name so the
+    // guarantee survives the file list changing.
+    for (const banned of [".focus()", "autoFocus", "document.activeElement"]) {
+      expect(`${POS_RUNTIME}: ${banned}`).toBe(`${POS_RUNTIME}: ${banned}`);
+      expect(runtime).not.toContain(banned);
+    }
+
+    // It asks by incrementing a counter, and that is the whole of its
+    // involvement.
+    expect(runtime).toContain("setScanFocusRequest((previous) => previous + 1);");
+  });
+
+  it("exactly the two reviewed fields may focus, and each exactly once", () => {
+    for (const file of FOCUS_EXCEPTIONS) {
+      const source = code(read(file));
+
+      // ONE call. A second would mean a second trigger.
+      expect(`${file}: one focus call`).toBe(`${file}: one focus call`);
+      expect([...source.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
+
+      // And it is the reviewed mechanism: a private ref, focused from one
+      // effect keyed on the host's nonce, which does nothing when the host
+      // did not ask.
+      expect(source).toContain("const searchInputRef = useRef<HTMLInputElement>(null);");
+      expect(source).toContain("searchInputRef.current?.focus();");
+      expect(source).toContain("}, [scanFocusRequest]);");
+      expect(source).toContain("if (scanFocusRequest === undefined) {");
+      expect([...source.matchAll(/useEffect\(/g)]).toHaveLength(1);
+    }
+  });
+
+  it("no other layout or runtime file may focus, even if one is added", () => {
+    // THE NEGATIVE CONTROL for the exception list itself. Adding a third
+    // template that focuses must fail the loop above, so the set of files
+    // containing `.focus()` has to equal the reviewed set exactly.
+    const focusing = layoutAndRuntimeFiles().filter((file) =>
+      code(read(file)).includes(".focus()")
+    );
+
+    expect(focusing.sort()).toEqual([...FOCUS_EXCEPTIONS].sort());
   });
 });
 

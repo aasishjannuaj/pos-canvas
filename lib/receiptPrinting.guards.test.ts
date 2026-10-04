@@ -26,6 +26,7 @@ const CSS = "app/globals.css";
 const DETAIL = "components/runtime/SalesHistoryDetail.tsx";
 const RUNTIME = "components/runtime/PosRuntime.tsx";
 const PREVIEW = "components/editor/EditorPreview.tsx";
+const GATES = "components/device/PosGates.tsx";
 
 /**
  * Every component that renders a purchased line onto paper.
@@ -86,15 +87,78 @@ describe("an overlay receipt is the only thing that prints", () => {
     expect(marked).toBeGreaterThan(printArea);
   });
 
-  it("exactly one element in the app claims exclusivity", () => {
-    // Two exclusive areas would collide with each other and the rule could not
-    // arbitrate. Only a full-viewport overlay may claim it.
-    const sources = [DETAIL, RUNTIME, PREVIEW, "components/runtime/PosCheckoutPanel.tsx"];
+  it("exactly two elements claim exclusivity, and they are RANKED", () => {
+    // RC-polish widened this from one claimant to two, and the ranking is why
+    // that is safe. Only a full-viewport overlay may claim exclusivity at all;
+    // Sales history detail and the Cash Movement panel are both one. They can
+    // be mounted together — the Cash Movement panel sits above a PosRuntime
+    // that may already be showing a history detail — so a flat "exclusive"
+    // marker could not arbitrate between them and both would print.
+    //
+    // The drop therefore carries a VALUED marker and outranks the valueless
+    // one. Anything else claiming exclusivity, or a third claimant appearing,
+    // must fail here.
+    const sources = [DETAIL, RUNTIME, PREVIEW, GATES, "components/runtime/PosCheckoutPanel.tsx"];
     const claims = sources.flatMap((file) =>
       (code(read(file)).match(/data-print-exclusive/g) ?? []).map(() => file)
     );
 
-    expect(claims).toEqual([DETAIL]);
+    expect(claims).toEqual([DETAIL, GATES]);
+
+    // The ranking itself: history is valueless, the drop names itself.
+    expect(code(read(DETAIL))).toContain('className="receipt-print-area" data-print-exclusive');
+    expect(code(read(GATES))).toContain('data-print-exclusive="cash-movement"');
+  });
+
+  it("the Cash Drop slips suppress every other print area, including an exclusive one", () => {
+    const print = printBlock();
+
+    // THE COLLISION THIS PREVENTS: a cashier with a receipt or a history
+    // detail still open would otherwise be handed that slip and the cash drop
+    // superimposed at the same origin.
+    expect(print).toContain(
+      'body:has(.receipt-print-area[data-print-exclusive="cash-movement"])'
+    );
+    expect(print).toContain('.receipt-print-area:not([data-print-exclusive="cash-movement"])');
+    // Descendants too, for the same reason the rule above needs them.
+    expect(print).toContain('.receipt-print-area:not([data-print-exclusive="cash-movement"]) *');
+  });
+
+  it("the Cash Drop print area leaves absolute positioning so two pages can exist", () => {
+    const print = printBlock();
+    const area = print.slice(print.indexOf(".cash-drop-print-area {"));
+
+    // A page break inside an absolutely positioned box is not reliably
+    // honoured; the second slip would land on top of the first.
+    expect(area.slice(0, area.indexOf("}"))).toContain("position: static;");
+
+    // Declared AFTER .receipt-print-area, or it would lose the cascade at
+    // equal specificity.
+    expect(print.indexOf(".receipt-print-area {")).toBeLessThan(
+      print.indexOf(".cash-drop-print-area {")
+    );
+  });
+
+  it("each Cash Drop slip starts its own page, and a lone slip adds no blank one", () => {
+    const print = printBlock();
+
+    expect(print).toContain(".cash-drop-slip + .cash-drop-slip {");
+    expect(print).toContain("break-before: page;");
+    // break-BEFORE on subsequent slips, never break-after on every slip, which
+    // would emit a trailing blank page.
+    expect(print).not.toContain("break-after: page;");
+  });
+
+  it("the panel renders exactly two slips, from one array, in one print area", () => {
+    const gates = code(read(GATES));
+
+    expect([...gates.matchAll(/className="cash-drop-print-area"|cash-drop-print-area/g)].length)
+      .toBeGreaterThan(0);
+    expect([...gates.matchAll(/receipt-print-area cash-drop-print-area/g)]).toHaveLength(1);
+    // Two copy labels, one map, one slip element — so the count cannot drift
+    // from the markup.
+    expect(gates).toContain('["Copy 1 — with the cash", "Copy 2 — store record"]');
+    expect([...gates.matchAll(/className="cash-drop-slip"/g)]).toHaveLength(1);
   });
 });
 

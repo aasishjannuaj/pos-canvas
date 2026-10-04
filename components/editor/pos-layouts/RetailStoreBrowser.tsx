@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { buildBarcodeIndex } from "@/lib/barcode";
 import { useProductCategories } from "./useProductCategories";
 import { resolveBarcodeActivation, resolveCatalogItems } from "./shared";
@@ -105,6 +105,13 @@ function stockBadgeClassName(item: MenuItem): string {
  */
 type RetailStoreBrowserProps = ProductBrowserProps & {
   barcodeScanningEnabled: boolean;
+  /**
+   * v1.3 RC-polish — a monotonic request to focus the Search / Scan field.
+   *
+   * See the effect below for the mechanism, and
+   * components/editor/pos-layouts/index.tsx for why it is optional.
+   */
+  scanFocusRequest?: number;
 };
 
 export default function RetailStoreBrowser({
@@ -116,6 +123,7 @@ export default function RetailStoreBrowser({
   onSelect,
   onAddToCart,
   barcodeScanningEnabled,
+  scanFocusRequest,
 }: RetailStoreBrowserProps) {
   // includeAll is the only behavioral difference this browser asks of the
   // shared hook, and the hook already supports it. Nothing here changes it.
@@ -123,6 +131,52 @@ export default function RetailStoreBrowser({
     useProductCategories(menuItems, { includeAll: true });
 
   const [searchTerm, setSearchTerm] = useState("");
+
+  /**
+   * The Search / Scan field, held privately.
+   *
+   * NOT FORWARDED, NOT AN IMPERATIVE HANDLE. The ref never leaves this
+   * component, so no parent can focus, blur, read or clear the input. The only
+   * thing that crosses the boundary is a number.
+   */
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Focus the Search / Scan field when the host asks, and at no other time.
+   *
+   * THE TWO MOMENTS THIS COVERS, and why one effect is enough for both:
+   *
+   *   activation — mounting runs the effect once. The live till remounts this
+   *                tree whenever the selling surface becomes active again,
+   *                because the employee, Auto-Lock and register gates replace
+   *                PosRuntime rather than cover it. So unlock, Ring Out and
+   *                first load all arrive here as a mount, free.
+   *   after a sale — the selling surface does NOT remount when a sale ends;
+   *                the checkout is an overlay over a tree that never went
+   *                away. There is no mount to hook, which is the entire reason
+   *                a nonce exists: PosRuntime increments it when the cashier
+   *                dismisses a COMPLETED sale, and the dependency change is
+   *                the only other thing that runs this.
+   *
+   * WHY THIS CANNOT STEAL FOCUS. The dependency is a value that changes at
+   * exactly those two moments. Nothing polls, nothing reads
+   * document.activeElement, nothing listens for focus or blur, and nothing
+   * re-asserts focus on render. A cashier who tabs into the cart or clicks a
+   * product keeps the caret until the next completed sale, because until then
+   * no dependency changes and this effect does not run.
+   *
+   * WHY `undefined` RETURNS. An absent prop means "this host is not a till" —
+   * today that is the Builder preview, which must never pull the caret out of
+   * whatever field the owner is typing in. Absence, not detection.
+   */
+  useEffect(() => {
+    if (scanFocusRequest === undefined) {
+      return;
+    }
+
+    searchInputRef.current?.focus();
+  }, [scanFocusRequest]);
+
 
   // The category/search interaction rule lives in shared.ts as a pure function
   // so it is actually tested — this repository has no DOM test environment.
@@ -177,16 +231,25 @@ export default function RetailStoreBrowser({
       return;
     }
 
-    const currentItem = resolveBarcodeActivation({
+    const activation = resolveBarcodeActivation({
       menuItems,
       index: barcodeIndex,
       value: searchTerm,
     });
 
-    if (currentItem === null) {
-      // Stay ordinary search: keep the query, keep the filtered results, say
-      // nothing about barcodes. An unknown scan and a cashier typing a word are
-      // intentionally indistinguishable.
+    // ONE semantic decision per accepted Enter. The three outcomes are
+    // exhaustive, and only one of them does anything.
+    //
+    // `not_found` and `unavailable` both stay ordinary search: keep the query,
+    // keep the filtered results, touch nothing. They are kept APART rather than
+    // collapsed because they mean different things to whoever reports them —
+    // `not_found` is "this value is not in the catalogue", `unavailable` is
+    // "the catalogue could not be asked safely" (a duplicated barcode, or an id
+    // that has since gone). A later presentation checkpoint shows a warning for
+    // `not_found` AND ONLY when ordinary search also found nothing, so a
+    // cashier typing "vodka" with vodka in stock stays silent. Nothing here
+    // reports anything yet, and nothing here detects a scanner.
+    if (activation.status !== "activated") {
       return;
     }
 
@@ -198,7 +261,7 @@ export default function RetailStoreBrowser({
     // finished with that value, not because the add succeeded — addToCart
     // returns void and cannot truthfully say.
     setSearchTerm("");
-    onAddToCart(currentItem);
+    onAddToCart(activation.item);
   }
 
   // An empty menu yields zero categories. Same meaning as every other browser's
@@ -239,6 +302,7 @@ export default function RetailStoreBrowser({
           </svg>
 
           <input
+            ref={searchInputRef}
             type="text"
             inputMode="search"
             value={searchTerm}

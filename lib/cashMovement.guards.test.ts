@@ -797,12 +797,35 @@ describe("Feature 1D adds no history and no printing", () => {
     expect(sql).toContain("revoke all on table public.cash_movements from authenticated");
   });
 
-  // A print failure must never be able to influence whether the financial event
-  // exists, and the simplest way to guarantee that is not to print.
-  it("nothing in the feature prints", () => {
-    for (const source of [panel(), handler(), stripComments(read(CASH_RPC))]) {
+  /**
+   * NARROWED BY RC-POLISH, and the invariant it protects is unchanged.
+   *
+   * Feature 1D guaranteed "a print failure cannot influence whether the
+   * financial event exists" the simplest possible way: by never printing. The
+   * Cash Drop now prints two slips, so the guarantee has to come from WHERE the
+   * printing happens instead — strictly downstream of the server's answer, in a
+   * fire-and-forget effect that inspects nothing and can reach no authority
+   * verb. That is asserted in detail by "printing the Cash Drop is downstream
+   * of authority" at the end of this file.
+   *
+   * What stays absolutely true here: the AUTHORITY PATH still never prints. The
+   * host's submit handler and the RPC client remain unaware that a printer
+   * exists, so nothing between "send the movement" and "the server answered"
+   * can be affected by paper.
+   */
+  it("the authority path still never prints", () => {
+    for (const source of [handler(), stripComments(read(CASH_RPC))]) {
       expect(source).not.toMatch(/window\.print|printReceipt|Printer|bluetooth/i);
     }
+  });
+
+  it("the panel prints nothing except the downstream Cash Drop slips", () => {
+    const source = panel();
+
+    // No printer hardware, no native bridge, no second print surface.
+    expect(source).not.toMatch(/printReceipt|Printer|bluetooth/i);
+    // Exactly one print call, and it is the browser's.
+    expect([...source.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
   });
 });
 
@@ -856,5 +879,188 @@ describe("nothing outside the device host learned about cash movements", () => {
 
     // And the panel is reached from the shared host, not from a platform shim.
     expect(read(DEVICE_APP)).toContain("<CashMovementPanel");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 RC-polish — the Cash Drop slips are a side effect, not a record
+//
+// Everything below is about keeping printing OUT of the authority path. The
+// ledger is settled before a printer is mentioned, and nothing on a paper
+// failure can reach back into it.
+// ---------------------------------------------------------------------------
+
+describe("printing the Cash Drop is downstream of authority", () => {
+  const gates = stripComments(read(POS_GATES));
+  const deviceApp = stripComments(read(DEVICE_APP));
+
+  const printEffect = (() => {
+    const at = gates.indexOf("useEffect(");
+
+    expect(at, "the print effect moved or was removed").toBeGreaterThan(-1);
+
+    return gates.slice(at, gates.indexOf("}, [result]);", at));
+  })();
+
+  it("prints only an authoritative success", () => {
+    // The movement exists before a printer is named: `result.ok` is the
+    // server's answer, not a local assumption.
+    expect(printEffect).toContain("result === null || !result.ok");
+    expect(printEffect.indexOf("!result.ok")).toBeLessThan(printEffect.indexOf("window.print()"));
+  });
+
+  it("prints for cash_drop and refuses the other two kinds", () => {
+    expect(printEffect).toContain('result.movementType !== "cash_drop"');
+    expect(printEffect.indexOf('movementType !== "cash_drop"')).toBeLessThan(
+      printEffect.indexOf("window.print()")
+    );
+
+    // PAID IN AND PAID OUT NEVER AUTO-PRINT. Asserted as the absence of any
+    // other branch that could reach the printer, not just as the presence of
+    // the cash_drop check above.
+    for (const other of ["paid_in", "paid_out"]) {
+      expect(`${other} cannot reach the printer`).toBe(`${other} cannot reach the printer`);
+      expect(printEffect).not.toContain(other);
+    }
+  });
+
+  it("calls window.print() exactly once, from exactly one place", () => {
+    // Two slips in ONE job. A second call would be a second job, and would
+    // also be a second dialog the cashier has to dismiss.
+    expect([...gates.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
+    expect([...printEffect.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
+    // Not a copy count: nothing asks the driver for N copies, because the web
+    // platform cannot.
+    for (const banned of ["copies", "copyCount", "numCopies"]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("prints once per MOVEMENT, not once per render", () => {
+    // React may render this panel repeatedly holding the same result.
+    expect(gates).toContain("const printedMovementIdRef = useRef<string | null>(null);");
+    expect(printEffect).toContain("printedMovementIdRef.current === result.movementId");
+    expect(printEffect.indexOf("printedMovementIdRef.current = result.movementId")).toBeLessThan(
+      printEffect.indexOf("window.print()")
+    );
+  });
+
+  it("is fire-and-forget: the outcome is never inspected or awaited", () => {
+    for (const banned of [
+      "await window.print",
+      "window.print().then",
+      "catch",
+      "printFailed",
+      "printError",
+      "printSucceeded",
+    ]) {
+      expect(`${banned} is absent from the print effect`).toBe(
+        `${banned} is absent from the print effect`
+      );
+      expect(printEffect).not.toContain(banned);
+    }
+  });
+
+  it("cannot reverse, retry or duplicate the movement", () => {
+    // None of the authority verbs is even reachable from this component.
+    for (const banned of [
+      "recordCashMovement",
+      "newCashMovementRequestId",
+      "requestId",
+      "reverse",
+      "rollback",
+      "void(",
+      "delete",
+    ]) {
+      expect(`${banned} is absent from PosGates`).toBe(`${banned} is absent from PosGates`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("writes no second ledger and persists nothing", () => {
+    for (const banned of [
+      "localStorage",
+      "sessionStorage",
+      "indexedDB",
+      "IndexedDB",
+      "fetch(",
+      "supabase",
+      "insert",
+    ]) {
+      expect(`${banned} is absent from PosGates`).toBe(`${banned} is absent from PosGates`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("leaves the authoritative submit path exactly as it was", () => {
+    // Still ONE request, with ONE fresh id, from the host — unchanged by this
+    // checkpoint, and still nowhere near the printer.
+    expect([...deviceApp.matchAll(/recordCashMovement\(/g)]).toHaveLength(1);
+    expect([...deviceApp.matchAll(/newCashMovementRequestId\(\)/g)]).toHaveLength(1);
+    expect(deviceApp).toContain("cashMovementInFlightRef.current");
+    // The host knows nothing about printing.
+    expect(deviceApp).not.toContain("window.print()");
+  });
+
+  it("introduces no native print path", () => {
+    // Android native printing stays out of scope, and no Electron bridge is
+    // invented: the slip prints through the browser or not at all.
+    for (const banned of [
+      "isCapacitorNativeShell",
+      "Capacitor",
+      "posCanvasShell",
+      "ipcRenderer",
+      "webContents",
+      "printer",
+      "Printer",
+    ]) {
+      expect(`${banned} is absent from PosGates`).toBe(`${banned} is absent from PosGates`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("puts only server-returned fields on the slip", () => {
+    for (const field of [
+      "result.amount",
+      "result.note",
+      "result.employeeName",
+      "result.occurredAt",
+      "result.movementId",
+    ]) {
+      expect(`${field} appears on the slip`).toBe(`${field} appears on the slip`);
+      expect(gates).toContain(field);
+    }
+
+    expect(gates).toContain("Employee Signature: __________________");
+
+    // NOTHING SENSITIVE, AND NO ARITHMETIC. A slip that travels with cash must
+    // not carry a credential, and Feature 1D records events rather than
+    // balances.
+    // Bounded to the print area itself: the rest of the panel legitimately
+    // contains PIN entry, and slicing to end-of-file would read it.
+    const slipStart = gates.indexOf("cash-drop-print-area");
+    const slipEnd = gates.indexOf("if (noDailyContext)", slipStart);
+
+    expect(slipStart).toBeGreaterThan(-1);
+    expect(slipEnd).toBeGreaterThan(slipStart);
+
+    const slip = gates.slice(slipStart, slipEnd);
+
+    for (const banned of [
+      "pin",
+      "Pin",
+      "PIN",
+      "hash",
+      "Expected Cash",
+      "expectedCash",
+      "balance",
+      "Balance",
+      "over/short",
+      "employeeCode",
+    ]) {
+      expect(`${banned} is absent from the slip`).toBe(`${banned} is absent from the slip`);
+      expect(slip).not.toContain(banned);
+    }
   });
 });
