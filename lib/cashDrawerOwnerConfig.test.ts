@@ -211,8 +211,43 @@ describe("the owner-facing copy", () => {
 
   it("describes propagation as a pull, never a push", () => {
     expect(CASH_DRAWER_PROPAGATION_NOTE).toBe(
-      "Changes take effect the next time this register refreshes its device settings. If it is offline, it may keep its last saved setting until it reconnects or its offline authorization expires."
+      "A running register may keep using its current setting until it refreshes. Restart the POS app, or let the register reconnect and refresh its device settings, before relying on the new drawer behavior. If it is offline, it may keep its last saved setting until it reconnects or its offline authorization expires."
     );
+  });
+
+  // RC-3: a running Windows POS kept the value it had already loaded until
+  // the app was restarted. The owner must be told how the change arrives.
+  it("tells the owner to restart the POS app or let the register refresh", () => {
+    expect(CASH_DRAWER_PROPAGATION_NOTE).toMatch(/restart the POS app/i);
+    // Reconnect/refresh is offered as an ALTERNATIVE to restarting, so a
+    // normal refresh is never presented as insufficient.
+    expect(CASH_DRAWER_PROPAGATION_NOTE).toMatch(
+      /restart the POS app, or let the register reconnect and refresh its device settings/i
+    );
+    expect(CASH_DRAWER_PROPAGATION_NOTE).toMatch(/before relying on/i);
+    expect(CASH_DRAWER_PROPAGATION_NOTE).toMatch(/running register may keep using/i);
+  });
+
+  it("never claims that saving changes a running register at once", () => {
+    const note = CASH_DRAWER_PROPAGATION_NOTE.toLowerCase();
+
+    for (const forbidden of [
+      "takes effect when",
+      "take effect when you save",
+      "as soon as",
+      "now uses",
+      "will use",
+      "sync",
+      "poll",
+      "automatically",
+      "must restart",
+      "always restart",
+      "each sale",
+      "per sale",
+    ]) {
+      expect(`note: ${forbidden}`).toBe(`note: ${forbidden}`);
+      expect(note).not.toContain(forbidden);
+    }
   });
 
   it("promises no synchronisation this product does not have", () => {

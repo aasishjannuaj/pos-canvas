@@ -331,9 +331,14 @@ export const CASH_DRAWER_STALE_MESSAGE =
  * them, and an offline till keeps what it last saved until it reconnects or
  * its offline authorization expires — which is the behaviour the accepted 1B
  * pairing cache actually has.
+ *
+ * RC-3 physical testing confirmed the consequence: a Windows POS that was
+ * already running kept the value it had loaded, and a restart picked up the
+ * change. So the owner is told to restart the app OR let the register
+ * reconnect and refresh — either one, not both — before relying on the change.
  */
 export const CASH_DRAWER_PROPAGATION_NOTE =
-  "Changes take effect the next time this register refreshes its device settings. If it is offline, it may keep its last saved setting until it reconnects or its offline authorization expires.";
+  "A running register may keep using its current setting until it refreshes. Restart the POS app, or let the register reconnect and refresh its device settings, before relying on the new drawer behavior. If it is offline, it may keep its last saved setting until it reconnects or its offline authorization expires.";
 
 /**
  * The one platform with an automatic drawer path in v1.3.
