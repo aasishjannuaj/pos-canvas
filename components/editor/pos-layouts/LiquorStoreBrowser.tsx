@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { buildBarcodeIndex } from "@/lib/barcode";
 import { useProductCategories } from "./useProductCategories";
 import { resolveBarcodeActivation, resolveCatalogItems } from "./shared";
-import type { ProductBrowserProps } from "./shared";
+import type { BarcodeActivation, ProductBrowserProps } from "./shared";
 import type { MenuItem } from "@/components/editor/EditorShell";
 
 // v1.3 Lane 2 Task 2 — the Liquor Store PRESENTATION variant.
@@ -40,11 +40,10 @@ import type { MenuItem } from "@/components/editor/EditorShell";
 // TYPING IS NEVER SCANNING. onChange stays pure manual search. Only an accepted
 // Enter consults the barcode index, and only an EXACT hit activates anything.
 //
-// A MISS IS STILL SILENT HERE, BUT IT IS NO LONGER NAMELESS. As of the
-// RC-polish contract, resolveBarcodeActivation says WHICH way it declined —
-// `not_found` or `unavailable` — and this component acts on neither: the field
-// stays as ordinary search showing its ordinary results. Nothing is reported to
-// the cashier from here.
+// A MISS IS NO LONGER NAMELESS. As of the RC-polish contract,
+// resolveBarcodeActivation says WHICH way it declined — `not_found` or
+// `unavailable` — and either way the field stays as ordinary search showing its
+// ordinary results.
 //
 // WHY THE SEMANTIC SPLIT EXISTS AT ALL. A cashier typing "vodka" and an unknown
 // scanned value are still the SAME EVENT to this handler, and no scanner-source
@@ -54,6 +53,90 @@ import type { MenuItem } from "@/components/editor/EditorShell";
 // anything — and warns only when BOTH say nothing matched. That keeps "vodka"
 // with vodka in stock silent, and is why the outcome is named rather than
 // reported.
+//
+// RC-POLISH LANE 2B APPLIES THAT RULE. shouldWarnNoMatch below is the whole
+// decision; the component shows "No matching product found" and plays one
+// short tone only when it says so. `unavailable` never warns: it is a
+// configuration fault, and calling it "no matching product" would hide it.
+
+/**
+ * RC-polish Lane 2B — does this accepted Enter deserve the no-match warning?
+ *
+ * BOTH FACTS, OR NOTHING. `not_found` alone is also what "vodka" produces, and
+ * a cashier with vodka on the shelf must hear nothing. So the warning needs the
+ * ordinary search for the SAME value — resolveCatalogItems, the one search rule
+ * — to be an active search that found zero products.
+ *
+ * `unavailable` and `activated` are never a no-match. The wording is "No
+ * matching product found", never "barcode": nothing here can know whether the
+ * value was scanned, typed or pasted.
+ *
+ * Pure and exported so the rule is tested as behavior. RetailStoreBrowser
+ * carries the same function, and a parity test runs one table through both.
+ */
+export function shouldWarnNoMatch(input: {
+  activation: BarcodeActivation["status"];
+  /** resolveCatalogItems' `searching` for the submitted value. */
+  searching: boolean;
+  /** resolveCatalogItems' item count for the submitted value. */
+  resultCount: number;
+}): boolean {
+  return input.activation === "not_found" && input.searching && input.resultCount === 0;
+}
+
+/**
+ * One short, quiet tone for the no-match warning.
+ *
+ * GENERATED, NOT LOADED: no audio file and no network asset. A fresh context
+ * per call that closes itself when the tone ends, so nothing persists between
+ * warnings and nothing listens. EVERY failure is swallowed — no Web Audio, a
+ * suspended context, a throwing node — because a missing beep must never block
+ * a search or a sale.
+ */
+function playNoMatchTone(): void {
+  let context: AudioContext | null = null;
+
+  try {
+    if (typeof window === "undefined" || typeof window.AudioContext !== "function") {
+      return;
+    }
+
+    context = new window.AudioContext();
+
+    // A context that is not running would never reach `onended`, and so would
+    // never close. Say nothing rather than leak one per Enter.
+    if (context.state !== "running") {
+      void context.close().catch(() => undefined);
+      return;
+    }
+
+    const tone = context.createOscillator();
+    const gain = context.createGain();
+    const start = context.currentTime;
+
+    tone.type = "sine";
+    tone.frequency.setValueAtTime(440, start);
+    gain.gain.setValueAtTime(0.12, start);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+
+    tone.connect(gain);
+    gain.connect(context.destination);
+
+    const closing = context;
+    tone.onended = () => {
+      void closing.close().catch(() => undefined);
+    };
+
+    tone.start(start);
+    tone.stop(start + 0.18);
+  } catch {
+    try {
+      void context?.close().catch(() => undefined);
+    } catch {
+      // Already closed, or never opened. Nothing to clean up.
+    }
+  }
+}
 
 function stockBadgeLabel(item: MenuItem): string {
   if (!item.trackInventory) {
@@ -125,6 +208,24 @@ export default function LiquorStoreBrowser({
   const [searchTerm, setSearchTerm] = useState("");
 
   /**
+   * RC-polish Lane 2B — PRESENTATION ONLY. Whether the Search / Scan input
+   * currently has focus, as the input itself reports through onFocus/onBlur.
+   *
+   * It drives the "Ready to scan" line and nothing else: it never focuses or
+   * blurs anything, never leaves this component, and is not read by the
+   * barcode handler. Lane 1's nonce effect remains the only thing that moves
+   * focus.
+   */
+  const [searchScanFocused, setSearchScanFocused] = useState(false);
+
+  /**
+   * RC-polish Lane 2B — set by an accepted Enter that shouldWarnNoMatch
+   * accepted; cleared by any edit to the field and by a successful activation.
+   * A boolean, never the entered value, and never persisted.
+   */
+  const [noMatchWarning, setNoMatchWarning] = useState(false);
+
+  /**
    * The Search / Scan field, held privately.
    *
    * NOT FORWARDED, NOT AN IMPERATIVE HANDLE. The ref never leaves this
@@ -152,8 +253,9 @@ export default function LiquorStoreBrowser({
    *
    * WHY THIS CANNOT STEAL FOCUS. The dependency is a value that changes at
    * exactly those two moments. Nothing polls, nothing reads
-   * document.activeElement, nothing listens for focus or blur, and nothing
-   * re-asserts focus on render. A cashier who tabs into the cart or clicks a
+   * document.activeElement, nothing re-asserts focus from a focus or blur
+   * event, and nothing re-asserts focus on render. (Lane 2B's onFocus/onBlur
+   * only flip the "Ready to scan" presentation flag; they never move focus.) A cashier who tabs into the cart or clicks a
    * product keeps the caret until the next completed sale, because until then
    * no dependency changes and this effect does not run.
    *
@@ -246,8 +348,17 @@ export default function LiquorStoreBrowser({
     // that has since gone). A later presentation checkpoint shows a warning for
     // `not_found` AND ONLY when ordinary search also found nothing, so a
     // cashier typing "vodka" with vodka in stock stays silent. Nothing here
-    // reports anything yet, and nothing here detects a scanner.
+    // detects a scanner.
+    //
+    // RC-polish Lane 2B — that checkpoint. A miss still keeps the query and the
+    // results; the only addition is the warning and its one tone, and only
+    // when the ordinary search for this same value (`searching`/`items`,
+    // computed above from this searchTerm) found nothing.
     if (activation.status !== "activated") {
+      if (shouldWarnNoMatch({ activation: activation.status, searching, resultCount: items.length })) {
+        setNoMatchWarning(true);
+        playNoMatchTone();
+      }
       return;
     }
 
@@ -260,6 +371,7 @@ export default function LiquorStoreBrowser({
     // returns void and cannot truthfully say. An exact hit that the
     // authoritative updater later refuses for stock still clears, and that is
     // accepted for v1.3.
+    setNoMatchWarning(false);
     setSearchTerm("");
     onAddToCart(activation.item);
   }
@@ -304,8 +416,17 @@ export default function LiquorStoreBrowser({
             type="text"
             inputMode="search"
             value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
+            onChange={(event) => {
+              setSearchTerm(event.target.value);
+              // Any edit — including clearing — retires the warning. A warning
+              // belongs to the value that was submitted, not the next one.
+              setNoMatchWarning(false);
+            }}
             onKeyDown={handleSearchKeyDown}
+            // Presentation only — see searchScanFocused. Neither handler
+            // focuses, blurs or reads anything.
+            onFocus={() => setSearchScanFocused(true)}
+            onBlur={() => setSearchScanFocused(false)}
             placeholder={
               barcodeScanningEnabled
                 ? "Search products or scan barcode"
@@ -334,6 +455,38 @@ export default function LiquorStoreBrowser({
             </button>
           )}
         </div>
+
+        {/* RC-polish Lane 2B — the scan status line. Only a scan-capable
+            project gets one: with scanning off there is nothing to be ready
+            for, so nothing is claimed. It describes THIS FIELD, never a device:
+            no scanner is detected, and none is said to be connected.
+
+            The warning outranks readiness and shows only while the search it
+            was raised for is still active, so clearing the field by any route
+            removes it with the query. */}
+        {barcodeScanningEnabled && (
+          <div className="mt-1.5 flex h-5 items-center gap-1.5 text-xs font-medium">
+            {noMatchWarning && searching ? (
+              <p role="alert" className="flex items-center gap-1.5 text-red-700">
+                <svg viewBox="0 0 20 20" aria-hidden="true" className="h-4 w-4 flex-none" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10 3 2 17h16L10 3Z" />
+                  <path d="M10 8v4M10 14.5v.01" />
+                </svg>
+                No matching product found
+              </p>
+            ) : searchScanFocused ? (
+              <p className="flex items-center gap-1.5 text-emerald-700">
+                <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full bg-emerald-500" />
+                Ready to scan
+              </p>
+            ) : (
+              <p className="flex items-center gap-1.5 text-neutral-500">
+                <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full border border-neutral-400" />
+                Select the search box before scanning
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Category rail. Scrolls horizontally rather than wrapping or

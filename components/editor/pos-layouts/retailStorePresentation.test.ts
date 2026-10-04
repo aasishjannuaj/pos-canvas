@@ -26,6 +26,8 @@ import {
 import { buildBarcodeIndex } from "@/lib/barcode";
 import { getTemplateById, templates } from "@/data/templates";
 import type { MenuItem } from "@/lib/projectConfig";
+import { shouldWarnNoMatch as retailShouldWarnNoMatch } from "./RetailStoreBrowser";
+import { shouldWarnNoMatch as liquorShouldWarnNoMatch } from "./LiquorStoreBrowser";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (p: string) => readFileSync(join(repoRoot, p), "utf-8");
@@ -244,14 +246,28 @@ describe("there is exactly one Search / Scan field", () => {
     }
   });
 
-  it("17. typing only changes searchTerm", () => {
-    expect(browser).toContain("onChange={(event) => setSearchTerm(event.target.value)}");
+  // RC-polish Lane 2B — onChange now also retires the no-match warning. It
+  // still sets searchTerm from the field and does nothing else: no
+  // activation, no warning, no sound.
+  const onChange = browser.slice(browser.indexOf("onChange={"), browser.indexOf("onKeyDown={"));
+
+  it("17. typing only changes searchTerm (and retires the warning)", () => {
+    expect(onChange).toContain("setSearchTerm(event.target.value);");
+    expect(onChange).toContain("setNoMatchWarning(false);");
+    expect([...onChange.matchAll(/set\w+\(/g)].map((m) => m[0]).sort()).toEqual([
+      "setNoMatchWarning(",
+      "setSearchTerm(",
+    ]);
   });
 
   it("18. typing activates nothing — activation lives only in the key handler", () => {
-    const onChangeAt = browser.indexOf("onChange={(event) => setSearchTerm(event.target.value)}");
+    const onChangeAt = browser.indexOf("onChange={");
     const handlerAt = browser.indexOf("function handleSearchKeyDown");
     expect(onChangeAt).toBeGreaterThan(-1);
+    for (const banned of ["onAddToCart", "resolveBarcodeActivation", "playNoMatchTone", "setNoMatchWarning(true)"]) {
+      expect(`onChange: ${banned}`).toBe(`onChange: ${banned}`);
+      expect(onChange).not.toContain(banned);
+    }
     expect(handlerAt).toBeGreaterThan(-1);
     // resolveBarcodeActivation is referenced exactly once, inside the handler.
     expect([...browser.matchAll(/resolveBarcodeActivation\(/g)]).toHaveLength(1);
@@ -367,6 +383,12 @@ describe("there is exactly one Search / Scan field", () => {
   });
 
   it("30. shows no barcode-specific error anywhere", () => {
+    // RC-polish Lane 2B — the ONE approved warning, removed before the bans
+    // run so its "No match…" prefix cannot hide any other wording. It must
+    // appear exactly once.
+    expect(browser.split("No matching product found").length - 1).toBe(1);
+    const withoutApproved = browser.replace("No matching product found", "");
+
     for (const banned of [
       "not found",
       "Not found",
@@ -377,7 +399,7 @@ describe("there is exactly one Search / Scan field", () => {
       "try again",
     ]) {
       expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
-      expect(browser).not.toContain(banned);
+      expect(withoutApproved).not.toContain(banned);
     }
   });
 
@@ -798,6 +820,18 @@ describe("Retail sells through the shared engine only", () => {
 
 describe("no scanner architecture and no focus stealing", () => {
   it("61 + 62 + 63. installs no global key listener", () => {
+    // RC-polish Lane 2B — the no-match tone constructs a Web Audio context,
+    // which is the ONLY reason `window.` may appear: twice, as
+    // `window.AudioContext`, inside playNoMatchTone. Removing exactly those
+    // lets `window.` stay banned everywhere else in the file.
+    const tone = browser.slice(
+      browser.indexOf("function playNoMatchTone"),
+      browser.indexOf("function stockBadgeLabel")
+    );
+    expect(tone.split("window.").length - 1).toBe(browser.split("window.").length - 1);
+    expect(tone.split("window.AudioContext").length - 1).toBe(2);
+    const outsideTone = browser.split("window.AudioContext").join("");
+
     for (const banned of [
       "addEventListener",
       "window.",
@@ -807,7 +841,7 @@ describe("no scanner architecture and no focus stealing", () => {
       "keyup",
     ]) {
       expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
-      expect(browser).not.toContain(banned);
+      expect(outsideTone).not.toContain(banned);
     }
     // The ONE handler is a React prop on the field itself.
     expect(browser).toContain("onKeyDown={handleSearchKeyDown}");
@@ -859,13 +893,19 @@ describe("no scanner architecture and no focus stealing", () => {
       "setInterval",
       "setTimeout",
       "requestAnimationFrame",
-      "onFocus",
-      "onBlur",
       "blur()",
     ]) {
       expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
       expect(browser).not.toContain(banned);
     }
+
+    // RC-polish Lane 2B — onFocus/onBlur left the list above for the
+    // scanner-ready PRESENTATION flag only: one of each, on the field, each
+    // only setting that flag. They can observe focus; they cannot move it.
+    expect(browser.split("onFocus").length - 1).toBe(1);
+    expect(browser.split("onBlur").length - 1).toBe(1);
+    expect(browser).toContain("onFocus={() => setSearchScanFocused(true)}");
+    expect(browser).toContain("onBlur={() => setSearchScanFocused(false)}");
   });
 
   it("69a. holds exactly one ref, for the Search / Scan input, and never shares it", () => {
@@ -1021,5 +1061,304 @@ describe("Retail empty states stay truthful", () => {
       searchTerm: "general",
     });
     expect(items).toEqual(blank);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RC-polish Lane 2B — scanner readiness, the no-match warning, and its tone
+// ---------------------------------------------------------------------------
+
+describe("Lane 2B: the no-match warning decision, as behavior", () => {
+  // A catalogue where ordinary search and barcode lookup disagree on purpose.
+  const CODED: MenuItem[] = [
+    item({ id: "w1", name: "Vodka 750ml", category: "Spirits", barcode: "012345678905" }),
+    item({ id: "w2", name: "IPA 6-Pack", category: "Beer", barcode: "A1b2" }),
+    item({ id: "w3", name: "House Red Wine", category: "Wine" }),
+  ];
+  const CODED_INDEX = buildBarcodeIndex(CODED);
+
+  /** The component's decision, composed from the SAME shared functions it calls. */
+  const decide = (value: string, menuItems: MenuItem[] = CODED, index = CODED_INDEX) => {
+    const activation = resolveBarcodeActivation({ menuItems, index, value });
+    const { items, searching } = resolveCatalogItems({ menuItems, categoryItems: menuItems, searchTerm: value });
+
+    return {
+      status: activation.status,
+      warn: retailShouldWarnNoMatch({ activation: activation.status, searching, resultCount: items.length }),
+    };
+  };
+
+  it("an exact code activates and does not warn", () => {
+    expect(decide("012345678905")).toEqual({ status: "activated", warn: false });
+  });
+
+  it("not_found + zero ordinary results warns", () => {
+    expect(decide("99999999")).toEqual({ status: "not_found", warn: true });
+  });
+
+  it("not_found + ordinary results does NOT warn — 'vodka' with vodka in stock", () => {
+    expect(decide("vodka")).toEqual({ status: "not_found", warn: false });
+    expect(decide("IPA")).toEqual({ status: "not_found", warn: false });
+  });
+
+  it("leading zeros are preserved: the stripped code is a different, unmatched value", () => {
+    expect(decide("12345678905")).toEqual({ status: "not_found", warn: true });
+  });
+
+  it("case is preserved: a case-swapped code activates nothing", () => {
+    expect(decide("A1b2").status).toBe("activated");
+    expect(decide("a1B2")).toEqual({ status: "not_found", warn: true });
+  });
+
+  it("an empty or whitespace Enter never warns — it is not a search", () => {
+    expect(decide("").warn).toBe(false);
+    expect(decide("   ").warn).toBe(false);
+  });
+
+  it("unavailable is never the no-match warning: a duplicated catalogue", () => {
+    const dupes = [
+      item({ id: "d1", name: "Cheap", barcode: "777" }),
+      item({ id: "d2", name: "Dear", barcode: "777" }),
+    ];
+    // "777" matches no name or category, so only `unavailable` stands
+    // between this and a warning.
+    expect(decide("777", dupes, buildBarcodeIndex(dupes))).toEqual({ status: "unavailable", warn: false });
+  });
+
+  it("unavailable is never the no-match warning: a vanished id", () => {
+    const shrunk = CODED.filter((i) => i.id !== "w1");
+    expect(decide("012345678905", shrunk)).toEqual({ status: "unavailable", warn: false });
+  });
+
+  it("the rule itself, exhaustively", () => {
+    for (const activation of ["activated", "not_found", "unavailable"] as const) {
+      for (const searching of [true, false]) {
+        for (const resultCount of [0, 1, 3]) {
+          const expected = activation === "not_found" && searching && resultCount === 0;
+          expect(`${activation}/${searching}/${resultCount}`).toBe(`${activation}/${searching}/${resultCount}`);
+          expect(retailShouldWarnNoMatch({ activation, searching, resultCount })).toBe(expected);
+        }
+      }
+    }
+  });
+});
+
+describe("Lane 2B: the component wires the warning only to an accepted no-match Enter", () => {
+  const src = code(read(BROWSER));
+  const handler = src.slice(src.indexOf("function handleSearchKeyDown"), src.indexOf("if (categories.length === 0)"));
+  const missBranch = handler.slice(
+    handler.indexOf('if (activation.status !== "activated")'),
+    handler.indexOf("setNoMatchWarning(false);")
+  );
+
+  it("decides with the ordinary search for the SAME searchTerm", () => {
+    expect(missBranch).toContain(
+      "shouldWarnNoMatch({ activation: activation.status, searching, resultCount: items.length })"
+    );
+    // `searching`/`items` are the render's own resolveCatalogItems over the
+    // same searchTerm the activation was given — no second search algorithm.
+    expect([...src.matchAll(/resolveCatalogItems\(/g)]).toHaveLength(1);
+    expect(src).toContain("value: searchTerm,");
+  });
+
+  it("raises the warning and the tone only inside that decision, once each", () => {
+    const decision = missBranch.slice(missBranch.indexOf("if (shouldWarnNoMatch("));
+    // Up to the branch's own return — the call's object literal has braces.
+    const body = decision.slice(0, decision.indexOf("return;"));
+
+    expect(body).toContain("setNoMatchWarning(true);");
+    expect(body).toContain("playNoMatchTone();");
+    expect(src.split("setNoMatchWarning(true)").length - 1).toBe(1);
+    // Declaration + one call: one accepted no-match Enter, one tone.
+    expect(src.split("playNoMatchTone(").length - 1).toBe(2);
+    // And still behind every reject: disabled, IME, repeat, not-Enter.
+    expect(handler.indexOf('event.key !== "Enter"')).toBeLessThan(handler.indexOf("playNoMatchTone();"));
+  });
+
+  it("a miss still keeps the query, the category and the cart untouched", () => {
+    expect(missBranch).toContain("return;");
+    for (const banned of ["setSearchTerm", "setActiveCategory", "onAddToCart"]) {
+      expect(`miss: ${banned}`).toBe(`miss: ${banned}`);
+      expect(missBranch).not.toContain(banned);
+    }
+  });
+
+  it("a successful activation clears the warning, then clears the field and adds once", () => {
+    const success = handler.slice(handler.indexOf("setNoMatchWarning(false);"));
+    expect(success.indexOf("setNoMatchWarning(false);")).toBeLessThan(success.indexOf('setSearchTerm("");'));
+    expect(success.indexOf('setSearchTerm("");')).toBeLessThan(success.indexOf("onAddToCart(activation.item);"));
+    expect(success).not.toContain("playNoMatchTone");
+    expect([...handler.matchAll(/onAddToCart\(/g)]).toHaveLength(1);
+  });
+
+  it("any edit to the field clears the warning; typing never warns or sounds", () => {
+    const onChange = src.slice(src.indexOf("onChange={"), src.indexOf("onKeyDown={"));
+    expect(onChange).toContain("setNoMatchWarning(false);");
+    expect(onChange).not.toContain("setNoMatchWarning(true)");
+    expect(onChange).not.toContain("playNoMatchTone");
+  });
+
+  it("the warning shows only while the search it was raised for is active", () => {
+    // Clearing by the X, the empty-state button or a category pill ends the
+    // search, which hides it; the next keystroke resets the flag.
+    expect(src).toContain("{noMatchWarning && searching ? (");
+  });
+
+  it("the copy is exactly 'No matching product found', never a barcode claim", () => {
+    const raw = read(BROWSER);
+    // Rendered exactly once (comments, which also quote it, are stripped).
+    expect(src.split("No matching product found").length - 1).toBe(1);
+    for (const banned of ["Barcode not found", "barcode not found", "Unknown barcode", "Scan failed"]) {
+      expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
+      expect(raw).not.toContain(banned);
+    }
+  });
+
+  it("the warning flag is a boolean and the entered value is never logged or persisted", () => {
+    expect(src).toContain("const [noMatchWarning, setNoMatchWarning] = useState(false);");
+    for (const banned of ["console.", "localStorage", "sessionStorage", "indexedDB", "analytics", "track(", "sendBeacon"]) {
+      expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
+      expect(src).not.toContain(banned);
+    }
+  });
+});
+
+describe("Lane 2B: scanner readiness is local presentation of real focus", () => {
+  const src = code(read(BROWSER));
+  const statusLine = src.slice(
+    src.indexOf("{barcodeScanningEnabled && ("),
+    src.indexOf("</div>", src.indexOf("Select the search box before scanning"))
+  );
+
+  it("focus shows 'Ready to scan'; blur shows the instruction to select the field", () => {
+    expect(statusLine).toContain(") : searchScanFocused ? (");
+    const ready = statusLine.slice(statusLine.indexOf(") : searchScanFocused ? ("));
+    expect(ready.indexOf("Ready to scan")).toBeGreaterThan(-1);
+    expect(ready.indexOf("Ready to scan")).toBeLessThan(ready.indexOf("Select the search box before scanning"));
+  });
+
+  it("the focus flag is driven only by the input's own onFocus/onBlur", () => {
+    expect(src).toContain("const [searchScanFocused, setSearchScanFocused] = useState(false);");
+    expect(src.split("setSearchScanFocused(").length - 1).toBe(2);
+    const input = src.slice(src.indexOf("<input"), src.indexOf("/>", src.indexOf("<input")));
+    expect(input).toContain("onFocus={() => setSearchScanFocused(true)}");
+    expect(input).toContain("onBlur={() => setSearchScanFocused(false)}");
+  });
+
+  it("scanning disabled presents no readiness at all", () => {
+    // Every readiness and warning string lives inside the capability gate.
+    const outside = src.replace(statusLine, "");
+    for (const copy of ["Ready to scan", "Select the search box before scanning", "No matching product found"]) {
+      expect(`${copy} is gated`).toBe(`${copy} is gated`);
+      expect(statusLine).toContain(copy);
+      expect(outside).not.toContain(copy);
+    }
+  });
+
+  it("claims nothing about hardware", () => {
+    const raw = read(BROWSER);
+    for (const banned of ["Scanner connected", "scanner connected", "Scanner detected", "Scanner ready", "Listening"]) {
+      expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
+      expect(raw).not.toContain(banned);
+    }
+  });
+
+  it("adds no focus architecture: the flag never leaves the component or moves focus", () => {
+    expect([...src.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
+    expect([...src.matchAll(/useEffect\(/g)]).toHaveLength(1);
+    const effect = src.slice(src.indexOf("useEffect("));
+    expect(effect.slice(0, effect.indexOf("}, ["))).not.toContain("searchScanFocused");
+    for (const banned of [
+      "searchScanFocused={",
+      "noMatchWarning={",
+      "onScanReady",
+      "onReadyChange",
+      "document.activeElement",
+      ".blur()",
+      "autoFocus",
+      "addEventListener",
+      "setTimeout",
+      "setInterval",
+    ]) {
+      expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
+      expect(src).not.toContain(banned);
+    }
+  });
+});
+
+describe("Lane 2B: the no-match tone is tiny, local and cannot block anything", () => {
+  const src = code(read(BROWSER));
+  const tone = src.slice(src.indexOf("function playNoMatchTone"), src.indexOf("function stockBadgeLabel"));
+
+  it("is generated with Web Audio, not loaded", () => {
+    expect(tone).toContain("createOscillator()");
+    for (const banned of ["new Audio(", ".mp3", ".wav", ".ogg", "fetch(", "http", "decodeAudioData"]) {
+      expect(`${BROWSER}: ${banned}`).toBe(`${BROWSER}: ${banned}`);
+      expect(src).not.toContain(banned);
+    }
+  });
+
+  it("is short, stops itself, and closes its context", () => {
+    expect(tone).toContain("tone.stop(start + 0.18);");
+    expect(tone).toContain("tone.onended = () => {");
+    expect(tone).toContain("closing.close()");
+    // A context that would never reach onended is closed immediately.
+    expect(tone).toContain('if (context.state !== "running") {');
+  });
+
+  it("swallows every failure", () => {
+    expect(tone).toContain("try {");
+    expect(tone).toContain("} catch {");
+    expect(tone).toContain('typeof window.AudioContext !== "function"');
+  });
+
+  it("keeps no persistent audio object", () => {
+    // The only AudioContext reference is inside the helper, held in a local.
+    expect(src.replace(tone, "")).not.toContain("AudioContext");
+    expect(tone).toContain("let context: AudioContext | null = null;");
+  });
+});
+
+describe("Lane 2B: Liquor and Retail behave identically", () => {
+  it("one decision table, two implementations, the same answers", () => {
+    for (const activation of ["activated", "not_found", "unavailable"] as const) {
+      for (const searching of [true, false]) {
+        for (const resultCount of [0, 1, 7]) {
+          const input = { activation, searching, resultCount };
+          expect(`${activation}/${searching}/${resultCount}`).toBe(`${activation}/${searching}/${resultCount}`);
+          expect(retailShouldWarnNoMatch(input)).toBe(liquorShouldWarnNoMatch(input));
+        }
+      }
+    }
+  });
+
+  it("the same readiness, warning, clearing and tone wiring in both files", () => {
+    const retail = code(read(BROWSER));
+    const liquor = code(read(LIQUOR));
+    for (const shared of [
+      "const [searchScanFocused, setSearchScanFocused] = useState(false);",
+      "const [noMatchWarning, setNoMatchWarning] = useState(false);",
+      "onFocus={() => setSearchScanFocused(true)}",
+      "onBlur={() => setSearchScanFocused(false)}",
+      "shouldWarnNoMatch({ activation: activation.status, searching, resultCount: items.length })",
+      "{noMatchWarning && searching ? (",
+      ") : searchScanFocused ? (",
+      "{barcodeScanningEnabled && (",
+      "No matching product found",
+      "Ready to scan",
+      "Select the search box before scanning",
+      "setNoMatchWarning(false);\n    setSearchTerm(\"\");\n    onAddToCart(activation.item);",
+    ]) {
+      expect(`parity: ${shared}`).toBe(`parity: ${shared}`);
+      expect(retail).toContain(shared);
+      expect(liquor).toContain(shared);
+    }
+
+    // The tone helper and the decision are the same code in both.
+    const slice = (src: string) =>
+      src
+        .slice(src.indexOf("export function shouldWarnNoMatch"), src.indexOf("function stockBadgeLabel"))
+        .trimEnd();
+    expect(slice(retail)).toBe(slice(liquor));
   });
 });

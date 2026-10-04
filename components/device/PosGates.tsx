@@ -34,6 +34,8 @@ import {
   validateCashNote,
 } from "@/lib/cashMovement";
 import type { CashMovementResult, CashMovementType } from "@/lib/cashMovement";
+import { createLogoPublicUrl } from "@/lib/logoUpload";
+import type { BrandingSettings, BusinessProfile } from "@/lib/projectConfig";
 
 const PANEL = "mx-auto flex w-full max-w-sm flex-col gap-4 rounded-2xl bg-white p-6 shadow-sm";
 const SCREEN = "flex min-h-0 flex-1 items-center justify-center bg-neutral-50 p-4";
@@ -62,8 +64,22 @@ const SECONDARY = "w-full rounded-xl border border-neutral-300 px-4 py-3 text-ba
  * NOTHING HERE KNOWS WHETHER AN ID EXISTS. The server answers unknown-ID and
  * wrong-PIN identically, and this card shows whatever it says without trying to
  * be more specific.
+ *
+ * v1.3 RC-polish — WHOSE TILL THIS IS. The card now opens with the merchant's
+ * own identity, so a cashier walking up knows they are signing in to this shop's
+ * register and not a generic utility. The branding is the PAIRED DEVICE'S
+ * PINNED CONFIG, handed in by the host exactly as PosHeader receives it: no
+ * fetch, no owner query, no live subscription. The logo src is built only by
+ * createLogoPublicUrl — the same validated composer the header uses — so a
+ * malformed stored path can never become an image source here either.
+ *
+ * Identity is shop-level only. Nothing here names, lists or hints at an
+ * employee.
  */
 export function EmployeeLockCard({
+  businessProfile,
+  branding,
+  logoBaseUrl,
   busy,
   error,
   recovery,
@@ -71,6 +87,12 @@ export function EmployeeLockCard({
   onTimeClock,
   onCashMovement,
 }: {
+  /** From the pinned config. The name is always shown, logo or not. */
+  businessProfile: BusinessProfile;
+  /** From the pinned config. Its logo path is validated before use. */
+  branding: BrandingSettings;
+  /** The logo origin, injected exactly as PosHeader's is. undefined = no logo. */
+  logoBaseUrl: string | undefined;
   busy: boolean;
   error: string | null;
   /** Set when a refused sale sent the operator back here. */
@@ -83,103 +105,169 @@ export function EmployeeLockCard({
   const [employeeCode, setEmployeeCode] = useState("");
   const [pin, setPin] = useState("");
 
+  // A logo that fails to load must never blank the identity block or the
+  // login. This flips on error and the business name carries it alone — the
+  // same outcome a project without a logo already has.
+  const [logoFailed, setLogoFailed] = useState(false);
+
   const ready = isValidEmployeeCodeShape(employeeCode) && isValidEmployeePinShape(pin);
+
+  const businessName = businessProfile.businessName.trim();
+
+  // Null unless the pinned path passes the strict validator AND the host
+  // supplied a usable origin.
+  const logoUrl = branding.logo
+    ? createLogoPublicUrl(branding.logo.path, logoBaseUrl)
+    : null;
+
+  const showLogo = branding.logo !== undefined && logoUrl !== null && !logoFailed;
 
   return (
     <div className={SCREEN}>
       <form
-        className={PANEL}
+        className="mx-auto flex w-full max-w-sm flex-col overflow-hidden rounded-2xl bg-white shadow-lg ring-1 ring-neutral-200"
         onSubmit={(event) => {
           event.preventDefault();
           if (!busy && ready) onSubmit(employeeCode, pin);
         }}
       >
-        <h1 className="text-lg font-semibold text-neutral-900">Employee Login</h1>
+        {/* The merchant's colour, as a thin band. Decorative only: the
+            controls below keep their fixed, high-contrast colours whatever
+            accent an owner picked. */}
+        <div aria-hidden="true" className="h-1.5 w-full" style={{ backgroundColor: branding.accentColor }} />
 
-        {/* The sale was refused because the signed-in employee is not who this
-            till thought. Somebody signs in again, deliberately: the till will
-            not adopt whoever the server happens to report. */}
-        {recovery && (
-          <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
-            The signed-in employee changed. Sign in again to keep taking sales.
+        {/* Merchant identity. The name is rendered unconditionally, OUTSIDE
+            the logo branch: it is not replaced by the logo, and an absent,
+            invalid or broken logo leaves it exactly where it was. */}
+        <div className="flex flex-col items-center gap-3 border-b border-neutral-100 px-6 pb-5 pt-6 text-center">
+          {showLogo && branding.logo && (
+            // A plain <img> for the same reasons as PosHeader's. Max-only
+            // sizing with object-contain: a wide banner and a tall mark are
+            // each contained whole inside the bounded box, never stretched or
+            // cropped. alt is empty because the name beside it already says
+            // the same thing to a screen reader.
+            // eslint-disable-next-line @next/next/no-img-element -- see PosHeader
+            <img
+              src={logoUrl}
+              alt=""
+              width={branding.logo.width}
+              height={branding.logo.height}
+              onError={() => setLogoFailed(true)}
+              className="h-auto max-h-20 w-auto max-w-[240px] flex-none object-contain"
+            />
+          )}
+
+          <p className="w-full break-words text-xl font-semibold tracking-tight text-neutral-900">
+            {businessName}
           </p>
-        )}
+        </div>
 
-        <label className="text-sm text-neutral-600" htmlFor="employee-code">
-          Employee ID
-        </label>
-        <input
-          id="employee-code"
-          className="w-full rounded-xl border border-neutral-300 px-4 py-3 text-center text-2xl tracking-[0.4em]"
-          type="text"
-          // inputMode + pattern together are what raise a NUMERIC keypad on
-          // Android rather than a full keyboard. type="number" would do it too
-          // and would also bring spinners, allow `-` and `e`, and strip a
-          // leading zero — which is the whole contract here.
-          inputMode="numeric"
-          pattern="[0-9]*"
-          autoComplete="off"
-          maxLength={3}
-          autoFocus
-          placeholder="000"
-          value={employeeCode}
-          disabled={busy}
-          onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}
-        />
+        <div className="flex flex-col gap-4 p-6">
+          <h1 className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-500">
+            Employee Login
+          </h1>
 
-        <label className="text-sm text-neutral-600" htmlFor="employee-pin">
-          PIN
-        </label>
-        <input
-          id="employee-pin"
-          className="w-full rounded-xl border border-neutral-300 px-4 py-3 text-center text-2xl tracking-[0.5em]"
-          type="password"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          autoComplete="off"
-          maxLength={4}
-          placeholder="••••"
-          value={pin}
-          disabled={busy}
-          onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
-        />
+          {/* The sale was refused because the signed-in employee is not who this
+              till thought. Somebody signs in again, deliberately: the till will
+              not adopt whoever the server happens to report. */}
+          {recovery && (
+            <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+              The signed-in employee changed. Sign in again to keep taking sales.
+            </p>
+          )}
 
-        {error !== null && <p className="text-sm text-red-600">{error}</p>}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-neutral-700" htmlFor="employee-code">
+              Employee ID
+            </label>
+            <input
+              id="employee-code"
+              className="w-full rounded-xl border border-neutral-300 bg-neutral-50 px-4 py-3 text-center text-2xl tabular-nums tracking-[0.4em] focus:border-neutral-500 focus:bg-white focus:outline-none"
+              type="text"
+              // inputMode + pattern together are what raise a NUMERIC keypad on
+              // Android rather than a full keyboard. type="number" would do it too
+              // and would also bring spinners, allow `-` and `e`, and strip a
+              // leading zero — which is the whole contract here.
+              inputMode="numeric"
+              pattern="[0-9]*"
+              autoComplete="off"
+              maxLength={3}
+              autoFocus
+              placeholder="000"
+              value={employeeCode}
+              disabled={busy}
+              onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+          </div>
 
-        <button type="submit" className={PRIMARY} disabled={busy || !ready}>
-          {busy ? "Signing in…" : "Sign In"}
-        </button>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-neutral-700" htmlFor="employee-pin">
+              PIN
+            </label>
+            <input
+              id="employee-pin"
+              className="w-full rounded-xl border border-neutral-300 bg-neutral-50 px-4 py-3 text-center text-2xl tracking-[0.5em] focus:border-neutral-500 focus:bg-white focus:outline-none"
+              type="password"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              autoComplete="off"
+              maxLength={4}
+              placeholder="••••"
+              value={pin}
+              disabled={busy}
+              onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+          </div>
 
-        {/* v1.3 Feature 1C — a SECOND, smaller door.
-            Somebody arriving for their shift has to be able to clock in before
-            anyone has signed the till in, and on a till they are not about to
-            operate. It sits under the login rather than beside it because it is
-            the rarer act, and pressing it never unlocks the POS. */}
-        {onTimeClock !== undefined && (
-          <button
-            type="button"
-            className={SECONDARY}
-            disabled={busy}
-            onClick={onTimeClock}
-          >
-            Time Clock
+          {error !== null && (
+            <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </p>
+          )}
+
+          <button type="submit" className={PRIMARY} disabled={busy || !ready}>
+            {busy ? "Signing in…" : "Sign In"}
           </button>
-        )}
 
-        {/* v1.3 Feature 1D -- a THIRD door, and the same reasoning as the Time
-            Clock's: a till may need cash dropped to the safe before anybody has
-            signed it in, and the employee who authorizes that is not necessarily
-            about to operate it. Pressing this never unlocks the POS. */}
-        {onCashMovement !== undefined && (
-          <button
-            type="button"
-            className={SECONDARY}
-            disabled={busy}
-            onClick={onCashMovement}
-          >
-            Cash Movement
-          </button>
-        )}
+          {/* v1.3 Feature 1C — a SECOND, smaller door.
+              Somebody arriving for their shift has to be able to clock in before
+              anyone has signed the till in, and on a till they are not about to
+              operate. It sits under the login rather than beside it because it is
+              the rarer act, and pressing it never unlocks the POS.
+
+              v1.3 Feature 1D -- a THIRD door, and the same reasoning: a till may
+              need cash dropped to the safe before anybody has signed it in, and
+              the employee who authorizes that is not necessarily about to
+              operate it. Pressing this never unlocks the POS.
+
+              RC-polish groups the two side doors below a divider so they read
+              as secondary to Sign In; their callbacks are untouched. */}
+          {(onTimeClock !== undefined || onCashMovement !== undefined) && (
+            <div className="flex flex-col gap-2 border-t border-neutral-100 pt-4">
+              {onTimeClock !== undefined && (
+                <button
+                  type="button"
+                  className={SECONDARY}
+                  disabled={busy}
+                  onClick={onTimeClock}
+                >
+                  Time Clock
+                </button>
+              )}
+
+              {onCashMovement !== undefined && (
+                <button
+                  type="button"
+                  className={SECONDARY}
+                  disabled={busy}
+                  onClick={onCashMovement}
+                >
+                  Cash Movement
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </form>
     </div>
   );

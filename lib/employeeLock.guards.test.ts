@@ -6,6 +6,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { createLogoPublicUrl } from "@/lib/logoUpload";
+import { isValidEmployeeCodeShape, isValidEmployeePinShape } from "@/lib/employeeSession";
 
 const repoRoot = join(import.meta.dirname, "..");
 const read = (relative: string) => readFileSync(join(repoRoot, relative), "utf-8");
@@ -380,5 +382,144 @@ describe("offline is untouched", () => {
     expect(posGate).toContain("!state.establishedOnline");
     expect(code(read("lib/saleQueue.ts"))).toContain("SALE_QUEUE_SCHEMA_VERSION = 1");
     expect(code(read("lib/saleQueue.ts"))).toContain("SALE_REQUEST_PAYLOAD_VERSION = 4");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 RC-polish Lane 2B — merchant identity on the lock card
+// ---------------------------------------------------------------------------
+
+describe("the lock card shows the merchant's identity from the pinned config", () => {
+  /**
+   * Stricter than `code()` above: also strips block and JSX comments, whose
+   * continuation lines do not start with `*` and would otherwise let prose
+   * satisfy or trip these assertions.
+   */
+  //
+  // Block comments only, never a `{ /* … */ }` pattern: a props type opening
+  // with a doc comment would let that pattern swallow the whole function.
+  const strip = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const gatesSrc = strip(read(GATES));
+  const card = gatesSrc.slice(
+    gatesSrc.indexOf("export function EmployeeLockCard"),
+    gatesSrc.indexOf("export function EmployeeSelector")
+  );
+  const appSrc = strip(read(DEVICE_APP));
+  const callSite = appSrc.slice(appSrc.indexOf("<EmployeeLockCard"), appSrc.indexOf("/>", appSrc.indexOf("<EmployeeLockCard")));
+  const logoBranch = card.slice(card.indexOf("{showLogo && branding.logo && ("), card.indexOf("/>", card.indexOf("<img")));
+
+  it("the host hands it the PINNED config's identity, and the same logo origin PosRuntime gets", () => {
+    expect(callSite).toContain("businessProfile={state.config.businessProfile}");
+    expect(callSite).toContain("branding={state.config.branding}");
+    expect(callSite).toContain("logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? undefined}");
+    // The runtime's own origin is the same environment value.
+    expect(appSrc).toContain("logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}");
+  });
+
+  it("no separate branding fetch, query or subscription exists for it", () => {
+    for (const banned of ["fetch(", "supabase", ".from(", "rpc(", "subscribe", "channel(", "useEffect", "getProject", "loadBranding"]) {
+      expect(`EmployeeLockCard: ${banned}`).toBe(`EmployeeLockCard: ${banned}`);
+      expect(card).not.toContain(banned);
+    }
+    for (const banned of ["fetchBranding", "loadBranding", "brandingQuery", "fetchProject"]) {
+      expect(`DeviceApp: ${banned}`).toBe(`DeviceApp: ${banned}`);
+      expect(appSrc).not.toContain(banned);
+    }
+  });
+
+  it("the logo src is built only by the validated composer", () => {
+    expect(card).toContain("createLogoPublicUrl(branding.logo.path, logoBaseUrl)");
+    expect(card.match(/<img/g)).toHaveLength(1);
+    expect(card).toContain("src={logoUrl}");
+    expect(card).not.toMatch(/src=\{(?!logoUrl)/);
+  });
+
+  it("the composer it uses refuses invalid paths and origins (behavior)", () => {
+    const path = "123e4567-e89b-42d3-a456-426614174000/" + "a".repeat(64) + ".png";
+    const base = "https://abc.supabase.co";
+
+    expect(createLogoPublicUrl(path, base)).toBe(`${base}/storage/v1/object/public/project-logos/${path}`);
+    for (const bad of ["../escape.png", "https://evil.example/x.png", "", "not-a-path"]) {
+      expect(`path ${bad}`).toBe(`path ${bad}`);
+      expect(createLogoPublicUrl(bad, base)).toBeNull();
+    }
+    expect(createLogoPublicUrl(path, undefined)).toBeNull();
+    expect(createLogoPublicUrl(path, "javascript:alert(1)")).toBeNull();
+  });
+
+  it("a missing, invalid or broken logo hides only the logo", () => {
+    expect(card).toContain("const showLogo = branding.logo !== undefined && logoUrl !== null && !logoFailed;");
+    expect(card).toContain("onError={() => setLogoFailed(true)}");
+    expect(card).toContain("const [logoFailed, setLogoFailed] = useState(false);");
+  });
+
+  it("the business name is ALWAYS rendered, outside the logo branch", () => {
+    expect(card).toContain("const businessName = businessProfile.businessName.trim();");
+    expect(card.split("{businessName}").length - 1).toBe(1);
+    expect(logoBranch).not.toContain("{businessName}");
+    // After the logo branch closes, not inside or instead of it.
+    expect(card.indexOf("{businessName}")).toBeGreaterThan(card.indexOf("{showLogo && branding.logo && ("));
+    const nameAt = card.indexOf("{businessName}");
+    const before = card.slice(card.indexOf("{showLogo && branding.logo && ("), nameAt);
+    expect(before).toContain(")}");
+    // The name never depends on the logo's state: from the moment the logo
+    // branch closes to the name itself there is no condition of any kind —
+    // just the name's own element.
+    const logoClosedAt = card.indexOf(")}", card.indexOf("/>", card.indexOf("<img"))) + 2;
+    const between = card.slice(logoClosedAt, nameAt);
+    expect(between).not.toMatch(/&&|\?|\|\||showLogo|logoFailed|logoUrl|branding\.logo/);
+    expect(between.trim()).toBe(
+      '<p className="w-full break-words text-xl font-semibold tracking-tight text-neutral-900">'
+    );
+  });
+
+  it("the logo is bounded and contained, never stretched or cropped", () => {
+    expect(logoBranch).toContain("object-contain");
+    expect(logoBranch).toContain("max-h-");
+    expect(logoBranch).toContain("max-w-");
+    expect(logoBranch).toContain("w-auto");
+    for (const banned of ["object-cover", "object-fill", "w-full", "h-full"]) {
+      expect(`logo: ${banned}`).toBe(`logo: ${banned}`);
+      expect(logoBranch).not.toContain(banned);
+    }
+  });
+
+  it("Employee ID / PIN input behavior is unchanged", () => {
+    expect(card).toContain('onChange={(event) => setEmployeeCode(event.target.value.replace(/[^0-9]/g, ""))}');
+    expect(card).toContain('onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}');
+    expect(card).toContain("if (!busy && ready) onSubmit(employeeCode, pin);");
+    expect(card).toContain("autoFocus");
+    expect(card).toContain('placeholder="000"');
+    // Only the two credentials ever leave the card.
+    expect(card.match(/onSubmit\(/g)).toHaveLength(1);
+  });
+
+  it("leading zeros stay valid (behavior of the shape checks the card uses)", () => {
+    for (const ok of ["007", "010", "099", "123"]) {
+      expect(`code ${ok}`).toBe(`code ${ok}`);
+      expect(isValidEmployeeCodeShape(ok)).toBe(true);
+    }
+    expect(isValidEmployeeCodeShape("000")).toBe(false);
+    expect(isValidEmployeeCodeShape("7")).toBe(false);
+    expect(isValidEmployeePinShape("0007")).toBe(true);
+    expect(isValidEmployeePinShape("007")).toBe(false);
+  });
+
+  it("identity is shop-level only — no roster, lookup or enumeration", () => {
+    for (const banned of ["roster", "displayName", "employees", "lookup", "suggest", "<datalist", "list=", "employeeName"]) {
+      expect(`EmployeeLockCard: ${banned}`).toBe(`EmployeeLockCard: ${banned}`);
+      expect(card).not.toContain(banned);
+    }
+    // The error is still whatever the host passed, unrefined.
+    expect(card).toContain("{error}");
+  });
+
+  it("Time Clock and Cash Movement keep their callbacks", () => {
+    expect(card).toContain("onClick={onTimeClock}");
+    expect(card).toContain("onClick={onCashMovement}");
+    expect(card).toContain("{onTimeClock !== undefined && (");
+    expect(card).toContain("{onCashMovement !== undefined && (");
   });
 });

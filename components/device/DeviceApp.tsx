@@ -3141,7 +3141,14 @@ export default function DeviceApp() {
           // roster fetch, no staff directory on an unattended screen, and no
           // name to pick before a credential is asked for. The roster RPC and
           // its wrapper are untouched and remain available to admin surfaces.
+          //
+          // RC-polish — the merchant identity comes from the PINNED snapshot
+          // this till already holds, and the logo origin is the same one
+          // PosRuntime is handed below. No branding fetch exists for this.
           <EmployeeLockCard
+            businessProfile={state.config.businessProfile}
+            branding={state.config.branding}
+            logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? undefined}
             busy={gateBusy}
             error={gateError}
             recovery={gate.recovery === "employee"}

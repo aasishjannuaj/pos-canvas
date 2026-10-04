@@ -300,22 +300,31 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
       // EVERY OTHER FILE, including the whole of components/runtime, is still
       // forbidden from focusing anything: a focus call outside the exception
       // is exactly the thing that could drag focus back out of `inert`.
+      //
+      // v1.3 RC-polish Lane 2B — onFocus/onBlur joined the same named
+      // exception, and ONLY for those two files: their Search / Scan input
+      // reports its own focus into a local "Ready to scan" presentation flag.
+      // What that permits is pinned exactly in "the two reviewed fields
+      // observe focus for presentation only" below. Every other layout and
+      // the whole runtime tree may still not carry a focus handler at all.
       if (!FOCUS_EXCEPTIONS.includes(file)) {
-        expect(`${file}: .focus()`).toBe(`${file}: .focus()`);
-        expect(source).not.toContain(".focus()");
+        for (const banned of [".focus()", "onFocus", "onBlur"]) {
+          expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+          expect(source).not.toContain(banned);
+        }
       }
 
       // NEITHER TREE MAY REFOCUS BY ANY OTHER ROUTE, exception or not. These
       // are the mechanisms that would turn a one-shot request into focus
       // stealing, or would hand the element to something that could focus it
-      // from outside the component.
+      // from outside the component. `.blur()` joined in Lane 2B: observing
+      // focus is allowed in the two fields, moving it away never is.
       for (const banned of [
         "document.activeElement",
         "setInterval",
         "setTimeout",
         "requestAnimationFrame",
-        "onFocus",
-        "onBlur",
+        ".blur()",
         "forwardRef",
         "useImperativeHandle",
       ]) {
@@ -369,6 +378,72 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
     );
 
     expect(focusing.sort()).toEqual([...FOCUS_EXCEPTIONS].sort());
+  });
+
+  /**
+   * v1.3 RC-polish Lane 2B — what the onFocus/onBlur exception permits, and
+   * nothing more.
+   *
+   * Each reviewed field has exactly ONE onFocus and ONE onBlur, on the Search /
+   * Scan input, and each does nothing but set a local presentation flag. The
+   * flag is set nowhere else and is read by neither the nonce effect nor the
+   * barcode handler, so focus handling cannot turn into a refocus loop, a
+   * trigger, or an input to scanning.
+   */
+  it("the two reviewed fields observe focus for presentation only", () => {
+    for (const file of FOCUS_EXCEPTIONS) {
+      const source = code(read(file));
+
+      expect(`${file}: presentation-only focus handlers`).toBe(
+        `${file}: presentation-only focus handlers`
+      );
+
+      // One of each — substring counts, so onFocusCapture/onBlurCapture or a
+      // second handler on another element would also trip this.
+      expect(source.split("onFocus").length - 1).toBe(1);
+      expect(source.split("onBlur").length - 1).toBe(1);
+      expect(source).toContain("onFocus={() => setSearchScanFocused(true)}");
+      expect(source).toContain("onBlur={() => setSearchScanFocused(false)}");
+
+      // On the Search / Scan input, the one input this file renders.
+      const input = source.slice(source.indexOf("<input"), source.indexOf("/>", source.indexOf("<input")));
+      expect(input).toContain("ref={searchInputRef}");
+      expect(input).toContain("onFocus={() => setSearchScanFocused(true)}");
+      expect(input).toContain("onBlur={() => setSearchScanFocused(false)}");
+
+      // A local boolean, written only by those two handlers.
+      expect(source).toContain("const [searchScanFocused, setSearchScanFocused] = useState(false);");
+      expect(source.split("setSearchScanFocused(").length - 1).toBe(2);
+
+      // Not an input to focus or to scanning.
+      const effect = source.slice(source.indexOf("useEffect("));
+      const effectBody = effect.slice(0, effect.indexOf("}, ["));
+      expect(effectBody).not.toContain("searchScanFocused");
+      expect(effectBody).not.toContain("SearchScanFocused");
+
+      const handler = source.slice(
+        source.indexOf("function handleSearchKeyDown"),
+        source.indexOf("if (categories.length === 0)")
+      );
+      expect(handler).not.toContain("searchScanFocused");
+      expect(handler).not.toContain(".focus()");
+
+      // Never shared upward.
+      for (const banned of ["onSearchScanFocus", "onReadyChange", "onScanReady", "onFocusChange"]) {
+        expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+        expect(source).not.toContain(banned);
+      }
+    }
+  });
+
+  it("no other layout or runtime file may observe focus, even if one is added", () => {
+    // The same set-equality negative control as `.focus()` above.
+    const observing = layoutAndRuntimeFiles().filter((file) => {
+      const source = code(read(file));
+      return source.includes("onFocus") || source.includes("onBlur");
+    });
+
+    expect(observing.sort()).toEqual([...FOCUS_EXCEPTIONS].sort());
   });
 });
 
