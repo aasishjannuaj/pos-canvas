@@ -409,6 +409,25 @@ describe("how a register learns of the change", () => {
     expect(code(read(ROW))).not.toContain("CASH_DRAWER_PROPAGATION_NOTE");
   });
 
+  it("keeps the wording in the model's constant, never copied into a component", () => {
+    const model = code(read(MODEL));
+
+    expect(model).toContain("export const CASH_DRAWER_PROPAGATION_NOTE");
+    for (const phrase of [
+      "Restart the POS app",
+      "reconnect and refresh its device settings",
+      "last saved setting",
+      "offline authorization expires",
+    ]) {
+      expect(`model: ${phrase}`).toBe(`model: ${phrase}`);
+      expect(model).toContain(phrase);
+      for (const file of [PANEL, LIST, ROW]) {
+        expect(`${file}: ${phrase}`).toBe(`${file}: ${phrase}`);
+        expect(read(file)).not.toContain(phrase);
+      }
+    }
+  });
+
   it("adds no polling, Realtime, websocket or per-sale fetch", () => {
     for (const file of TASK_1D_SOURCES) {
       const source = code(read(file));
