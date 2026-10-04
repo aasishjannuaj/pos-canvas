@@ -69,16 +69,50 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-neutral-50 px-6 py-10">
-      <div className="mx-auto w-full max-w-md">
-        <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
-          POS Canvas
-        </p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-900">
-          {order.orderNumber}
-        </h1>
+    <div className="flex min-h-screen flex-col bg-neutral-50">
+      {/* RC-polish — the way back is at the top and stays there. It was a
+          full-width button below the receipt and the reprint action, which on a
+          long receipt meant scrolling to leave.
 
-        <div className="mt-6 rounded-2xl border border-neutral-200 bg-white p-4">
+          It is ordinary screen chrome, and the print rules in globals.css hide
+          everything outside .receipt-print-area, so none of this reaches paper. */}
+      <div className="sticky top-0 z-10 flex-none border-b border-neutral-200 bg-white">
+        <div className="mx-auto flex w-full max-w-md items-center justify-between gap-4 px-6 py-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="-ml-2 inline-flex flex-none items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
+          >
+            {/* Drawn, not typed: a glyph renders differently across the Android
+                WebView and the Windows shell. */}
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 16 6 10l6-6" />
+            </svg>
+            Back to recent sales
+          </button>
+
+          <div className="min-w-0 text-right">
+            <p className="truncate text-sm font-semibold tracking-tight text-neutral-900">
+              {order.orderNumber}
+            </p>
+            <p className="truncate text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
+              POS Canvas
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto w-full max-w-md px-6 py-6">
+        <div className="rounded-2xl border border-neutral-200 bg-white p-4">
           <AuthoritativeReceipt
             receipt={receipt}
             presentation={presentation}
@@ -105,14 +139,6 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
             </p>
           )}
         </div>
-
-        <button
-          type="button"
-          onClick={onBack}
-          className="mt-8 w-full rounded-xl border border-neutral-200 bg-white px-4 py-3.5 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100"
-        >
-          Back to recent sales
-        </button>
       </div>
 
       {/* The print-only copy. Positioned off-screen on screen and revealed by
