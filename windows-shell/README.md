@@ -315,10 +315,10 @@ catastrophic inside a customer-installable artifact.
 ### Running a build
 
 1. GitHub → **Actions** → **Windows app** → **Run workflow** → branch `main` → **Run workflow**.
-2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.2.0`**.
+2. When the run finishes, open it and download the artifact **`pos-canvas-windows-v1.3.0`**.
 3. It contains two files:
-   - `POS-Canvas-Windows-v1.1.0.exe`
-   - `POS-Canvas-Windows-v1.1.0.exe.sha256`
+   - `POS-Canvas-Windows-v1.3.0.exe`
+   - `POS-Canvas-Windows-v1.3.0.exe.sha256`
 
 Check the log for `runtime ok:` before trusting the artifact.
 
@@ -330,7 +330,7 @@ keeps the two in step, because nothing else does.
 ### Verifying the download
 
 ```bash
-shasum -a 256 -c POS-Canvas-Windows-v1.1.0.exe.sha256
+shasum -a 256 -c POS-Canvas-Windows-v1.3.0.exe.sha256
 ```
 
 The checksum file uses the standard two-column format, so `sha256sum -c` works on

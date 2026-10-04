@@ -36,8 +36,11 @@ Both apps are one universal binary per platform: they become a particular
 business's till by pairing to a published configuration, not by being built per
 project.
 
-Work on the `feature/v1.3.0-*` branches is **development, not released**.
-Nothing on those branches is part of 1.2.0, and this README describes 1.2.0.
+Work on `release/v1.3.0-rc` and the `feature/v1.3.0-*` branches is
+**development, not released**. Nothing on those branches is part of 1.2.0, and
+this README describes 1.2.0. For what v1.3.0 contains, what it does not, and
+what it still needs before it could ship, see
+[docs/RELEASE_NOTES_v1.3.0.md](./docs/RELEASE_NOTES_v1.3.0.md).
 
 ## What exists today
 

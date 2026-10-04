@@ -1,5 +1,21 @@
 # POS Canvas — MVP Release Checklist
 
+> ## Current state — v1.2.0 RELEASED · v1.3.0 RELEASE CANDIDATE (not released)
+>
+> | | |
+> |---|---|
+> | Released product | **v1.2.0** — web, Android, Windows. Published, downloadable, checksum-verified |
+> | In preparation | **v1.3.0** — release candidate on `release/v1.3.0-rc`. **Not released, no artifacts built, no production migration applied** |
+> | Accepted v1.3 product base | `018a76f05849599a9e5755a77daada4e64f0cf50` |
+> | Test-harness hardening | `44ddf224fcc5db0e31d16b27a21e0c59abe33464` |
+> | v1.3 feature scope | **FROZEN** |
+> | v1.3 scope, deferrals and limits | `RELEASE_NOTES_v1.3.0.md` |
+> | v1.3 production migrations | `PRODUCTION_MIGRATION_RUNBOOK_v1.3.0.md` — **14 migrations, none applied** |
+> | Cash Drawer | software 1A–1D only. **Physical end-to-end validation NOT YET COMPLETED** (1E not performed, 1E-PREP paused), `cash_drawer_enabled = false` |
+>
+> §0 below carries the **active** version target. The banners and per-item
+> history under it are preserved as written.
+
 > ## Release 1.1.0 — COMPLETE and live (2026-08-31)
 >
 > | | |
@@ -43,6 +59,40 @@ Two rules govern every step below:
 ---
 
 ## 0. Release version target
+
+### ACTIVE — the 1.3.0 cut
+
+| Surface | In tree | Published | Ordering key |
+|---|---|---|---|
+| Web (Vercel) | continuous | continuous | n/a |
+| Android | **`versionName 1.3.0`, `versionCode 4`** | 1.2.0 / 3 | `versionCode` **must strictly increase** |
+| Windows | **`1.3.0`** | 1.2.0 | `version` in `windows-shell/package.json` |
+
+**The bump is done in the tree; nothing is built or published.** The two columns
+differ on purpose and must keep differing until step 8 of §10.
+
+Every file that carries a release version, and what it is for:
+
+| File | Field | 1.2.0 → 1.3.0 |
+|---|---|---|
+| `android/app/build.gradle` | `versionCode` **4**, `versionName` **"1.3.0"** | **DONE** — the canonical Android version |
+| `windows-shell/package.json` | `"version": "1.3.0"` | **DONE** — drives `POS-Canvas-Windows-v${version}.exe` |
+| `.github/workflows/windows-app.yml` | `name: pos-canvas-windows-v1.3.0` | **DONE** — hardcoded, and it does not follow the version |
+| `windows-shell/README.md` | artifact/asset names in the release runbook | **DONE** — documentation only |
+| `DEPLOYMENT.md` | the Android release-history table | **DONE** — 1.3.0 / code 4 recorded as not-yet-built |
+| `lib/releaseVersion.guards.test.ts` | the temporary pointer-lag allowance | **DONE** — `RELEASE_CUT_POINTERS_MAY_LAG = true`, and it **must** be restored to strict equality in the pointer commit |
+| **`package.json` (root)** | `"version": "0.1.0"` | **No.** `private: true`, deploys continuously, and `build.gradle` states the Android version is *"deliberately not derived from package.json"*. A guard asserts the root version is **not** equal to either native version, so it is not the release source and has never been bumped for a release. |
+| `lib/androidRelease.ts` | `CURRENT_ANDROID_RELEASE` | **Not yet** — step 8 of §10, after the artifact is published and verified. Still describes 1.2.0, which is what is downloadable today |
+| `lib/windowsRelease.ts` | `CURRENT_WINDOWS_RELEASE` | **Not yet** — same |
+
+**No semantic prerelease suffix is used.** `SEMVER` in
+`lib/platformRelease.ts` and in `lib/releaseVersion.guards.test.ts` is
+`/^\d+\.\d+\.\d+$/`, which rejects any pre-release or build suffix, and
+`isPlatformRelease` validates every published pointer against it. The repository
+convention for a candidate is therefore the plain target version in the tree
+with the published pointers left behind — not `1.3.0-rc.N`.
+
+### HISTORY — the 1.0.0 → 1.1.0 cut, preserved as written
 
 | Surface | In tree | Published | Ordering key |
 |---|---|---|---|
@@ -89,7 +139,7 @@ and checksum-verified — step 8 of §10.**
 
 - [ ] `main` == `origin/main`, no tracked working-tree changes
 - [ ] Only `supabase/config.toml` remains untracked (see §9 — it must never be committed or pushed)
-- [ ] 19 migrations on disk == 19 tracked
+- [ ] 35 migrations on disk == 35 tracked (21 v1.2 baseline + 14 for v1.3)
 - [ ] Production and staging migration state known and recorded (§10)
 - [ ] Release freeze declared: no feature work, only P0 fixes
 
