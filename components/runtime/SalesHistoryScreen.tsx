@@ -138,25 +138,57 @@ export default function SalesHistoryScreen({
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-neutral-50 px-6 py-10">
-      <div className="mx-auto w-full max-w-md">
-        <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
-          POS Canvas
-        </p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-neutral-900">
-          {HISTORY_TITLE}
-        </h1>
+    <div className="flex min-h-screen flex-col bg-neutral-50">
+      {/* RC-polish — the way back is the first thing on screen and stays there.
+          It used to be a full-width button BELOW every row and every Load more,
+          which on a long page meant scrolling to leave. Sticky, so a cashier can
+          always get back to the till in one press. */}
+      <div className="sticky top-0 z-10 flex-none border-b border-neutral-200 bg-white">
+        <div className="mx-auto flex w-full max-w-md items-center justify-between gap-4 px-6 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="-ml-2 inline-flex flex-none items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
+          >
+            {/* Drawn, not typed: a glyph renders differently across the Android
+                WebView and the Windows shell. */}
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 16 6 10l6-6" />
+            </svg>
+            Back to POS
+          </button>
 
+          <div className="min-w-0 text-right">
+            <p className="truncate text-sm font-semibold tracking-tight text-neutral-900">
+              {HISTORY_TITLE}
+            </p>
+            <p className="truncate text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
+              POS Canvas
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto w-full max-w-md px-6 py-6">
         {/* Every state says what it is in words, so none of them reads as a
             stuck spinner. */}
         {phase === "loading" && (
-          <p role="status" className="mt-6 text-sm text-neutral-600">
+          <p role="status" className="text-sm text-neutral-600">
             {HISTORY_LOADING}
           </p>
         )}
 
         {phase === "error" && (
-          <div className="mt-6 rounded-2xl border border-neutral-200 bg-white p-5">
+          <div className="rounded-2xl border border-neutral-200 bg-white p-5">
             <p role="status" className="text-sm leading-relaxed text-neutral-700">
               {message}
             </p>
@@ -172,13 +204,15 @@ export default function SalesHistoryScreen({
         )}
 
         {phase === "ready" && list.orders.length === 0 && (
-          <p role="status" className="mt-6 text-sm text-neutral-600">
+          <p role="status" className="text-sm text-neutral-600">
             {HISTORY_EMPTY}
           </p>
         )}
 
+        {/* RC-polish — one framed surface with divided rows rather than six
+            free-floating pills. Same rows, same data, same press target. */}
         {phase === "ready" && list.orders.length > 0 && (
-          <ul className="mt-6 flex flex-col gap-2">
+          <ul className="divide-y divide-neutral-100 overflow-hidden rounded-2xl border border-neutral-200 bg-white">
             {list.orders.map((order) => {
               const row = describeHistoryRow(order);
 
@@ -189,7 +223,7 @@ export default function SalesHistoryScreen({
                   <button
                     type="button"
                     onClick={() => onOpenOrder(order)}
-                    className="flex w-full items-baseline justify-between gap-4 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-left transition-colors hover:border-neutral-300 hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
+                    className="flex w-full items-baseline justify-between gap-4 px-4 py-3.5 text-left transition-colors hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-neutral-400"
                   >
                     <span className="min-w-0">
                       <span className="block text-sm font-semibold text-neutral-900">
@@ -200,7 +234,7 @@ export default function SalesHistoryScreen({
                       </span>
                     </span>
 
-                    <span className="flex-none text-sm font-medium text-neutral-900">
+                    <span className="flex-none text-sm font-semibold tabular-nums text-neutral-900">
                       {currencySymbol}
                       {row.total}
                     </span>
@@ -230,14 +264,6 @@ export default function SalesHistoryScreen({
             {loadingMore ? "Loading…" : HISTORY_LOAD_MORE}
           </button>
         )}
-
-        <button
-          type="button"
-          onClick={onClose}
-          className="mt-8 w-full rounded-xl border border-neutral-200 bg-white px-4 py-3.5 text-sm font-semibold text-neutral-700 transition-colors hover:bg-neutral-100"
-        >
-          Back to POS
-        </button>
       </div>
     </div>
   );
