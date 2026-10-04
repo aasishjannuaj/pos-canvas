@@ -138,6 +138,118 @@ otherwise:
 
 ---
 
+## RC-2 — native packaging validation record
+
+> **No artifact was published. No tag or GitHub Release was created. The public
+> download pointers were not moved.** v1.3.0 remains a release candidate.
+
+Validated against source SHA `96b25b8f32da57e49e37220fefe0e59267173f24`
+(`release/v1.3.0-rc`), chain `96b25b8 → 44ddf22 → 018a76f`.
+
+### Shared device runtime — BUILT AND VERIFIED
+
+Both native targets package the same runtime, built by `native-device/` + vite
+from the RC-1 checkout. Built twice, once per target output directory, and the
+bundles are byte-identical:
+
+| Field | Value |
+|---|---|
+| Source SHA | `96b25b8f32da57e49e37220fefe0e59267173f24` |
+| Android command | `npm run android:release:sync` (`android:runtime` + `cap sync android`) |
+| Windows command | `npm run windows:runtime` |
+| Bundle | `index-DldWgyS-.js` — 589,776 bytes, sha-256 `cf8a5a49cbd2d32d…` |
+| Stylesheet | `index-BZ9g1jHk.css` — 62,053 bytes |
+| Android output | `android/app/src/main/assets/public/` |
+| Windows output | `windows-shell/runtime/` (entry `index.html` present — the workflow's fail-closed check, replicated locally) |
+| Status | **PASS** — generated from this checkout, not inherited from an earlier build |
+
+### Android — RC ARTIFACT NOT PRODUCED (signing material absent)
+
+| Field | Value |
+|---|---|
+| Source SHA | `96b25b8f32da57e49e37220fefe0e59267173f24` |
+| versionName | `1.3.0` (source: `android/app/build.gradle`) |
+| versionCode | `4` (source: `android/app/build.gradle`) |
+| applicationId / namespace | `com.poscanvas.app` — **unchanged** |
+| Build command | `./gradlew clean assembleRelease` (JDK 21, Android SDK build-tools 36.0.0) |
+| Build type | release |
+| Result | **FAILED AT THE SIGNING GATE, BY DESIGN** |
+| Failing task | `:app:packageReleaseResources` |
+| Reason | `android/keystore.properties` not found |
+| APK filename | **none** |
+| Size / sha-256 | **none — no artifact exists** |
+| Signing status | **NOT SIGNED — no release APK was produced** |
+| Publication status | **NOT PUBLISHED** |
+
+`android/keystore.properties` is gitignored and absent from this machine's
+checkout. `build.gradle` refuses every task matching
+`^(assemble|bundle|package)Release.*` when it is missing, deliberately, so that
+no unsigned or debug-signed release APK is ever written — and none was: the
+`app/build/outputs/apk/release/` directory does not exist. **The signing
+architecture is unchanged and was proven to refuse.** No keystore or credential
+was created, rotated or inspected.
+
+Producing the Android RC artifact requires the release keystore and its three
+secrets, which is a signing-material decision, not a packaging step.
+
+### Windows — RC ARTIFACT NOT PRODUCED (workflow not invoked)
+
+| Field | Value |
+|---|---|
+| Source SHA | `96b25b8f32da57e49e37220fefe0e59267173f24` (pushed to `origin/release/v1.3.0-rc`) |
+| Version | `1.3.0` (`windows-shell/package.json`) |
+| Workflow | `.github/workflows/windows-app.yml` — "Windows app" |
+| Run ID | **none — not dispatched** |
+| Installer type / arch | NSIS, x64 (config-verified) |
+| Expected filename | `POS-Canvas-Windows-v1.3.0.exe` (from `artifactName: POS-Canvas-Windows-v${version}.${ext}`) |
+| Size / sha-256 | **none — no installer exists** |
+| Packaging status | **CONFIG-VERIFIED ONLY — not built** |
+| Signing status | unsigned by design (the job is named "Build unsigned Windows installer") |
+| Publication status | **NOT PUBLISHED** |
+
+The installer requires the Windows runner; electron-builder NSIS cannot be
+produced from macOS, and the workflow's own header says so. The workflow was
+**not** dispatched because no GitHub CLI or usable API credential is available
+in this environment, and none was requested.
+
+**Workflow safety was audited before any attempt**, and it is safe to invoke:
+`workflow_dispatch` only (no tag or push trigger, deliberately deferred);
+`permissions: contents: read`, so it *cannot* create a tag or a Release; no
+release, publish or deploy step; `electron-builder --win --x64 --publish never`;
+output goes only to `actions/upload-artifact` with 30-day retention; and the
+cash-drawer step verifies the native module is *packaged* without running it.
+
+**Packaging configuration verified from source** (not a substitute for a build):
+
+| Check | Result |
+|---|---|
+| Target / arch | `nsis`, `x64` |
+| `--publish never` | present in `build:windows` |
+| Cash Drawer 1C modules in `files` | all six: `main.mjs`, `preload.js`, `cashDrawerProfiles.mjs`, `cashDrawerRaw.mjs`, `cashDrawerIpc.mjs`, `win32Spooler.mjs` |
+| `runtime/**/*` in `files` | present, and the runtime now exists |
+| koffi pin | `koffi@3.3.2` exact, `@koromix/koffi-win32-x64@3.3.2` in the lockfile |
+| `asarUnpack` | `node_modules/koffi/**` and `node_modules/@koromix/koffi-win32-x64/**` — the `.node` binary lands outside `app.asar` |
+| Electron security | unchanged; `windowsShellSecurity`, `windowsShell` and `windowsInstaller` guards pass |
+
+**Packaging a drawer bridge is not drawer validation.** Cash Drawer physical
+end-to-end validation remains **NOT YET COMPLETED** — see the Cash Drawer
+section above. No hardware was contacted during RC-2.
+
+### Known test-harness debt found by RC-2
+
+Running the Android packaging pipeline locally surfaced a third instance of the
+artifact-isolation problem RC-0B corrected. `lib/cashDrawer.guards.test.ts`
+walks `android-shell`, and `npm run android:release:sync` writes the shared
+device bundle to `android-shell/www/` — gitignored, untracked, and legitimately
+containing drawer code. RC-0B's `GENERATED_NOT_AUTHORED` set covers only
+`windows-shell/runtime`, so this path is still scanned.
+
+Proven to be artifact coupling, not a source defect, on identical source: with
+`android-shell/www` present the guard reports 1 failed / 27 passed; with it
+absent, 28 passed. `windows-shell/runtime` was present in both runs, so RC-0B's
+correction is holding. **Not fixed in RC-2** — a test change is outside RC-2's
+authorized scope.
+
 ## Before v1.3.0 may be called released
 
 1. The 14 production migrations applied and verified —
