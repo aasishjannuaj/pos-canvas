@@ -65,8 +65,20 @@ const DRAWER_TOKENS = [
  * scanning — silently retiring the guards on the completed-sale report, the
  * coordinator's importers and window.print(). So one path is excluded, by
  * value, and the invariant itself is left alone.
+ *
+ * android-shell/www/ is the same artifact for the other shell. `npm run
+ * android:runtime` copies the shared device bundle there (gitignored; the
+ * shell's authored android-shell/*.mjs stays tracked and stays scanned), and
+ * because that bundle is the SAME bundle Windows packages, it carries the
+ * DeviceApp's drawer code too. Scanning it made the Android-shell guard below
+ * fail after any Android sync on identical source. Excluded by path for the
+ * same reason, and only that directory: everything else under android-shell
+ * is still walked.
  */
-const GENERATED_NOT_AUTHORED = new Set([join("windows-shell", "runtime")]);
+const GENERATED_NOT_AUTHORED = new Set([
+  join("windows-shell", "runtime"),
+  join("android-shell", "www"),
+]);
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
