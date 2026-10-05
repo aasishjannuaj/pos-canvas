@@ -927,7 +927,8 @@ describe("no scanner architecture and no focus stealing", () => {
   it("69b. focuses exactly once, from the nonce effect only, installing nothing", () => {
     expect([...browser.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
     expect([...browser.matchAll(/useEffect\(/g)]).toHaveLength(1);
-    expect(browser).toContain("}, [scanFocusRequest]);");
+    expect(browser).toContain("}, [scanFocusRequest, sellingSurfaceInactive]);");
+    expect(browser).not.toContain("}, [scanFocusRequest]);");
 
     const effect = browser.slice(browser.indexOf("useEffect("));
     const body = effect.slice(0, effect.indexOf("}, ["));
@@ -1231,8 +1232,8 @@ describe("Lane 2B: scanner readiness is local presentation of real focus", () =>
   );
 
   it("focus shows 'Ready to scan'; blur shows the instruction to select the field", () => {
-    expect(statusLine).toContain(") : searchScanFocused ? (");
-    const ready = statusLine.slice(statusLine.indexOf(") : searchScanFocused ? ("));
+    expect(statusLine).toContain(") : scannerReady ? (");
+    const ready = statusLine.slice(statusLine.indexOf(") : scannerReady ? ("));
     expect(ready.indexOf("Ready to scan")).toBeGreaterThan(-1);
     expect(ready.indexOf("Ready to scan")).toBeLessThan(ready.indexOf("Select the search box before scanning"));
   });
@@ -1342,7 +1343,9 @@ describe("Lane 2B: Liquor and Retail behave identically", () => {
       "onBlur={() => setSearchScanFocused(false)}",
       "shouldWarnNoMatch({ activation: activation.status, searching, resultCount: items.length })",
       "{noMatchWarning && searching ? (",
-      ") : searchScanFocused ? (",
+      ") : scannerReady ? (",
+      "const sellingSurfaceInactive = sellingSurfaceActive === false;",
+      "const scannerReady = !sellingSurfaceInactive && searchScanFocused;",
       "{barcodeScanningEnabled && (",
       "No matching product found",
       "Ready to scan",

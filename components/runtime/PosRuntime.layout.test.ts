@@ -240,7 +240,7 @@ describe("Liquor and Retail focus identically", () => {
       expect(src).toContain("const searchInputRef = useRef<HTMLInputElement>(null);");
       expect(src).toContain("ref={searchInputRef}");
       expect(src).toContain("searchInputRef.current?.focus();");
-      expect(src).toContain("}, [scanFocusRequest]);");
+      expect(src).toContain("}, [scanFocusRequest, sellingSurfaceInactive]);");
       expect(src).toContain("if (scanFocusRequest === undefined) {");
     }
   });

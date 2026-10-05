@@ -363,7 +363,7 @@ describe("4 + 5 + 6. the covered POS is truly non-interactive", () => {
       // did not ask.
       expect(source).toContain("const searchInputRef = useRef<HTMLInputElement>(null);");
       expect(source).toContain("searchInputRef.current?.focus();");
-      expect(source).toContain("}, [scanFocusRequest]);");
+      expect(source).toContain("}, [scanFocusRequest, sellingSurfaceInactive]);");
       expect(source).toContain("if (scanFocusRequest === undefined) {");
       expect([...source.matchAll(/useEffect\(/g)]).toHaveLength(1);
     }
@@ -575,5 +575,167 @@ describe("11 + 15. the guarantees this correction must not have weakened", () =>
 
     expect(gateRegion).not.toContain("localStorage");
     expect(gateRegion).not.toContain("sessionStorage");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RC-polish fix — a covered selling surface cannot take focus
+//
+// THE DEFECT THIS LOCKS OUT. Search / Scan focus used to depend on the nonce
+// alone, on the belief that an employee gate clearing remounted PosRuntime. It
+// does not: the host keeps PosRuntime MOUNTED inside the inert wrapper so the
+// cart survives a gate. So the one activation opportunity was spent on a mount
+// that happened WHILE the subtree was inert — where .focus() is a no-op — and
+// after signing in the field never had focus on a real till.
+// ---------------------------------------------------------------------------
+
+describe("the covered selling surface cannot be focused, and knows when it is covered", () => {
+  const LIQUOR = "components/editor/pos-layouts/LiquorStoreBrowser.tsx";
+  const RETAIL = "components/editor/pos-layouts/RetailStoreBrowser.tsx";
+  const browsers = [LIQUOR, RETAIL];
+
+  it("1. the host derives operability from the SAME value that drives inert", () => {
+    // One source, so the two can never disagree: inert subtree <=> inactive
+    // surface. A second rule here is how they would drift.
+    expect(app).toContain("inert={activeOverlay !== null}");
+    expect(app).toContain("sellingSurfaceActive={activeOverlay === null}");
+  });
+
+  it("2. the runtime is told operability and nothing about WHICH overlay", () => {
+    expect(runtime).toContain("sellingSurfaceActive");
+    expect(runtime).toContain("sellingSurfaceActive={sellingSurfaceActive}");
+
+    // PosRuntime must stay ignorant of the host's screens.
+    for (const leak of [
+      "gateOverlay",
+      "timeClockOverlay",
+      "cashMovementOverlay",
+      "activeOverlay",
+      "EmployeeLockCard",
+      "DeviceSettingsScreen",
+      "SalesHistoryScreen",
+    ]) {
+      expect(`PosRuntime does not name ${leak}`).toBe(`PosRuntime does not name ${leak}`);
+      expect(runtime).not.toContain(leak);
+    }
+  });
+
+  it("3. an inactive surface returns before touching focus", () => {
+    for (const file of browsers) {
+      const src = code(read(file));
+      const effect = src.slice(src.indexOf("useEffect("));
+      const body = effect.slice(0, effect.indexOf("}, ["));
+
+      expect(`${file}: inactive returns first`).toBe(`${file}: inactive returns first`);
+      expect(src).toContain("const sellingSurfaceInactive = sellingSurfaceActive === false;");
+      expect(body).toContain("if (sellingSurfaceInactive) {");
+      expect(body.indexOf("sellingSurfaceInactive")).toBeLessThan(
+        body.indexOf("searchInputRef.current?.focus()")
+      );
+    }
+  });
+
+  it("4. NEGATIVE CONTROL — the old nonce-only lifecycle assumption is gone", () => {
+    // This is the assertion that fails if anyone restores the broken effect.
+    // The nonce alone cannot observe an overlay clearing, because clearing one
+    // is neither a mount nor a nonce change.
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: not nonce-only`).toBe(`${file}: not nonce-only`);
+      expect(src).not.toContain("}, [scanFocusRequest]);");
+      expect(src).toContain("}, [scanFocusRequest, sellingSurfaceInactive]);");
+    }
+  });
+
+  it("5. activation is a transition, so it offers exactly one opportunity", () => {
+    // The dependency changes once per false->true flip. Nothing re-arms it, no
+    // counter, no ref, no retry.
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: one opportunity`).toBe(`${file}: one opportunity`);
+      expect([...src.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
+      expect([...src.matchAll(/useEffect\(/g)]).toHaveLength(1);
+      for (const banned of ["focusAttempts", "retryFocus", "refocus", "pendingFocus"]) {
+        expect(src).not.toContain(banned);
+      }
+    }
+  });
+
+  it("6. readiness is false while covered, and otherwise only real focus", () => {
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: readiness gated`).toBe(`${file}: readiness gated`);
+      expect(src).toContain("const scannerReady = !sellingSurfaceInactive && searchScanFocused;");
+      // Readiness is never asserted from the attempt itself.
+      expect(src).not.toContain("setSearchScanFocused(true);\n    searchInputRef");
+      // The input's own events are the only writers.
+      expect(src).toContain("onFocus={() => setSearchScanFocused(true)}");
+      expect(src).toContain("onBlur={() => setSearchScanFocused(false)}");
+      expect(src.split("setSearchScanFocused(").length - 1).toBe(2);
+    }
+  });
+
+  it("7. a deliberate blur cannot trigger another focus", () => {
+    // searchScanFocused must NOT be a dependency of the focus effect, or
+    // blurring would immediately re-focus and the caret could never leave.
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: blur does not refocus`).toBe(`${file}: blur does not refocus`);
+      expect(src).not.toContain("searchScanFocused]");
+      expect(src).not.toContain(", searchScanFocused");
+    }
+  });
+
+  it("8. still no polling, timers, activeElement or global listener", () => {
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      for (const banned of [
+        "setInterval",
+        "setTimeout",
+        "requestAnimationFrame",
+        "document.activeElement",
+        "addEventListener",
+        "autoFocus",
+        "forwardRef",
+        "useImperativeHandle",
+      ]) {
+        expect(`${file}: ${banned}`).toBe(`${file}: ${banned}`);
+        expect(src).not.toContain(banned);
+      }
+    }
+  });
+
+  it("9. the Builder preview still cannot be focused programmatically", () => {
+    const preview = code(read("components/editor/EditorPreview.tsx"));
+
+    // It passes neither prop, and the effect returns on an absent nonce.
+    expect(preview).not.toContain("scanFocusRequest");
+    expect(preview).not.toContain("sellingSurfaceActive");
+
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: absent nonce returns`).toBe(`${file}: absent nonce returns`);
+      expect(src).toContain("if (scanFocusRequest === undefined) {");
+    }
+  });
+
+  it("10. an absent signal means OPERABLE, so hosts without overlays are unchanged", () => {
+    // OwnerPosRuntime passes no signal. Treating absent as inactive would
+    // silently disable focus for the owner's browser till.
+    for (const file of browsers) {
+      const src = code(read(file));
+
+      expect(`${file}: absent is operable`).toBe(`${file}: absent is operable`);
+      expect(src).toContain("sellingSurfaceActive === false");
+      expect(src).not.toContain("sellingSurfaceActive !== true");
+    }
+
+    expect(code(read("components/runtime/OwnerPosRuntime.tsx"))).not.toContain("sellingSurfaceActive");
   });
 });

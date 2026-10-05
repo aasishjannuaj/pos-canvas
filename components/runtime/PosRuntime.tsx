@@ -104,6 +104,24 @@ type PosRuntimeProps = {
    * logic enters this component.
    */
   headerTrailing?: ReactNode;
+  /**
+   * RC-polish fix — is this runtime's selling surface actually operable?
+   *
+   * A HOST SIGNAL, AND DELIBERATELY GENERIC. A till host passes `false` while
+   * anything covers the POS, because the covering host keeps this runtime
+   * MOUNTED (and its subtree `inert`) so the cart survives. This runtime
+   * therefore cannot observe a cover appearing or clearing by itself, and the
+   * Search / Scan field had no way to learn the till had become usable.
+   *
+   * Nothing here knows WHICH overlay — only operable or not. It is forwarded
+   * to the Search / Scan presentation path and read nowhere else.
+   *
+   * OPTIONAL, AND ABSENT MEANS OPERABLE. A host with no overlay concept — the
+   * owner's browser runtime, the Builder preview — omits it and keeps exactly
+   * today's behaviour. Absence must never read as "inactive", or omitting it
+   * would silently disable focus for those hosts.
+   */
+  sellingSurfaceActive?: boolean;
 
   /**
    * Feature 26.2 — the LIVE cart size, for a host that must authorize on it.
@@ -212,6 +230,7 @@ export default function PosRuntime({
   refreshStock,
   homeLink,
   headerTrailing,
+  sellingSurfaceActive,
   cartLineCountRef,
   logoBaseUrl,
   onSaleRejected,
@@ -987,6 +1006,7 @@ export default function PosRuntime({
             templateId={config.project.templateId}
             barcodeScanningEnabled={isBarcodeScanningEnabled(config.features)}
             scanFocusRequest={scanFocusRequest}
+            sellingSurfaceActive={sellingSurfaceActive}
             menuItems={menuItems}
             selectedItemId={null}
             editorMode="preview"

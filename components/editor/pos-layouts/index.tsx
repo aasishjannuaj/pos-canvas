@@ -64,6 +64,18 @@ type ProductBrowserSwitchProps = Omit<ProductBrowserProps, "onAddToCart"> & {
    * have one.
    */
   scanFocusRequest?: number;
+  /**
+   * RC-polish fix — whether the host's selling surface is operable.
+   *
+   * Forwarded, never interpreted here. `false` means something covers the POS
+   * (the host keeps it mounted and inert so the cart survives), so the two
+   * Search / Scan browsers must neither take focus nor claim to be
+   * scanner-ready. Absent means the host has no overlay concept.
+   *
+   * Passed beside the shared spread for the same reason as the two props
+   * above: the grid browsers have no Search / Scan field.
+   */
+  sellingSurfaceActive?: boolean;
   // Feature 18.2 — hosts receive the chosen selections alongside the item.
   // Omitted for a product with no modifier groups, so existing callers that
   // ignore the second argument keep working unchanged.
@@ -86,6 +98,7 @@ export default function ProductBrowser({
   templateId,
   barcodeScanningEnabled,
   scanFocusRequest,
+  sellingSurfaceActive,
   ...props
 }: ProductBrowserSwitchProps) {
   // Feature 18.2 — the single shared interception point.
@@ -126,6 +139,7 @@ export default function ProductBrowser({
           {...layoutProps}
           barcodeScanningEnabled={barcodeScanningEnabled}
           scanFocusRequest={scanFocusRequest}
+          sellingSurfaceActive={sellingSurfaceActive}
         />
       );
     }
@@ -139,6 +153,7 @@ export default function ProductBrowser({
           {...layoutProps}
           barcodeScanningEnabled={barcodeScanningEnabled}
           scanFocusRequest={scanFocusRequest}
+          sellingSurfaceActive={sellingSurfaceActive}
         />
       );
     }

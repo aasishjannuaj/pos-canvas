@@ -3319,6 +3319,24 @@ export default function DeviceApp() {
               not state. */}
           <div className="min-h-0 flex-1" inert={activeOverlay !== null}>
             <PosRuntime
+              // RC-polish fix — IS THE SELLING SURFACE ACTUALLY OPERABLE?
+              //
+              // The SAME authoritative value that drives `inert` above, so the
+              // two can never disagree: if the subtree is inert, the selling
+              // surface is inactive, by construction rather than by a second
+              // rule that could drift.
+              //
+              // WHY PosRuntime NEEDS TELLING AT ALL. It stays MOUNTED under
+              // every overlay — that is the whole point of the inert boundary,
+              // because the cart and any recovery state have to survive a gate.
+              // So an overlay clearing is not a mount and not a state change
+              // PosRuntime can see, and Search / Scan had no way to learn that
+              // the till had become usable. That is the focus defect.
+              //
+              // DELIBERATELY GENERIC. One boolean. PosRuntime is told nothing
+              // about employee login, the Time Clock, Settings, Sales History,
+              // Cash Movement or recovery — only whether the surface is live.
+              sellingSurfaceActive={activeOverlay === null}
               // Stock tracking is stripped for display: the pinned snapshot's
               // stockQuantity is frozen at build time and is NOT live inventory.
               // The server still enforces stock inside complete_sale_v3, and

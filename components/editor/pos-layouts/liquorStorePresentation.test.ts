@@ -784,11 +784,16 @@ describe("no focus stealing and no global scanner architecture", () => {
     }
   });
 
-  it("focuses exactly once, from the nonce effect only", () => {
+  it("focuses exactly once, from the activation-aware effect only", () => {
     expect([...browser.matchAll(/\.focus\(\)/g)]).toHaveLength(1);
-    // The dependency is the nonce — not [] (which could never fire again) and
-    // not a value that changes on ordinary renders.
-    expect(browser).toContain("}, [scanFocusRequest]);");
+    // TWO dependencies, and the second is the fix. The nonce alone could not
+    // see an overlay clear, because the host keeps this tree mounted under
+    // `inert` so the cart survives — so the only activation opportunity was
+    // spent on a mount that happened while the subtree was inert and
+    // `.focus()` was a no-op. Not [] (which could never fire again) and not a
+    // value that changes on ordinary renders.
+    expect(browser).toContain("}, [scanFocusRequest, sellingSurfaceInactive]);");
+    expect(browser).not.toContain("}, [scanFocusRequest]);");
   });
 
   it("does nothing when the host does not ask — this is what keeps the Builder still", () => {
@@ -1262,8 +1267,10 @@ describe("Lane 2B: scanner readiness is local presentation of real focus", () =>
   );
 
   it("focus shows 'Ready to scan'; blur shows the instruction to select the field", () => {
-    expect(statusLine).toContain(") : searchScanFocused ? (");
-    const ready = statusLine.slice(statusLine.indexOf(") : searchScanFocused ? ("));
+    // `scannerReady`, not the raw focus flag: readiness is now gated on the
+    // surface being operable as well as the input really holding focus.
+    expect(statusLine).toContain(") : scannerReady ? (");
+    const ready = statusLine.slice(statusLine.indexOf(") : scannerReady ? ("));
     expect(ready.indexOf("Ready to scan")).toBeGreaterThan(-1);
     expect(ready.indexOf("Ready to scan")).toBeLessThan(ready.indexOf("Select the search box before scanning"));
   });

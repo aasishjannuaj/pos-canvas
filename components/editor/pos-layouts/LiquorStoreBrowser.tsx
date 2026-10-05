@@ -187,6 +187,13 @@ type LiquorStoreBrowserProps = ProductBrowserProps & {
    * components/editor/pos-layouts/index.tsx for why it is optional.
    */
   scanFocusRequest?: number;
+  /**
+   * RC-polish fix — whether the host's selling surface is operable.
+   *
+   * `false` while anything covers the POS. Absent when the host has no overlay
+   * concept. See the focus effect below.
+   */
+  sellingSurfaceActive?: boolean;
 };
 
 export default function LiquorStoreBrowser({
@@ -199,6 +206,7 @@ export default function LiquorStoreBrowser({
   onAddToCart,
   barcodeScanningEnabled,
   scanFocusRequest,
+  sellingSurfaceActive,
 }: LiquorStoreBrowserProps) {
   // includeAll is the ONLY behavioral difference this browser asks of the
   // shared hook. Every other caller omits it and is unchanged.
@@ -235,41 +243,68 @@ export default function LiquorStoreBrowser({
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   /**
-   * Focus the Search / Scan field when the host asks, and at no other time.
+   * Focus the Search / Scan field when the host asks AND the surface is live.
    *
-   * THE TWO MOMENTS THIS COVERS, and why one effect is enough for both:
+   * THE DEFECT THIS REPLACES. The dependency used to be the nonce alone, on the
+   * belief that a gate clearing remounted this tree. It does not: the device
+   * host keeps the runtime MOUNTED under `inert` so the cart survives a gate,
+   * so an employee login clearing is neither a mount nor a nonce change. The
+   * mount that did happen occurred while the subtree was inert — where
+   * `.focus()` is a no-op, because inert removes the subtree from focus
+   * entirely — and the single activation opportunity was spent on it. Result on
+   * a real till: after signing in, Search / Scan never had focus and the
+   * cashier had to click it before every scan.
    *
-   *   activation — mounting runs the effect once. The live till remounts this
-   *                tree whenever the selling surface becomes active again,
-   *                because the employee, Auto-Lock and register gates replace
-   *                PosRuntime rather than cover it. So unlock, Ring Out and
-   *                first load all arrive here as a mount, free.
-   *   after a sale — the selling surface does NOT remount when a sale ends;
-   *                the checkout is an overlay over a tree that never went
-   *                away. There is no mount to hook, which is the entire reason
-   *                a nonce exists: PosRuntime increments it when the cashier
-   *                dismisses a COMPLETED sale, and the dependency change is
-   *                the only other thing that runs this.
+   * THE THREE MOMENTS THIS NOW COVERS, from two dependencies:
    *
-   * WHY THIS CANNOT STEAL FOCUS. The dependency is a value that changes at
-   * exactly those two moments. Nothing polls, nothing reads
-   * document.activeElement, nothing re-asserts focus from a focus or blur
-   * event, and nothing re-asserts focus on render. (Lane 2B's onFocus/onBlur
-   * only flip the "Ready to scan" presentation flag; they never move focus.) A cashier who tabs into the cart or clicks a
-   * product keeps the caret until the next completed sale, because until then
-   * no dependency changes and this effect does not run.
+   *   activation   — `sellingSurfaceActive` flips false -> true when the last
+   *                  overlay clears. That transition is the one activation
+   *                  opportunity, and it happens when the till is genuinely
+   *                  operable rather than when it merely mounted.
+   *   first paint  — a host with nothing covering the POS starts active, so the
+   *                  effect's first run is the initial activation.
+   *   after a sale — the nonce still changes on dismissal of a COMPLETED sale.
    *
-   * WHY `undefined` RETURNS. An absent prop means "this host is not a till" —
-   * today that is the Builder preview, which must never pull the caret out of
-   * whatever field the owner is typing in. Absence, not detection.
+   * INACTIVE RETURNS BEFORE TOUCHING FOCUS. While anything covers the POS this
+   * cannot reach into the inert subtree, so a gate can never be robbed of focus
+   * by the till underneath it.
+   *
+   * WHY `=== false` AND NOT `!== true` (see `sellingSurfaceInactive`
+   * above the effect). Absent means "this host has no overlay
+   * concept" — the owner's browser runtime and the Builder preview. Treating
+   * absent as inactive would silently disable focus for them. Only an explicit
+   * `false` gates.
+   *
+   * STILL NOT FOCUS STEALING. The dependencies change only on an activation
+   * transition and on a completed sale. Nothing polls, nothing times, nothing
+   * reads the active element, nothing listens, and a deliberate blur changes
+   * no dependency — `searchScanFocused` is not one — so the caret stays where
+   * the cashier put it until the next activation or the next completed sale.
    */
+  const sellingSurfaceInactive = sellingSurfaceActive === false;
+
   useEffect(() => {
     if (scanFocusRequest === undefined) {
       return;
     }
 
+    if (sellingSurfaceInactive) {
+      return;
+    }
+
     searchInputRef.current?.focus();
-  }, [scanFocusRequest]);
+  }, [scanFocusRequest, sellingSurfaceInactive]);
+
+  /**
+   * Scanner readiness, as the cashier is told it.
+   *
+   * TWO CONDITIONS, AND BOTH ARE REQUIRED. The input must really hold focus —
+   * reported by its own onFocus/onBlur, never assumed because `.focus()` was
+   * attempted — and the surface must not be known-inactive. A covered till
+   * whose input still held DOM focus would otherwise keep promising "Ready to
+   * scan" while `inert` guarantees no keystroke can arrive.
+   */
+  const scannerReady = !sellingSurfaceInactive && searchScanFocused;
 
 
   // The category/search interaction rule lives in shared.ts as a pure function
@@ -474,7 +509,7 @@ export default function LiquorStoreBrowser({
                 </svg>
                 No matching product found
               </p>
-            ) : searchScanFocused ? (
+            ) : scannerReady ? (
               <p className="flex items-center gap-1.5 text-emerald-700">
                 <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full bg-emerald-500" />
                 Ready to scan
