@@ -34,6 +34,7 @@ import {
   validateCashNote,
 } from "@/lib/cashMovement";
 import type { CashMovementResult, CashMovementType } from "@/lib/cashMovement";
+import { businessInstantInTimezone } from "@/lib/salesReporting";
 import { createLogoPublicUrl } from "@/lib/logoUpload";
 import type { BrandingSettings, BusinessProfile } from "@/lib/projectConfig";
 
@@ -973,6 +974,9 @@ export function CashMovementPanel({
   busy,
   result,
   noDailyContext,
+  businessName,
+  currencySymbol,
+  businessTimezone,
   onSubmit,
   onDismiss,
 }: {
@@ -985,6 +989,18 @@ export function CashMovementPanel({
    * refused again by the server.
    */
   noDailyContext: boolean;
+  /**
+   * v1.3 Cash Drop slip polish — the three values a printed slip needs and this
+   * panel previously had no way to see. All three are read-only presentation,
+   * supplied by the host from configuration it already holds.
+   */
+  businessName: string;
+  currencySymbol: string;
+  /**
+   * The DAILY's business timezone snapshot, or null when there is no business
+   * day. NEVER the device's zone: see the slip's date/time below.
+   */
+  businessTimezone: string | null;
   onSubmit: (
     type: CashMovementType,
     employeeCode: string,
@@ -1082,20 +1098,72 @@ export function CashMovementPanel({
             className="receipt-print-area cash-drop-print-area"
             data-print-exclusive="cash-movement"
           >
-            {["Copy 1 — with the cash", "Copy 2 — store record"].map((copyLabel) => (
-              <section className="cash-drop-slip" key={copyLabel}>
+            {[
+              { label: "Copy 1 — with the cash", footer: "Send this copy with the cash." },
+              { label: "Copy 2 — store record", footer: "Keep this copy for the store record." },
+            ].map((copy) => (
+              <section className="cash-drop-slip" key={copy.label}>
+                {/* The shop, from the same pinned configuration the till sells
+                    from, so this slip and a sale receipt beside it can never
+                    name the business differently. */}
+                <p className="cash-drop-slip-shop">{businessName}</p>
+
                 <h2 className="cash-drop-slip-title">
                   {getCashMovementLabel(result.movementType)}
                 </h2>
-                <p className="cash-drop-slip-copy">{copyLabel}</p>
-                <p className="cash-drop-slip-amount">{result.amount}</p>
-                {result.note !== null && <p>{result.note}</p>}
-                <p>{result.employeeName}</p>
-                <p>{result.occurredAt}</p>
-                <p className="cash-drop-slip-id">{result.movementId}</p>
-                <p className="cash-drop-slip-signature">
-                  Employee Signature: __________________
+
+                <p className="cash-drop-slip-copy">{copy.label}</p>
+
+                {/* The SERVER's amount, unchanged, with the project's currency
+                    symbol in front of it: a slip that travels with money has to
+                    say which money. */}
+                <p className="cash-drop-slip-amount">
+                  {currencySymbol}
+                  {result.amount}
                 </p>
+
+                <dl className="cash-drop-slip-rows">
+                  <div className="cash-drop-slip-row">
+                    <dt>Employee</dt>
+                    <dd>{result.employeeName}</dd>
+                  </div>
+
+                  <div className="cash-drop-slip-row">
+                    <dt>Date / time</dt>
+                    {/* THE BUSINESS ZONE, OR THE RAW INSTANT — never the
+                        device's. businessInstantInTimezone returns null rather
+                        than guessing when the zone is unusable, and the honest
+                        fallback is the server's own instant verbatim: still
+                        authoritative, simply unconverted. Nothing here calls
+                        toLocaleString. */}
+                    <dd>
+                      {businessInstantInTimezone(result.occurredAt, businessTimezone) ??
+                        result.occurredAt}
+                    </dd>
+                  </div>
+
+                  {result.note !== null && (
+                    <div className="cash-drop-slip-row">
+                      <dt>Reason</dt>
+                      <dd>{result.note}</dd>
+                    </div>
+                  )}
+
+                  {/* FULL id, never truncated — it is how this slip is matched
+                      to the ledger. The reference class lets it break anywhere
+                      so a UUID cannot run off a 72 mm roll. */}
+                  <div className="cash-drop-slip-row">
+                    <dt>Reference</dt>
+                    <dd className="cash-drop-slip-reference">{result.movementId}</dd>
+                  </div>
+                </dl>
+
+                {/* A ruled line, not a run of underscores: underscores are a
+                    fixed width and overflow the real printable width. */}
+                <p className="cash-drop-slip-signature-label">Employee signature</p>
+                <p className="cash-drop-slip-signature-rule" aria-hidden="true" />
+
+                <p className="cash-drop-slip-footer">{copy.footer}</p>
               </section>
             ))}
           </div>

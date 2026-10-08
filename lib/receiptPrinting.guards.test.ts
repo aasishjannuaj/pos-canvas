@@ -155,10 +155,13 @@ describe("an overlay receipt is the only thing that prints", () => {
     expect([...gates.matchAll(/className="cash-drop-print-area"|cash-drop-print-area/g)].length)
       .toBeGreaterThan(0);
     expect([...gates.matchAll(/receipt-print-area cash-drop-print-area/g)]).toHaveLength(1);
-    // Two copy labels, one map, one slip element — so the count cannot drift
-    // from the markup.
-    expect(gates).toContain('["Copy 1 — with the cash", "Copy 2 — store record"]');
+    // Two copies, one array, one slip element — so the count cannot drift from
+    // the markup. Each entry now carries its own footer wording, which is why
+    // the array holds objects rather than bare labels.
+    expect(gates).toContain('{ label: "Copy 1 — with the cash"');
+    expect(gates).toContain('{ label: "Copy 2 — store record"');
     expect([...gates.matchAll(/className="cash-drop-slip"/g)]).toHaveLength(1);
+    expect([...gates.matchAll(/\.map\(\(copy\) =>/g)]).toHaveLength(1);
   });
 });
 
@@ -312,5 +315,72 @@ describe("a purchased name is never silently shortened", () => {
     expect(code(read("components/runtime/AuthoritativeReceipt.tsx"))).toContain(
       "{item.quantity} × {item.itemName}"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 Cash Drop slip — the real 80 mm thermal width
+// ---------------------------------------------------------------------------
+
+describe("the Cash Drop slip is sized for the paper that exists", () => {
+  const area = () => {
+    const print = printBlock();
+    const start = print.indexOf(".cash-drop-print-area {");
+
+    expect(start).toBeGreaterThan(-1);
+
+    return print.slice(start, print.indexOf("}", start));
+  };
+
+  it("targets the PRINTABLE width, not the nominal roll width", () => {
+    // An "80 mm" Epson roll prints about 72 mm. Declared in mm so the constraint
+    // reads as the physical one it is.
+    expect(area()).toContain("width: 72mm;");
+    expect(area()).toContain("max-width: 72mm;");
+  });
+
+  it("NEGATIVE CONTROL — the oversized 320px width cannot come back", () => {
+    // 320px is roughly 84.7 mm: wider than the paper, which is what clipped and
+    // downscaled every slip. The sale receipt's own 320px rule is untouched, so
+    // this is scoped to the cash-drop block.
+    expect(area()).not.toContain("320px");
+    expect(area()).not.toContain("width: 100%");
+  });
+
+  it("keeps the page separation and claims no control over the cutter", () => {
+    const print = printBlock();
+
+    expect(print).toContain(".cash-drop-slip + .cash-drop-slip {");
+    expect(print).toContain("break-before: page;");
+    expect(print).not.toContain("break-after: page;");
+    // CSS may paginate. It may not pretend to cut.
+    for (const banned of ["GS V", "ESC/POS", "cut:", "-webkit-print-cut"]) {
+      expect(`${banned} is absent`).toBe(`${banned} is absent`);
+      expect(print).not.toContain(banned);
+    }
+  });
+
+  it("gives the signature a rule rather than overflowable underscores", () => {
+    const print = printBlock();
+
+    expect(print).toContain(".cash-drop-slip-signature-rule {");
+    expect(print).toContain("border-bottom: 1px solid #000;");
+    expect(print).not.toContain("__________");
+  });
+
+  it("lets a UUID break instead of running off the roll", () => {
+    const print = printBlock();
+    const reference = print.slice(print.indexOf(".cash-drop-slip-reference {"));
+
+    expect(reference.slice(0, reference.indexOf("}"))).toContain("overflow-wrap: anywhere;");
+    expect(reference.slice(0, reference.indexOf("}"))).toContain("word-break: break-all;");
+  });
+
+  it("leaves the ordinary sale receipt's own width alone", () => {
+    // Out of scope for this checkpoint: the sale receipt keeps its 320px.
+    const print = printBlock();
+    const receipt = print.slice(print.indexOf(".receipt-print-area {"));
+
+    expect(receipt.slice(0, receipt.indexOf("}"))).toContain("max-width: 320px;");
   });
 });

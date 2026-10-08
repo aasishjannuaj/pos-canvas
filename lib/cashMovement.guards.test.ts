@@ -1032,7 +1032,11 @@ describe("printing the Cash Drop is downstream of authority", () => {
       expect(gates).toContain(field);
     }
 
-    expect(gates).toContain("Employee Signature: __________________");
+    // A ruled line replaced the fixed underscores, which overflowed 72 mm.
+    expect(gates).toContain('className="cash-drop-slip-signature-label"');
+    expect(gates).toContain("Employee signature");
+    expect(gates).toContain('className="cash-drop-slip-signature-rule"');
+    expect(gates).not.toContain("__________________");
 
     // NOTHING SENSITIVE, AND NO ARITHMETIC. A slip that travels with cash must
     // not carry a credential, and Feature 1D records events rather than
@@ -1062,5 +1066,132 @@ describe("printing the Cash Drop is downstream of authority", () => {
       expect(`${banned} is absent from the slip`).toBe(`${banned} is absent from the slip`);
       expect(slip).not.toContain(banned);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 Cash Drop slip — the printed minimum, and where its values come from
+// ---------------------------------------------------------------------------
+
+describe("the Cash Drop slip shows the authorized minimum, from authoritative sources", () => {
+  const gates = stripComments(read(POS_GATES));
+  const deviceApp = stripComments(read(DEVICE_APP));
+  const slip = (() => {
+    const start = gates.indexOf("cash-drop-print-area");
+    const end = gates.indexOf("if (noDailyContext)", start);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+
+    return gates.slice(start, end);
+  })();
+
+  it("names the shop, from the pinned configuration the till sells from", () => {
+    expect(slip).toContain('className="cash-drop-slip-shop"');
+    expect(slip).toContain("{businessName}");
+    // Supplied by the host from the same config, not refetched or recomputed.
+    expect(deviceApp).toContain("businessName={state.config.businessProfile.businessName}");
+  });
+
+  it("carries a strong heading, from the product's own wording", () => {
+    expect(slip).toContain('className="cash-drop-slip-title"');
+    // The term still comes from the shared label, never a literal here, so the
+    // product cannot say CASH DROP in one place and SAFE DROP in another.
+    expect(slip).toContain("getCashMovementLabel(result.movementType)");
+    expect(slip).not.toContain('"CASH DROP"');
+  });
+
+  it("keeps both copy labels, each with its own footer", () => {
+    expect(slip).toContain('{ label: "Copy 1 — with the cash"');
+    expect(slip).toContain('{ label: "Copy 2 — store record"');
+    expect(slip).toContain("Send this copy with the cash.");
+    expect(slip).toContain("Keep this copy for the store record.");
+    expect(slip).toContain('className="cash-drop-slip-footer"');
+  });
+
+  it("shows the authoritative amount with the project's currency symbol", () => {
+    expect(slip).toContain("{currencySymbol}");
+    expect(slip).toContain("{result.amount}");
+    // The stored figure is printed, never recomputed or reformatted.
+    expect(slip).not.toContain("toFixed");
+    expect(slip).not.toContain("Number(result.amount)");
+    expect(slip).not.toContain("parseFloat");
+    expect(deviceApp).toContain("currencySymbol={CURRENCY_SYMBOLS[state.config.receipt.currency]}");
+  });
+
+  it("labels the employee", () => {
+    expect(slip).toContain("<dt>Employee</dt>");
+    expect(slip).toContain("{result.employeeName}");
+  });
+
+  it("formats the instant in the BUSINESS timezone, never the device's", () => {
+    expect(slip).toContain("<dt>Date / time</dt>");
+    expect(slip).toContain("businessInstantInTimezone(result.occurredAt, businessTimezone)");
+    expect(gates).toContain('import { businessInstantInTimezone } from "@/lib/salesReporting";');
+
+    // The zone is the DAILY's snapshot, handed down by the host.
+    expect(deviceApp).toContain("businessTimezone={gate.daily?.businessTimezone ?? null}");
+
+    // NO DEVICE-LOCAL FORMATTING ANYWHERE IN THIS PANEL. This is the assertion
+    // that fails if anyone reaches for the convenient thing.
+    for (const banned of [
+      "toLocaleString",
+      "toLocaleDateString",
+      "toLocaleTimeString",
+      "Intl.DateTimeFormat",
+      "getTimezoneOffset",
+    ]) {
+      expect(`${banned} is absent from PosGates`).toBe(`${banned} is absent from PosGates`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("has no timezone fallback that could become device-local", () => {
+    // The only fallback is the server's own instant, unconverted — honest, and
+    // still not the machine's zone.
+    expect(slip.replace(/\s+/g, " ")).toContain("?? result.occurredAt");
+    for (const banned of ['"UTC"', "'UTC'", "America/", "Europe/", "Asia/"]) {
+      expect(`${banned} is not hardcoded`).toBe(`${banned} is not hardcoded`);
+      expect(gates).not.toContain(banned);
+    }
+  });
+
+  it("keeps the reference whole and breakable", () => {
+    expect(slip).toContain("<dt>Reference</dt>");
+    expect(slip).toContain("{result.movementId}");
+    expect(slip).toContain('className="cash-drop-slip-reference"');
+    // Never shortened: the reference is how the paper is matched to the ledger.
+    expect(slip).not.toContain("slice(0,");
+    expect(slip).not.toContain("substring(");
+  });
+
+  it("shows the reason only when there is one", () => {
+    expect(slip).toContain("{result.note !== null && (");
+    expect(slip).toContain("<dt>Reason</dt>");
+    expect(slip).toContain("{result.note}");
+  });
+
+  it("adds no merchant logo", () => {
+    for (const banned of ["logo", "Logo", "<img", "BrandingLogo", "logoBaseUrl"]) {
+      expect(`${banned} is absent from the slip`).toBe(`${banned} is absent from the slip`);
+      expect(slip).not.toContain(banned);
+    }
+  });
+
+  it("still renders exactly two slips from one element", () => {
+    expect([...slip.matchAll(/className="cash-drop-slip"/g)]).toHaveLength(1);
+    expect([...slip.matchAll(/\.map\(\(copy\) =>/g)]).toHaveLength(1);
+    expect([...gates.matchAll(/receipt-print-area cash-drop-print-area/g)]).toHaveLength(1);
+  });
+
+  it("changes no financial semantics", () => {
+    // The panel still cannot reach authority, and the host's single-request
+    // contract is untouched.
+    for (const banned of ["recordCashMovement", "newCashMovementRequestId", "requestId"]) {
+      expect(`${banned} absent from PosGates`).toBe(`${banned} absent from PosGates`);
+      expect(gates).not.toContain(banned);
+    }
+    expect([...deviceApp.matchAll(/recordCashMovement\(/g)]).toHaveLength(1);
+    expect([...deviceApp.matchAll(/newCashMovementRequestId\(\)/g)]).toHaveLength(1);
   });
 });

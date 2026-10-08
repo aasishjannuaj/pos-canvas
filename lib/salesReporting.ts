@@ -111,6 +111,80 @@ export function businessDateInTimezone(
 }
 
 /**
+ * An instant as a HUMAN-READABLE date and time, IN A NAMED TIMEZONE.
+ *
+ * WHY IT LIVES HERE AND NOT IN A RECEIPT MODULE. This file already owns the one
+ * rule that matters: `Intl.DateTimeFormat` is never allowed to default its
+ * zone. Every other timestamp in the product is formatted with
+ * `toLocaleString(...)` and no `timeZone`, which silently uses the machine's —
+ * fine for a screen the cashier is looking at, wrong for a Cash Drop slip that
+ * travels with money and is filed under a BUSINESS date. Putting this beside
+ * `businessDateInTimezone` keeps one module answerable for explicit zones
+ * rather than starting a second date implementation elsewhere.
+ *
+ * DATE AND TIME, WHERE ITS SIBLING RETURNS A DATE. `businessDateInTimezone`
+ * answers "which business day", and a report needs nothing more. A printed slip
+ * also has to say WHEN, so this returns both. It is deliberately not built on
+ * top of that function: deriving a time from a `YYYY-MM-DD` string is
+ * impossible, and calling both would format the same instant twice.
+ *
+ * ASSEMBLED FROM PARTS, NOT FROM A LOCALE'S ORDERING, for the same reason its
+ * sibling is: the output must read identically on every machine that prints a
+ * slip. `05 Oct 2026, 10:51 PM` — month as a short name so there is no
+ * day/month ambiguity on a document two people will later reconcile.
+ *
+ * RETURNS null, NEVER A GUESS, and never falls back to the device's zone. An
+ * unusable timezone or an unparsable instant means we do not know the local
+ * time, and a slip that invents one is worse than a slip that does not claim
+ * one. Callers must render something honest rather than substituting their own
+ * conversion.
+ *
+ * Changes no business-date semantics: nothing here is used to decide which
+ * business day anything belongs to.
+ */
+export function businessInstantInTimezone(
+  occurredAt: string,
+  timeZone: string | null | undefined
+): string | null {
+  if (typeof timeZone !== "string" || timeZone.trim() === "") return null;
+
+  const instant = new Date(occurredAt);
+
+  if (Number.isNaN(instant.getTime())) return null;
+
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      // 2-digit, so every slip's time is the same width and `03:30` can never be
+      // misread as a different field than `10:30`.
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).formatToParts(instant);
+
+    const read = (type: string) => parts.find((part) => part.type === type)?.value;
+
+    const day = read("day");
+    const month = read("month");
+    const year = read("year");
+    const hour = read("hour");
+    const minute = read("minute");
+    const dayPeriod = read("dayPeriod");
+
+    if (!day || !month || !year || !hour || !minute || !dayPeriod) return null;
+
+    return `${day} ${month} ${year}, ${hour}:${minute} ${dayPeriod}`;
+  } catch {
+    // An invalid IANA identifier throws. Not repaired, not replaced with UTC,
+    // and above all not replaced with the machine's zone.
+    return null;
+  }
+}
+
+/**
  * The authoritative dates, keyed by order id.
  *
  * A map rather than repeated scans, because a report reads every order against

@@ -3225,6 +3225,20 @@ export default function DeviceApp() {
           busy={cashMovementBusy}
           result={cashMovementResult}
           noDailyContext={gate.daily === null}
+          // v1.3 Cash Drop slip polish — PROPS ONLY, all three already
+          // authoritative here. The panel had no config access at all, so a
+          // printed slip could not name the shop, could not show a currency
+          // symbol, and had no business zone to render the instant in.
+          //
+          // businessName and the currency come from the SAME pinned
+          // configuration the till sells from, so the slip cannot disagree with
+          // the receipt beside it.
+          businessName={state.config.businessProfile.businessName}
+          currencySymbol={CURRENCY_SYMBOLS[state.config.receipt.currency]}
+          // The DAILY's immutable snapshot, not the device's zone. Null only
+          // when there is no business day, which is also when a movement is
+          // refused — so the success path always has one.
+          businessTimezone={gate.daily?.businessTimezone ?? null}
           onSubmit={(type, employeeCode, pin, amount, note) => {
             void handleCashMovement(type, employeeCode, pin, amount, note);
           }}

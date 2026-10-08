@@ -22,6 +22,7 @@ import {
   UNATTRIBUTED_EMPLOYEE_LABEL,
   UNATTRIBUTED_GROUP_KEY,
   businessDateInTimezone,
+  businessInstantInTimezone,
   currentBusinessDate,
   groupSalesByEmployee,
   indexOrderBusinessDates,
@@ -568,5 +569,73 @@ describe("a report range and its employee breakdown agree", () => {
     // Ada's sale and the unattributed one, and nothing of Bo's.
     expect(groups).toHaveLength(2);
     expect(groups.some((group) => group.employeeId === BO.employeeId)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 Cash Drop slip — businessInstantInTimezone
+//
+// The Cash Drop slip is the first printed document in the product that must show
+// a BUSINESS-zone time rather than the machine's. Every other receipt formatter
+// calls toLocaleString with no timeZone, which silently uses the device's — so
+// these tests are written to FAIL if this one ever starts doing that.
+// ---------------------------------------------------------------------------
+
+describe("businessInstantInTimezone", () => {
+  // 02:30 UTC on 6 October is still the EVENING OF THE 5th in New York and
+  // mid-morning of the 6th in Tokyo. Chosen so the calendar DATE differs too,
+  // not merely the clock time.
+  const INSTANT = "2026-10-06T02:30:00.000Z";
+
+  it("formats in the supplied timezone, not the runner's", () => {
+    expect(businessInstantInTimezone(INSTANT, "America/New_York")).toBe("05 Oct 2026, 10:30 PM");
+    expect(businessInstantInTimezone(INSTANT, "Asia/Tokyo")).toBe("06 Oct 2026, 11:30 AM");
+  });
+
+  it("THE NEGATIVE CONTROL — ignoring the timezone argument cannot pass", () => {
+    // Runner-independent: whatever zone this machine is in, one instant cannot
+    // render identically in two zones nine hours apart. An implementation that
+    // dropped `timeZone` and fell back to the device would return the same
+    // string twice and fail here.
+    const newYork = businessInstantInTimezone(INSTANT, "America/New_York");
+    const tokyo = businessInstantInTimezone(INSTANT, "Asia/Tokyo");
+
+    expect(newYork).not.toBe(tokyo);
+    expect(newYork).not.toBeNull();
+    expect(tokyo).not.toBeNull();
+  });
+
+  it("crosses the date boundary rather than reporting the UTC day", () => {
+    // The UTC day is the 6th. A slip filed under the New York business day must
+    // say the 5th, or it disagrees with the business date the movement is
+    // recorded against.
+    expect(businessInstantInTimezone(INSTANT, "America/New_York")).toContain("05 Oct 2026");
+    expect(businessInstantInTimezone(INSTANT, "UTC")).toContain("06 Oct 2026");
+  });
+
+  it("reads identically everywhere: parts, never a locale's ordering", () => {
+    // Day, short month, year — so 05/10 and 10/05 can never be confused on a
+    // document two people reconcile later.
+    expect(businessInstantInTimezone(INSTANT, "Europe/London")).toBe("06 Oct 2026, 03:30 AM");
+  });
+
+  it("returns null for an unusable timezone, and never guesses", () => {
+    for (const zone of [null, undefined, "", "   ", "Not/AZone"]) {
+      expect(`zone ${String(zone)} is unusable`).toBe(`zone ${String(zone)} is unusable`);
+      expect(businessInstantInTimezone(INSTANT, zone)).toBeNull();
+    }
+  });
+
+  it("returns null for an unparsable instant", () => {
+    for (const instant of ["", "not-a-date", "2026-13-45T99:99:99Z"]) {
+      expect(`instant ${instant} is unusable`).toBe(`instant ${instant} is unusable`);
+      expect(businessInstantInTimezone(instant, "America/New_York")).toBeNull();
+    }
+  });
+
+  it("changes no business-date semantics", () => {
+    // Its sibling still answers the business-DATE question exactly as before.
+    expect(businessDateInTimezone(INSTANT, "America/New_York")).toBe("2026-10-05");
+    expect(businessDateInTimezone(INSTANT, "Asia/Tokyo")).toBe("2026-10-06");
   });
 });

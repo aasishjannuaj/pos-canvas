@@ -150,8 +150,24 @@ body {
      `break-before: page` below actually mean something. */
   .cash-drop-print-area {
     position: static;
-    max-width: 320px;
-    padding: 12px;
+    /* THE REAL PRINTABLE WIDTH, NOT THE NOMINAL ROLL WIDTH.
+       An "80 mm" Epson roll prints about 72 mm; the previous 320px was roughly
+       84.7 mm, wider than the paper, so the driver clipped or downscaled every
+       slip. Declared in mm because that is what the constraint actually is —
+       reading `72mm` states the intent in a way `272px` never did. */
+    width: 72mm;
+    max-width: 72mm;
+    margin: 0;
+    /* Side padding in mm for the same reason; small, because 72 mm is already
+       narrow and every millimetre spent here is lost to wrapping. */
+    padding: 2mm 1mm 4mm;
+    /* Thermal-safe: a stack with no system-UI fallback that might substitute a
+       hairline face. Left-aligned labels read faster than centred ones on a
+       document someone has to scan for an amount. */
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11px;
+    line-height: 1.35;
+    color: #000;
   }
 
   /* ONE SLIP PER PAGE, so an 80mm roll feeds twice and the cashier can tear
@@ -166,25 +182,86 @@ body {
     break-before: page;
   }
 
+  /* The shop, quiet above the heading: it identifies the slip without competing
+     with the thing the reader is actually looking for. */
+  .cash-drop-slip-shop {
+    font-size: 12px;
+    font-weight: 700;
+    margin: 0 0 1mm;
+  }
+
+  /* THE DOMINANT LINE. Upper-cased by the stylesheet rather than in the markup,
+     so the product's own wording stays the single source of the term. */
   .cash-drop-slip-title {
-    font-size: 15px;
+    font-size: 17px;
     font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0;
   }
 
+  .cash-drop-slip-copy {
+    font-size: 11px;
+    margin: 0 0 2mm;
+  }
+
+  /* The figure the slip exists for. */
   .cash-drop-slip-amount {
-    font-size: 20px;
+    font-size: 24px;
     font-weight: 700;
+    line-height: 1.15;
+    margin: 0 0 3mm;
   }
 
-  .cash-drop-slip-copy,
-  .cash-drop-slip-id {
-    font-size: 11px;
+  .cash-drop-slip-rows {
+    margin: 0;
   }
 
-  /* Space to actually sign in. Copy 1 is handed over with the money, so the
-     line has to survive being printed on a narrow roll. */
-  .cash-drop-slip-signature {
-    margin-top: 24px;
+  /* Label above value, not beside it. A two-column row at 72 mm leaves the
+     value too little space and wraps a name or a UUID mid-word. */
+  .cash-drop-slip-row {
+    margin: 0 0 1.5mm;
+  }
+
+  .cash-drop-slip-row dt {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .cash-drop-slip-row dd {
+    margin: 0;
     font-size: 11px;
+    /* A long reason or employee name wraps rather than widening the slip. */
+    overflow-wrap: break-word;
+  }
+
+  /* A UUID has no spaces, so it needs permission to break mid-token or it
+     overflows the roll. Kept whole: the reference is how this paper is matched
+     to the ledger, so it is never shortened. */
+  .cash-drop-slip-reference {
+    font-family: "Courier New", Courier, monospace;
+    font-size: 10px;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+  }
+
+  .cash-drop-slip-signature-label {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin: 5mm 0 0;
+  }
+
+  /* A RULE, NOT UNDERSCORES. A run of underscores is a fixed width that
+     overflows a 72 mm roll; a border fills exactly the space available. */
+  .cash-drop-slip-signature-rule {
+    margin: 6mm 0 0;
+    border-bottom: 1px solid #000;
+  }
+
+  .cash-drop-slip-footer {
+    margin: 3mm 0 0;
+    font-size: 9px;
   }
 }
