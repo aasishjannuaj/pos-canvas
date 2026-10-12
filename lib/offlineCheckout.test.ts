@@ -602,3 +602,214 @@ describe("every refusal is explained in the operator's language", () => {
     expect(Object.keys(OFFLINE_CHECKOUT_BLOCKED_MESSAGES).sort()).toEqual([...reasons].sort());
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B — inherited-identity precedence in resolveOfflineSaleDraft
+//
+// The correction under test: an authoritative INHERITED original saleRequestId
+// (an online request whose outcome is unknown) must outrank an unspent local
+// draft for the same cart. Before it, `current` was returned first whenever its
+// fingerprint matched, so the device minted a different identity and
+// DeviceApp.verifySubmittedSale refused the mismatch — which is why legitimate
+// close/reopen recovery was unreachable.
+// ---------------------------------------------------------------------------
+
+describe("CP-2B: resolveOfflineSaleDraft inherited-identity precedence", () => {
+  const ORIGINAL = "99999999-9999-4999-8999-999999999999";
+  const OTHER = "88888888-8888-4888-8888-888888888888";
+
+  let mint = 0;
+  const generate = () => {
+    mint += 1;
+
+    return `70000000-0000-4000-8000-${String(mint).padStart(12, "0")}`;
+  };
+
+  function resolve(input: {
+    current?: OfflineSaleDraft | null;
+    inherited?: { id: string; fingerprint: string } | null;
+    items?: CartItem[];
+    paymentMethod?: "cash" | "card";
+    tipAmount?: number;
+  }) {
+    return resolveOfflineSaleDraft({
+      current: input.current ?? null,
+      projectId: PROJECT,
+      paymentMethod: input.paymentMethod ?? "cash",
+      tipAmount: input.tipAmount ?? 0,
+      cart: input.items ?? cart(),
+      now: NOW,
+      inherited: input.inherited ?? null,
+      generate,
+    });
+  }
+
+  /** The fingerprint the resolver computes for the default cart and tender. */
+  function baselineFingerprint(): string {
+    const probe = resolve({});
+
+    if (!probe.ok) throw new Error("probe failed");
+
+    return probe.draft.fingerprint;
+  }
+
+  it("1. no inherited request — mints its own identity", () => {
+    const result = resolve({});
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    expect(result.draft.saleRequestId).not.toBe(ORIGINAL);
+    expect(result.draft.saleRequestId).not.toBe(result.draft.queueRecordId);
+  });
+
+  it("2. a valid inherited original is adopted as the sale identity", () => {
+    const fingerprint = baselineFingerprint();
+    const result = resolve({ inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    expect(result.draft.saleRequestId).toBe(ORIGINAL);
+    // The LOCAL handle is still this device's own and is never inherited.
+    expect(result.draft.queueRecordId).not.toBe(ORIGINAL);
+  });
+
+  it("3. an existing draft with a matching fingerprint AND the same identity is reused", () => {
+    const fingerprint = baselineFingerprint();
+    const existing: OfflineSaleDraft = {
+      saleRequestId: ORIGINAL,
+      queueRecordId: "q-same",
+      occurredAt: new Date(NOW).toISOString(),
+      fingerprint,
+    };
+    const result = resolve({ current: existing, inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    // Byte-identical reuse: no new queue handle, no new sale time.
+    expect(result.draft).toEqual(existing);
+  });
+
+  it("4. THE CORRECTION — a conflicting existing draft does NOT override the inherited original", () => {
+    const fingerprint = baselineFingerprint();
+    // An unspent local draft minted earlier for this same cart.
+    const existing: OfflineSaleDraft = {
+      saleRequestId: OTHER,
+      queueRecordId: "q-stale",
+      occurredAt: new Date(NOW).toISOString(),
+      fingerprint,
+    };
+    const result = resolve({ current: existing, inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    // The ONLINE identity wins: it is the key a request already left under.
+    expect(result.draft.saleRequestId).toBe(ORIGINAL);
+    expect(result.draft.saleRequestId).not.toBe(OTHER);
+    // A FRESH local handle, never the stale one.
+    expect(result.draft.queueRecordId).not.toBe("q-stale");
+    expect(result.draft.queueRecordId).not.toBe(ORIGINAL);
+  });
+
+  it("5. an existing draft is still reused when there is no inherited claim", () => {
+    const fingerprint = baselineFingerprint();
+    const existing: OfflineSaleDraft = {
+      saleRequestId: OTHER,
+      queueRecordId: "q-keep",
+      occurredAt: new Date(NOW).toISOString(),
+      fingerprint,
+    };
+
+    expect(resolve({ current: existing })).toEqual({ ok: true, draft: existing });
+  });
+
+  it("6. an inherited request whose FINGERPRINT differs is refused adoption", () => {
+    const result = resolve({ inherited: { id: ORIGINAL, fingerprint: "fp-SOMETHING-ELSE" } });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    expect(result.draft.saleRequestId).not.toBe(ORIGINAL);
+  });
+
+  it("7. a changed TENDER breaks inheritance", () => {
+    const fingerprint = baselineFingerprint();
+    const result = resolve({
+      inherited: { id: ORIGINAL, fingerprint },
+      paymentMethod: "card",
+    });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    expect(result.draft.saleRequestId).not.toBe(ORIGINAL);
+    expect(result.draft.fingerprint).not.toBe(fingerprint);
+  });
+
+  it("8. a changed TIP breaks inheritance", () => {
+    const fingerprint = baselineFingerprint();
+    const result = resolve({ inherited: { id: ORIGINAL, fingerprint }, tipAmount: 1.5 });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    expect(result.draft.saleRequestId).not.toBe(ORIGINAL);
+  });
+
+  it("9. a changed CART or QUANTITY breaks inheritance", () => {
+    const fingerprint = baselineFingerprint();
+
+    for (const items of [
+      [createCartItem(project.menuItems[0], [], 3)],
+      [createCartItem(project.menuItems[1], [], 2)],
+      [createCartItem(project.menuItems[0], [], 2), createCartItem(project.menuItems[1], [], 1)],
+    ]) {
+      const result = resolve({ inherited: { id: ORIGINAL, fingerprint }, items });
+
+      expect(result.ok).toBe(true);
+
+      if (!result.ok) continue;
+
+      expect(result.draft.saleRequestId).not.toBe(ORIGINAL);
+      expect(result.draft.fingerprint).not.toBe(fingerprint);
+    }
+  });
+
+  it("10. repeated resolution is stable — the identity never drifts", () => {
+    const fingerprint = baselineFingerprint();
+    const first = resolve({ inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(first.ok).toBe(true);
+
+    if (!first.ok) return;
+
+    const second = resolve({ current: first.draft, inherited: { id: ORIGINAL, fingerprint } });
+    const third = resolve({ current: first.draft, inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(second).toEqual({ ok: true, draft: first.draft });
+    expect(third).toEqual({ ok: true, draft: first.draft });
+  });
+
+  it("11. inheritance never reuses the inherited id as the LOCAL queue handle", () => {
+    const fingerprint = baselineFingerprint();
+    const result = resolve({ inherited: { id: ORIGINAL, fingerprint } });
+
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) return;
+
+    // The failed online attempt may already have written a row under its own
+    // local handle; reusing it would collide.
+    expect(result.draft.queueRecordId).not.toBe(ORIGINAL);
+  });
+});

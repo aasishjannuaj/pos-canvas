@@ -15,6 +15,14 @@
 
 import { useState } from "react";
 
+import {
+  isReviewerGateChecking,
+  reviewerGateAllows,
+  reviewerGateMessage,
+  reviewerGateReviewer,
+} from "@/lib/blockedSaleReviewGate";
+import type { ReviewerGate } from "@/lib/blockedSaleReviewGate";
+import { REGISTER_BLOCKED_ERROR_CODE } from "@/lib/saleQueueSession";
 import type { RejectedSaleReview as Review } from "@/lib/rejectedSaleSession";
 import {
   DISCARD_REJECTED_SALE_ACTION,
@@ -28,6 +36,24 @@ import {
 
 type RejectedSaleReviewProps = {
   reviews: readonly Review[];
+  /**
+   * v1.3 CP-2B item C — where the host has got to in establishing who this is.
+   *
+   * THREE STATES, NOT TWO. "Still checking" is rendered as neither controls nor
+   * a refusal: telling someone they lack permission before anything has been
+   * read is both wrong and, when it hides the only control that would have
+   * refreshed their identity, a deadlock. That was the defect.
+   *
+   * PRESENTATION ONLY. Hiding a control is a courtesy, not a guard: every
+   * action below is re-checked against the live session inside DeviceApp before
+   * anything is written, so a stale gate here cannot authorise anything.
+   */
+  reviewerGate: ReviewerGate;
+  /** Records an owner/manager decision. Resolves to a message, or null. */
+  onReviewDecision: (
+    queueRecordId: string,
+    action: "acknowledged" | "escalated"
+  ) => Promise<string | null>;
   /** Resolves to an error message, or null when the discard succeeded. */
   onDiscard: (queueRecordId: string) => Promise<string | null>;
   /** Resolves to an error message, or null when the retry was accepted. */
@@ -46,11 +72,44 @@ function Row({ label, value }: { label: string; value: string }) {
 
 export default function RejectedSaleReview({
   reviews,
+  reviewerGate,
+  onReviewDecision,
   onDiscard,
   onRetry,
   onClose,
 }: RejectedSaleReviewProps) {
   const [confirming, setConfirming] = useState<string | null>(null);
+
+  // v1.3 CP-2B item C — the outcome of the last recorded decision, per sale.
+  const allowed = reviewerGateAllows(reviewerGate);
+  const checking = isReviewerGateChecking(reviewerGate);
+  const refusal = reviewerGateMessage(reviewerGate);
+  const signedInReviewer = reviewerGateReviewer(reviewerGate);
+
+  const [decisionBusy, setDecisionBusy] = useState<string | null>(null);
+  const [decisionFor, setDecisionFor] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [decisionSaved, setDecisionSaved] = useState<string | null>(null);
+
+  /**
+   * Runs one decision and reports exactly what happened.
+   *
+   * A REFUSAL IS NEVER SHOWN AS A SAVE. onReviewDecision resolves to a message
+   * when nothing was written -- including when the history is full -- and that
+   * message is what the reviewer reads. Only a null means recorded.
+   */
+  async function run(queueRecordId: string, action: "acknowledged" | "escalated") {
+    setDecisionBusy(queueRecordId);
+    setDecisionFor(queueRecordId);
+    setDecisionSaved(null);
+    setDecisionError(null);
+
+    const message = await onReviewDecision(queueRecordId, action);
+
+    setDecisionError(message);
+    setDecisionSaved(message === null ? queueRecordId : null);
+    setDecisionBusy(null);
+  }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -126,7 +185,33 @@ export default function RejectedSaleReview({
               <div className="mt-4 border-t border-neutral-100 pt-3">
                 {receipt !== null && <Row label="Reference" value={receipt.offlineReference} />}
                 <Row label="Taken" value={new Date(record.occurredAt).toLocaleString()} />
-                <Row label="Payment" value={record.paymentMethod} />
+                {/* v1.3 CP-2B item C — the ORIGINAL identity and the CLAIM.
+                    Both are shown verbatim: the sale id is the one the server
+                    will replay under, and the register is what this till
+                    claimed, never something resolved here. */}
+                <Row label="Sale ID" value={record.saleRequestId} />
+                <Row
+                  label="Claimed register"
+                  value={record.registerSessionId ?? "None recorded"}
+                />
+                {/* HONEST ABOUT THE PAYMENT, AND ONLY THAT. The device knows
+                    which method the cashier selected. It does NOT know whether
+                    cash was actually taken or counted, so the wording says
+                    "recorded as" and the note below says what is unverified. */}
+                <Row
+                  label="Payment"
+                  value={
+                    record.paymentMethod === "cash"
+                      ? "Recorded as cash"
+                      : "Recorded as card"
+                  }
+                />
+                {record.paymentMethod === "cash" && (
+                  <p className="mt-2 text-xs leading-relaxed text-amber-800" data-cash-note>
+                    This sale was recorded as a cash payment. POS Canvas cannot confirm whether
+                    the cash was taken or counted — check the drawer before deciding.
+                  </p>
+                )}
 
                 {receipt === null ? (
                   <p className="mt-3 text-xs leading-relaxed text-neutral-500">
@@ -170,6 +255,90 @@ export default function RejectedSaleReview({
                 )}
               </div>
 
+              {/* ================================================================
+                  v1.3 CP-2B item C — OWNER / MANAGER REVIEW.
+                  Only for a sale held back by the register check, and only for
+                  a permitted role. A cashier sees the facts and the reason, and
+                  no control that could record a decision or discard the sale.
+                  ================================================================ */}
+              {record.lastErrorCode === REGISTER_BLOCKED_ERROR_CODE && (
+                <div className="mt-4 border-t border-neutral-100 pt-3" data-blocked-review>
+                  {checking ? (
+                    <p className="text-xs leading-relaxed text-neutral-500" data-review-checking>
+                      Checking your permissions...
+                    </p>
+                  ) : allowed ? (
+                    <>
+                      <p className="text-xs leading-relaxed text-neutral-600">
+                        Recording a decision does not record the sale. It stays here until it
+                        is retried or discarded.
+                      </p>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={decisionBusy !== null}
+                          onClick={() => run(record.queueRecordId, "acknowledged")}
+                          className="rounded-full border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-800 disabled:opacity-50"
+                          data-acknowledge
+                        >
+                          Acknowledge
+                        </button>
+                        <button
+                          type="button"
+                          disabled={decisionBusy !== null}
+                          onClick={() => run(record.queueRecordId, "escalated")}
+                          className="rounded-full border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-800 disabled:opacity-50"
+                          data-escalate
+                        >
+                          Escalate
+                        </button>
+                      </div>
+
+                      {signedInReviewer !== null && (
+                        <p className="mt-2 text-xs text-neutral-500">
+                          Signed in as {signedInReviewer.displayName} ({signedInReviewer.role}).
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-xs leading-relaxed text-neutral-600" data-review-denied>
+                      {refusal}
+                    </p>
+                  )}
+
+                  {decisionError !== null && decisionFor === record.queueRecordId && (
+                    <p className="mt-2 text-xs leading-relaxed text-red-700" data-decision-error>
+                      {decisionError}
+                    </p>
+                  )}
+
+                  {decisionSaved === record.queueRecordId && decisionError === null && (
+                    <p className="mt-2 text-xs leading-relaxed text-green-700" data-decision-saved>
+                      Decision recorded. This sale is still unresolved.
+                    </p>
+                  )}
+
+                  {(record.blockedSaleReviews ?? []).length > 0 && (
+                    <div className="mt-3 border-t border-neutral-100 pt-3" data-decision-trail>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                        Recorded decisions
+                      </p>
+                      {(record.blockedSaleReviews ?? []).map((decision, index) => (
+                        <p
+                          key={`${decision.atIso}-${index}`}
+                          className="mt-1 text-xs text-neutral-600"
+                        >
+                          {decision.action === "escalated" ? "Escalated" : "Acknowledged"} by{" "}
+                          {decision.byDisplayName} ({decision.byRole}) ·{" "}
+                          {new Date(decision.atIso).toLocaleString()}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {!isConfirming && review.retry.allowed && (
                 <button
                   type="button"
@@ -183,13 +352,23 @@ export default function RejectedSaleReview({
 
               {/* A code that is neither retryable nor discardable gets the
                   reason and nothing else — never a control that cannot help. */}
-              {!isConfirming && !review.retry.allowed && !review.discard.allowed && (
+              {!isConfirming &&
+                !review.retry.allowed &&
+                (!review.discard.allowed ||
+                  (record.lastErrorCode === REGISTER_BLOCKED_ERROR_CODE && !allowed)) && (
                 <p className="mt-5 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs leading-relaxed text-neutral-600">
                   {RETRY_REJECTED_SALE_REFUSALS[review.retry.reason]}
                 </p>
               )}
 
-              {!isConfirming && review.discard.allowed && (
+              {/* v1.3 CP-2B item C — a register-blocked sale may only be
+                  discarded by an owner or a manager. handleDiscard re-checks
+                  the live session regardless, so this is the courtesy and that
+                  is the guard; both are needed, because a visible control
+                  invites an attempt that will only be refused. */}
+              {!isConfirming &&
+                review.discard.allowed &&
+                (record.lastErrorCode !== REGISTER_BLOCKED_ERROR_CODE || allowed) && (
                 <button
                   type="button"
                   onClick={() => {

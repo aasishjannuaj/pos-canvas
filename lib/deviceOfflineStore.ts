@@ -180,6 +180,95 @@ export function openOfflineDb(
   });
 }
 
+/**
+ * v1.3 CP-2B item C — ONE transaction that reads, decides and writes.
+ *
+ * WHY THIS EXISTS. Discarding used to read the record, decide, and then write in
+ * a SEPARATE transaction. Between those two the stored rejection reason could
+ * change — and the authorization decision was taken against the earlier read.
+ * A sale that became register-blocked in that window could therefore be
+ * discarded on the strength of a check made when it was something else.
+ * Independent review found exactly that.
+ *
+ * The window is closed by not having one: the record and the uncertain-sale
+ * evidence are read, the decision is taken, and the write is issued inside a
+ * SINGLE readwrite transaction. IndexedDB serialises readwrite transactions
+ * over the same stores, so no other writer can interleave between the read this
+ * decision used and the write it produced.
+ *
+ * `decide` MUST BE SYNCHRONOUS, and that is not a style preference. An
+ * IndexedDB transaction auto-commits as soon as the event loop turns with no
+ * pending request against it, so an `await` inside the callback would end the
+ * transaction and reintroduce the gap this closes. The decision it runs is pure
+ * by construction — every policy it needs is a pure function over the two raw
+ * values handed to it.
+ *
+ * BOTH STORES ARE IN SCOPE, so the uncertain-sale evidence the policy consults
+ * is read in the same transaction as the record it is being consulted about.
+ */
+export type QueueMutationDecision<T> =
+  | { commit: true; record: unknown; value: T }
+  | { commit: false; value: T };
+
+export function withQueueRecordMutation<T>(
+  db: IDBDatabase,
+  queueRecordId: string,
+  uncertainKey: string,
+  decide: (input: { queued: unknown; uncertain: unknown }) => QueueMutationDecision<T>
+): Promise<OfflineStoreResult<T>> {
+  return new Promise((resolve) => {
+    let settled: T | undefined;
+    let decided = false;
+
+    try {
+      const transaction = db.transaction([SALE_QUEUE_STORE, CACHE_STORE], "readwrite");
+
+      transaction.onabort = () => resolve({ ok: false, reason: "failed" });
+      transaction.onerror = () => resolve({ ok: false, reason: "failed" });
+      transaction.oncomplete = () => {
+        if (decided) resolve({ ok: true, value: settled as T });
+        else resolve({ ok: false, reason: "failed" });
+      };
+
+      const queueStore = transaction.objectStore(SALE_QUEUE_STORE);
+      const cacheStore = transaction.objectStore(CACHE_STORE);
+      const queuedRequest = queueStore.get(queueRecordId);
+
+      queuedRequest.onsuccess = () => {
+        const uncertainRequest = cacheStore.get(uncertainKey);
+
+        uncertainRequest.onsuccess = () => {
+          let outcome: QueueMutationDecision<T>;
+
+          try {
+            outcome = decide({
+              queued: queuedRequest.result,
+              uncertain: uncertainRequest.result,
+            });
+          } catch {
+            transaction.abort();
+
+            return;
+          }
+
+          settled = outcome.value;
+          decided = true;
+
+          // The write goes out on the SAME transaction, so nothing can have
+          // changed the record between the read above and this put.
+          if (outcome.commit) queueStore.put(outcome.record);
+        };
+
+        uncertainRequest.onerror = () => resolve({ ok: false, reason: "failed" });
+      };
+
+      queuedRequest.onerror = () => resolve({ ok: false, reason: "failed" });
+    } catch {
+      resolve({ ok: false, reason: "failed" });
+    }
+  });
+}
+
 function withStore<T>(
   db: IDBDatabase,
   storeName: string,

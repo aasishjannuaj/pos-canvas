@@ -321,7 +321,39 @@ export function resolveOfflineSaleDraft(input: {
     items: input.cart,
   });
 
-  if (input.current !== null && input.current.fingerprint === fingerprint) {
+  // v1.3 CP-2B — THE INHERITED ORIGINAL OUTRANKS AN UNSPENT LOCAL DRAFT.
+  //
+  // Computed BEFORE the `current` shortcut below, and that ordering is the
+  // whole correction. Previously `current` was returned first whenever its
+  // fingerprint matched, so a draft minted for this same cart on an earlier
+  // offline attempt silently won over the id an ONLINE request had already
+  // carried to the server. DeviceApp.verifySubmittedSale then refused the
+  // mismatch — correctly — and legitimate recovery became unreachable.
+  //
+  // WHY THE INHERITED ID IS THE AUTHORITATIVE ONE. It is the key a request
+  // already left the device under, so the server may hold an order against it.
+  // `current` is a local draft that has NOT been enqueued: DeviceApp clears
+  // offlineDraftRef the moment an enqueue succeeds, so an unspent draft has
+  // never been sent anywhere and nothing can exist under it.
+  //
+  // Honoured only on an EXACT fingerprint match, so a cart, tender or tip that
+  // changed after the failed attempt still gets its own identity.
+  const inheritedId =
+    input.inherited !== null &&
+    input.inherited !== undefined &&
+    input.inherited.fingerprint === fingerprint
+      ? input.inherited.id
+      : null;
+
+  // The existing draft is reused only when it does not contradict an
+  // authoritative inherited identity. No id is ever silently swapped for
+  // another: either they agree, or the inherited original is chosen
+  // deliberately and a fresh local queue handle is minted for it below.
+  if (
+    input.current !== null &&
+    input.current.fingerprint === fingerprint &&
+    (inheritedId === null || input.current.saleRequestId === inheritedId)
+  ) {
     return { ok: true, draft: input.current };
   }
 
@@ -332,14 +364,7 @@ export function resolveOfflineSaleDraft(input: {
     // queueRecordId is still minted below: that is this device's local handle
     // on a row, it has never been sent anywhere, and reusing one would collide
     // with the record the failed attempt may already have written.
-    const inherited =
-      input.inherited !== null &&
-      input.inherited !== undefined &&
-      input.inherited.fingerprint === fingerprint
-        ? input.inherited.id
-        : null;
-
-    const saleRequestId = inherited ?? generate();
+    const saleRequestId = inheritedId ?? generate();
     // A separate local key, so this device's handle on the row stays distinct
     // from the server's identity for the sale. Both are minted here, in this
     // one place, and neither is ever regenerated.

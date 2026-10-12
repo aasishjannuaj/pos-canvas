@@ -94,6 +94,8 @@ describe("the cashier's counts", () => {
       total: 3,
       nextRetryAt: null,
       uncertainOnlineSale: false,
+      // v1.3 CP-2R — these fixtures describe storage that WAS read.
+      evidenceReadable: true,
     });
   });
 });

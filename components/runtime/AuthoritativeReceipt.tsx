@@ -1,5 +1,7 @@
 import type { ResolvedReceiptPresentation } from "@/lib/receiptPresentation";
 import { shouldShowChargedLine } from "@/lib/receiptPresentation";
+import CashTenderReceiptLines from "@/components/runtime/CashTenderReceiptLines";
+import type { CashTenderOutcome } from "@/lib/cashTenderEntry";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 
 // Milestone 16, Feature 16.3 — Migration D3.
@@ -26,6 +28,16 @@ import type { CompletedSaleReceipt } from "@/lib/completedSale";
 type AuthoritativeReceiptProps = {
   receipt: CompletedSaleReceipt;
   presentation: ResolvedReceiptPresentation;
+  /**
+   * v1.3 CP-2C — what the cash sale was settled with.
+   *
+   * PRESENTATION ONLY, AND IT CHANGES NO FIGURE ON THIS RECEIPT. Every amount
+   * above still comes from the payload; these two lines sit below the Total and
+   * describe how the money crossed the counter. Absent, null, or present
+   * alongside a card payment, nothing is printed — see cashTenderReceiptLines.
+   */
+  cashTender?: CashTenderOutcome | null;
+
   /**
    * Feature 28A — WHEN the customer paid, when that is not createdAt.
    *
@@ -56,6 +68,7 @@ export default function AuthoritativeReceipt({
   receipt,
   presentation,
   saleTime,
+  cashTender = null,
 }: AuthoritativeReceiptProps) {
   const { businessProfile, receipt: receiptSettings, currencySymbol } = presentation;
 
@@ -177,6 +190,13 @@ export default function AuthoritativeReceipt({
             {receipt.total}
           </span>
         </div>
+
+        <CashTenderReceiptLines
+          paymentMethod={receipt.paymentMethod}
+          outcome={cashTender}
+          receiptTotalFixed={receipt.total}
+          currencySymbol={currencySymbol}
+        />
 
         {receiptSettings.showPaymentMethod && (
           <div className="flex justify-between py-0.5 text-neutral-500">

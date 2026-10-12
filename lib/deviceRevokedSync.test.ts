@@ -37,6 +37,14 @@ import type { DevicePairing, DeviceState } from "@/lib/deviceSession";
 import type { OfflineSaleSubmission } from "@/lib/offlineSaleRpc";
 import type { QueuedSale } from "@/lib/saleQueue";
 
+// v1.3 CP-2B item C — a reviewer who is NOT an owner or manager.
+//
+// These sales are rejected for reasons that have nothing to do with register
+// attribution, and the role restriction must not touch them. Passing a DENIED
+// reviewer here is deliberate: it proves the existing discard policy still
+// works for an ordinary cashier, which is the regression this guards against.
+const NOT_A_REVIEWER = { allowed: false } as const;
+
 const REVOKED_AT = Date.parse("2026-08-21T12:00:00.000Z");
 const BEFORE = new Date(REVOKED_AT - 3_600_000).toISOString();
 const AFTER = new Date(REVOKED_AT + 3_600_000).toISOString();
@@ -523,7 +531,7 @@ describe("discarding an authoritatively rejected sale", () => {
 
     expect(decideDeviceResetSafety(await readOfflineSaleStatus()).allowed).toBe(false);
 
-    const discarded = await discardRejectedSale("q-1");
+    const discarded = await discardRejectedSale("q-1", NOT_A_REVIEWER);
 
     expect(discarded.ok).toBe(true);
 
@@ -540,7 +548,7 @@ describe("discarding an authoritatively rejected sale", () => {
 
   it("retains the record rather than deleting it", async () => {
     await strandedRejectedSale();
-    await discardRejectedSale("q-1");
+    await discardRejectedSale("q-1", NOT_A_REVIEWER);
 
     const stored = await getQueuedSale("q-1");
 
@@ -559,7 +567,7 @@ describe("discarding an authoritatively rejected sale", () => {
   it("is terminal: a later drain never resurrects it as pending", async () => {
     const server = await strandedRejectedSale();
 
-    await discardRejectedSale("q-1");
+    await discardRejectedSale("q-1", NOT_A_REVIEWER);
 
     // Simulate a relaunch: fresh engine, startup reclaim, full drain.
     resetSyncEngineForTests();
@@ -583,7 +591,7 @@ describe("discarding an authoritatively rejected sale", () => {
 
     expect((await readOfflineSaleStatus()).needsAttention).toBe(2);
 
-    await discardRejectedSale("q-1");
+    await discardRejectedSale("q-1", NOT_A_REVIEWER);
 
     const first = await getQueuedSale("q-1");
     const second = await getQueuedSale("q-2");
@@ -596,7 +604,7 @@ describe("discarding an authoritatively rejected sale", () => {
   it("refuses a sale that is still waiting to sync", async () => {
     await enqueueSale(input(BEFORE));
 
-    expect(await discardRejectedSale("q-1")).toEqual({
+    expect(await discardRejectedSale("q-1", NOT_A_REVIEWER)).toEqual({
       ok: false,
       reason: "not_needs_attention",
     });
@@ -613,7 +621,7 @@ describe("discarding an authoritatively rejected sale", () => {
 
     await createSaleSyncEngine({ submit: server.submit, now: () => NOW }).run();
 
-    expect(await discardRejectedSale("q-1")).toEqual({
+    expect(await discardRejectedSale("q-1", NOT_A_REVIEWER)).toEqual({
       ok: false,
       reason: "not_needs_attention",
     });
@@ -642,7 +650,7 @@ describe("discarding an authoritatively rejected sale", () => {
 
     // A DIFFERENT sale is outstanding, so this one may be resolved — but the
     // reset stays blocked by the uncertain evidence in its own right.
-    expect((await discardRejectedSale("q-1")).ok).toBe(true);
+    expect((await discardRejectedSale("q-1", NOT_A_REVIEWER)).ok).toBe(true);
     expect(decideDeviceResetSafety(await readOfflineSaleStatus()).allowed).toBe(false);
 
     await resolveUncertainSale();
@@ -651,7 +659,7 @@ describe("discarding an authoritatively rejected sale", () => {
   });
 
   it("reports not_found rather than inventing a record", async () => {
-    expect(await discardRejectedSale("nope")).toEqual({ ok: false, reason: "not_found" });
+    expect(await discardRejectedSale("nope", NOT_A_REVIEWER)).toEqual({ ok: false, reason: "not_found" });
   });
 });
 
@@ -669,6 +677,8 @@ describe("stale UI state cannot erase durable evidence", () => {
       total: 0,
       nextRetryAt: null,
       uncertainOnlineSale: false,
+      // v1.3 CP-2R — these fixtures describe storage that WAS read.
+      evidenceReadable: true,
     };
 
     expect(decideDeviceResetSafety(stale).allowed).toBe(true);
@@ -687,7 +697,7 @@ describe("stale UI state cannot erase durable evidence", () => {
 
     expect(decideDeviceResetSafety(await readOfflineSaleStatus()).allowed).toBe(false);
 
-    await discardRejectedSale("q-1");
+    await discardRejectedSale("q-1", NOT_A_REVIEWER);
 
     expect(decideDeviceResetSafety(await readOfflineSaleStatus()).allowed).toBe(true);
   });

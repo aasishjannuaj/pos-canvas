@@ -65,6 +65,10 @@ import {
   readUncertainSaleRecord,
 } from "@/lib/uncertainSaleRecord";
 import { readCacheKey, writeCacheKey, clearDeviceCache } from "@/lib/deviceOfflineStore";
+import {
+  readRecoveryAuthority,
+  recoveryPermitsNewSale,
+} from "@/lib/recoveryAuthority";
 import type { CartItem, PaymentMethod } from "@/lib/cart";
 import type { MenuItem } from "@/lib/projectConfig";
 import type { OfflineSaleSubmission } from "@/lib/offlineSaleRpc";
@@ -1732,5 +1736,289 @@ describe("OF-30: a marker the queue already owns is reconciled, not stranded", (
     expect(stored.ok && stored.value.serverOrderNumber).toBe("ORD8008");
     expect(allocations).toBe(0);
     expect(serverOrders.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B — "the store did not answer" is not "the store is empty"
+//
+// readUncertainSale reports storage trouble as { status: "none" }, and says so
+// in its own comment. Defensible for the question it answers; not defensible
+// for authorizing a NEW sale, where a failed read that looks like an empty
+// store is precisely how a till sells again over an order that may exist.
+// ---------------------------------------------------------------------------
+
+describe("CP-2B: the recovery authority distinguishes absence from failure", () => {
+  it("reports verified_clear ONLY when a successful read found nothing", async () => {
+    const authority = await readRecoveryAuthority(IDENTITY);
+
+    expect(authority).toEqual({ status: "verified_clear" });
+    expect(recoveryPermitsNewSale(authority)).toBe(true);
+  });
+
+  it("reports the outstanding sale, preserving the original saleRequestId", async () => {
+    await arm();
+
+    const authority = await readRecoveryAuthority(IDENTITY);
+
+    expect(authority.status).toBe("outstanding");
+    if (authority.status === "outstanding") {
+      // The key that was dispatched, never a fresh one.
+      expect(authority.sale.saleRequestId).toBe(dispatched().saleRequestId);
+    }
+    expect(recoveryPermitsNewSale(authority)).toBe(false);
+  });
+
+  it("BLOCKS when storage is unavailable, where readUncertainSale reports none", async () => {
+    // The exact divergence, same store, same moment, two answers — and only one
+    // of them is safe to sell on.
+    const real = globalThis.indexedDB;
+
+    try {
+      (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
+
+      const authority = await readRecoveryAuthority(IDENTITY);
+      const legacy = await readUncertainSale(IDENTITY);
+
+      expect(authority).toEqual({ status: "blocked", reason: "storage_unavailable" });
+      expect(legacy).toEqual({ status: "none" });
+      expect(recoveryPermitsNewSale(authority)).toBe(false);
+    } finally {
+      globalThis.indexedDB = real;
+    }
+  });
+
+  it("BLOCKS on a record that is present but unreadable", async () => {
+    const opened = await openOfflineDb();
+
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    // Something IS there; it just cannot be understood. Not absence.
+    await writeCacheKey(opened.value, UNCERTAIN_SALE_KEY, {
+      schemaVersion: 1,
+      saleRequestId: "nope",
+    });
+    opened.value.close();
+
+    const authority = await readRecoveryAuthority(IDENTITY);
+
+    expect(authority).toEqual({ status: "blocked", reason: "unreadable" });
+    expect(recoveryPermitsNewSale(authority)).toBe(false);
+  });
+
+  it("BLOCKS on a record belonging to another pairing", async () => {
+    await armUncertainSale({
+      sale: dispatched(),
+      identity: OTHER_IDENTITY,
+      dispatchedAt: DISPATCHED_AT,
+    });
+
+    const authority = await readRecoveryAuthority(IDENTITY);
+
+    expect(authority).toEqual({ status: "blocked", reason: "identity_mismatch" });
+  });
+
+  it("validates the FULL pairing identity, not just the device", async () => {
+    await arm();
+
+    for (const field of ["deviceAuthUserId", "deviceId", "projectId", "buildJobId"] as const) {
+      const wrong = { ...IDENTITY, [field]: OTHER_IDENTITY[field] };
+      const authority = await readRecoveryAuthority(wrong);
+
+      expect(authority).toEqual({ status: "blocked", reason: "identity_mismatch" });
+    }
+  });
+
+  it("never reports verified_clear for any failure mode", async () => {
+    // The single property that matters: absence is provable, nothing else is
+    // allowed to look like it.
+    const seen: string[] = [];
+
+    const real = globalThis.indexedDB;
+    (globalThis as { indexedDB?: IDBFactory }).indexedDB = undefined;
+    seen.push((await readRecoveryAuthority(IDENTITY)).status);
+    globalThis.indexedDB = real;
+
+    const opened = await openOfflineDb();
+    if (opened.ok) {
+      await writeCacheKey(opened.value, UNCERTAIN_SALE_KEY, { not: "a record" });
+      opened.value.close();
+    }
+    seen.push((await readRecoveryAuthority(IDENTITY)).status);
+
+    expect(seen).toEqual(["blocked", "blocked"]);
+    expect(seen).not.toContain("verified_clear");
+  });
+
+  it("is read-only: an outstanding record survives being read", async () => {
+    await arm();
+
+    await readRecoveryAuthority(IDENTITY);
+    await readRecoveryAuthority(IDENTITY);
+
+    // Nothing was resolved, deleted or rewritten by reading.
+    const after = await readUncertainSale(IDENTITY);
+
+    expect(after.status).toBe("outstanding");
+  });
+
+  it("survives a process restart rather than assuming the record is gone", async () => {
+    await arm();
+
+    restartProcess();
+
+    expect((await readRecoveryAuthority(IDENTITY)).status).toBe("outstanding");
+  });
+
+  it("a close and reopen of checkout cannot clear the durable record", async () => {
+    await arm();
+
+    // Nothing in a checkout close touches storage.
+    expect((await readRecoveryAuthority(IDENTITY)).status).toBe("outstanding");
+    expect((await readRecoveryAuthority(IDENTITY)).status).toBe("outstanding");
+  });
+
+  it("agrees with the existing reader on the cases that reader can express", async () => {
+    // Guards against the two drifting onto different keys, which would be worse
+    // than either being wrong alone.
+    await arm();
+
+    expect((await readRecoveryAuthority(IDENTITY)).status).toBe("outstanding");
+    expect((await readUncertainSale(IDENTITY)).status).toBe("outstanding");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B FINAL — the offline final gate, against the real draft resolver
+//
+// The host reconstructs the fingerprint it verifies from the SUBMITTED cart and
+// its own authoritative project id. resolveOfflineSaleDraft computes the
+// draft's fingerprint from the same four inputs with the same function, so the
+// two must agree exactly — and this file proves it with the real resolver and a
+// real IndexedDB rather than with a model.
+// ---------------------------------------------------------------------------
+
+describe("CP-2B final: the offline gate reconstructs the identity it verifies", () => {
+  function hostReconstruct(cart: ReturnType<typeof liveCart>, projectId = PROJECT) {
+    // Byte-for-byte what DeviceApp.queueOfflineSale computes.
+    return createSaleFingerprint({
+      projectId,
+      paymentMethod: "cash",
+      tipAmount: 0,
+      items: cart,
+    });
+  }
+
+  it("the host's reconstruction equals the draft's OWN fingerprint", () => {
+    const cart = liveCart();
+    const drafted = resolveOfflineSaleDraft({
+      current: null,
+      projectId: PROJECT,
+      paymentMethod: "cash",
+      tipAmount: 0,
+      cart,
+      now: T0,
+      generate,
+    });
+
+    expect(drafted.ok).toBe(true);
+
+    if (!drafted.ok) return;
+
+    // Neither value is read out of the other: one comes from the resolver, one
+    // from the host's own reconstruction over the submitted cart.
+    expect(hostReconstruct(cart)).toBe(drafted.draft.fingerprint);
+  });
+
+  it("a cart altered after authorization no longer matches, so the gate refuses", () => {
+    const authorizedCart = liveCart();
+    const authorized = hostReconstruct(authorizedCart);
+
+    // One more of the same product: a different sale.
+    const tamperedCart = [createCartItem(MENU_ITEM, [], 3)];
+
+    expect(hostReconstruct(tamperedCart)).not.toBe(authorized);
+  });
+
+  it("a project substituted into the payload cannot match the host's own", () => {
+    const cart = liveCart();
+
+    expect(hostReconstruct(cart, "11111111-1111-4111-8111-111111111111")).not.toBe(
+      hostReconstruct(cart)
+    );
+  });
+
+  it("a refused gate leaves the draft identity intact, so the retry is the SAME sale", () => {
+    const cart = liveCart();
+    const first = resolveOfflineSaleDraft({
+      current: null,
+      projectId: PROJECT,
+      paymentMethod: "cash",
+      tipAmount: 0,
+      cart,
+      now: T0,
+      generate,
+    });
+
+    expect(first.ok).toBe(true);
+
+    if (!first.ok) return;
+
+    // The host stored the draft BEFORE the gate ran, and the gate then refused.
+    // Nothing durable was written. The next press must reuse this identity
+    // rather than mint a second one for the same cart.
+    const retry = resolveOfflineSaleDraft({
+      current: first.draft,
+      projectId: PROJECT,
+      paymentMethod: "cash",
+      tipAmount: 0,
+      cart,
+      now: T0 + 5_000,
+      generate,
+    });
+
+    expect(retry.ok).toBe(true);
+
+    if (!retry.ok) return;
+
+    expect(retry.draft.saleRequestId).toBe(first.draft.saleRequestId);
+    expect(retry.draft.queueRecordId).toBe(first.draft.queueRecordId);
+  });
+
+  it("the queued record carries the draft's id, so v4 sees ONE idempotency key", async () => {
+    const cart = liveCart();
+    const drafted = resolveOfflineSaleDraft({
+      current: null,
+      projectId: PROJECT,
+      paymentMethod: "cash",
+      tipAmount: 0,
+      cart,
+      now: T0,
+      generate,
+    });
+
+    expect(drafted.ok).toBe(true);
+
+    if (!drafted.ok) return;
+
+    const enqueued = await enqueueSale(
+      input({
+        queueRecordId: drafted.draft.queueRecordId,
+        saleRequestId: drafted.draft.saleRequestId,
+        occurredAt: drafted.draft.occurredAt,
+      })
+    );
+
+    expect(enqueued.ok).toBe(true);
+
+    const stored = await getQueuedSale(drafted.draft.queueRecordId);
+
+    expect(stored.ok).toBe(true);
+
+    if (!stored.ok || stored.value === null) return;
+
+    // The id that will go to complete_sale_v4 is the draft's, unchanged.
+    expect(stored.value.saleRequestId).toBe(drafted.draft.saleRequestId);
   });
 });

@@ -153,6 +153,44 @@ export async function resolveUncertainSale(): Promise<boolean> {
 }
 
 /** True when anything at all is stored — usable or not. Governs reset safety. */
+/**
+ * v1.3 CP-2R — three answers, because "I could not look" is not "there is
+ * nothing there".
+ *
+ * hasUncertainSaleEvidence below returns a BOOLEAN, and its `false` conflates a
+ * device with no outstanding request with a device whose storage would not
+ * open. That is fail-open on the one question where it must not be: the reset
+ * gate reads it, and a reset performed over an unreadable store destroys the
+ * only copy of an idempotency key for money that may already have moved.
+ *
+ * It is kept as it is, because its existing callers and the accepted torture
+ * tests ask a different, legitimate question. This is the reading the SAFETY
+ * gates use.
+ *
+ * A MALFORMED STORED VALUE IS `present`, NOT `unreadable`. Something is there;
+ * whether it parses is readUncertainSale's question, and either way the gate
+ * must refuse. `unreadable` is reserved for not being able to look at all.
+ */
+export type UncertainSaleEvidenceRead = "present" | "absent" | "unreadable";
+
+export async function readUncertainSaleEvidence(): Promise<UncertainSaleEvidenceRead> {
+  const opened = await openOfflineDb();
+
+  if (!opened.ok) return "unreadable";
+
+  try {
+    const raw = await readUncertainSaleRecordRaw(opened.value);
+
+    if (!raw.ok) return "unreadable";
+
+    return raw.value === null || raw.value === undefined ? "absent" : "present";
+  } catch {
+    return "unreadable";
+  } finally {
+    opened.value.close();
+  }
+}
+
 export async function hasUncertainSaleEvidence(): Promise<boolean> {
   return withDb(async (db) => {
     const raw = await readUncertainSaleRecordRaw(db);

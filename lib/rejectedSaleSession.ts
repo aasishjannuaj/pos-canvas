@@ -15,7 +15,18 @@
 import { buildProvisionalReceipt } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 import { readPinnedConfig } from "@/lib/deviceOfflineCache";
-import { openOfflineDb, readPinnedConfigRecord } from "@/lib/deviceOfflineStore";
+import {
+  openOfflineDb,
+  readPinnedConfigRecord,
+  withQueueRecordMutation,
+} from "@/lib/deviceOfflineStore";
+import { readQueuedSale, transitionQueuedSale } from "@/lib/saleQueue";
+import {
+  UNCERTAIN_SALE_KEY,
+  ownsUncertainSale,
+  readUncertainSaleRecord,
+  toUncertainSale,
+} from "@/lib/uncertainSaleRecord";
 import {
   getQueuedSale,
   listQueuedSales,
@@ -23,6 +34,7 @@ import {
   updateQueueState,
 } from "@/lib/saleQueueSession";
 import type { QueuedSale } from "@/lib/saleQueue";
+import { REGISTER_BLOCKED_ERROR_CODE } from "@/lib/saleQueueSession";
 import { readUncertainSale } from "@/lib/uncertainSaleSession";
 import {
   decideRejectedSaleDiscardSafety,
@@ -147,7 +159,16 @@ export async function readRejectedSaleReview(
 
 export type DiscardRejectedSaleResult =
   | { ok: true; record: QueuedSale }
-  | { ok: false; reason: RejectedSaleDiscardRefusal | "not_found" | "storage_unavailable" };
+  | {
+      ok: false;
+      reason:
+        | RejectedSaleDiscardRefusal
+        | "not_found"
+        | "storage_unavailable"
+        | "corrupt_record"
+        /** The record was register-blocked and the reviewer was not permitted. */
+        | "reviewer_not_permitted";
+    };
 
 /**
  * Marks a rejected sale resolved. THE ONLY WRITER OF THE `discarded` STATE.
@@ -163,41 +184,122 @@ export type DiscardRejectedSaleResult =
  * order number is invented. The server already gave its answer; this records
  * that a person accepted it.
  */
+/**
+ * Discards ONE authoritatively rejected sale.
+ *
+ * THE AUTHORIZATION IS DECIDED AGAINST THE RECORD BEING MUTATED, in the same
+ * transaction, and that is the correction. Previously the caller asked whether
+ * the sale was register-blocked, got an answer, and THEN called this — which
+ * re-read the record and discarded it without re-checking the role. A record
+ * that became register-blocked in that window was discarded on the strength of
+ * a check taken when it was something else. Independent review found it.
+ *
+ * So the caller no longer decides whether authorization applies. It always
+ * passes the CURRENT reviewer decision, and this function — holding the record
+ * it is about to write — decides whether that decision was needed. The two
+ * cannot diverge, because there is no longer a moment between them.
+ *
+ * THE CASHIER POLICY IS UNCHANGED FOR EVERYTHING ELSE. The role is consulted
+ * only when the stored reason is the register one; every other rejected sale
+ * discards exactly as it did before, for whoever is signed in.
+ *
+ * EVERYTHING ELSE IS THE ACCEPTED POLICY, UNMOVED. decideRejectedSaleDiscardSafety
+ * still runs, against the same read; the sale identity, the payload, the
+ * register claim and the state machine are untouched; the rejection code is
+ * still carried forward so a discarded record still says why.
+ */
 export async function discardRejectedSale(
-  queueRecordId: string
+  queueRecordId: string,
+  reviewer: { allowed: boolean }
 ): Promise<DiscardRejectedSaleResult> {
-  const stored = await getQueuedSale(queueRecordId);
+  const db = await openOfflineDb();
 
-  if (!stored.ok) {
-    return { ok: false, reason: stored.reason === "not_found" ? "not_found" : "storage_unavailable" };
+  if (!db.ok) return { ok: false, reason: "storage_unavailable" };
+
+  const now = new Date().toISOString();
+
+  // v1.3 CP-2D — the connection is closed in the `finally` below.
+  //
+  // IT CANNOT AFFECT ATOMICITY. withQueueRecordMutation resolves on the
+  // transaction's own `oncomplete`/`onabort`, so the transaction has already
+  // settled before this function continues; and IDBDatabase.close() is defined
+  // to wait for outstanding transactions before it takes effect, so even an
+  // early close could not tear one in half. The single readwrite transaction,
+  // and everything decided inside it, is untouched.
+  const outcome = await withQueueRecordMutation<DiscardRejectedSaleResult>(
+    db.value,
+    queueRecordId,
+    UNCERTAIN_SALE_KEY,
+    ({ queued, uncertain }) => {
+      const refuse = (
+        reason: Exclude<DiscardRejectedSaleResult, { ok: true }>["reason"]
+      ): QueueMutationDecisionOf => ({ commit: false, value: { ok: false, reason } });
+
+      if (queued === undefined || queued === null) return refuse("not_found");
+
+      const parsed = readQueuedSale(queued);
+
+      if (!parsed.ok) return refuse("corrupt_record");
+
+      const record = parsed.record;
+
+      // ================================================================
+      // THE GATE, ON THE RECORD AS IT IS RIGHT NOW. Not as the screen
+      // rendered it, and not as a previous call reported it.
+      // ================================================================
+      if (record.lastErrorCode === REGISTER_BLOCKED_ERROR_CODE && reviewer?.allowed !== true) {
+        return refuse("reviewer_not_permitted");
+      }
+
+      // The accepted safety policy, against the same read. The uncertain-sale
+      // evidence comes from this transaction too, so it cannot have moved
+      // either.
+      const parsedUncertain = readUncertainSaleRecord(uncertain);
+      const evidence: UncertainSaleEvidence = !parsedUncertain.ok
+        ? parsedUncertain.reason === "missing"
+          ? { present: false }
+          : { present: true, saleRequestId: null }
+        : ownsUncertainSale(parsedUncertain.record, {
+              deviceAuthUserId: record.deviceAuthUserId,
+              deviceId: record.deviceId,
+              projectId: record.projectId,
+              buildJobId: record.buildJobId,
+            })
+          ? { present: true, saleRequestId: toUncertainSale(parsedUncertain.record).saleRequestId }
+          : { present: true, saleRequestId: null };
+
+      const safety = decideRejectedSaleDiscardSafety({ record, uncertain: evidence });
+
+      if (!safety.allowed) return refuse(safety.reason);
+
+      // THE REJECTION CODE IS CARRIED FORWARD EXPLICITLY. transitionQueuedSale
+      // resets lastErrorCode, lastErrorMessage and nextAttemptAt to null
+      // whenever the patch omits them — right for a retry, which must not
+      // inherit a stale error, and wrong here: the code is the reason this
+      // record was resolvable at all, and a discarded sale with nothing
+      // explaining why is not evidence.
+      const moved = transitionQueuedSale(record, "discarded", now, {
+        lastErrorCode: record.lastErrorCode,
+        lastErrorMessage: record.lastErrorMessage,
+      });
+
+      if (!moved.ok) return refuse("storage_unavailable");
+
+      return { commit: true, record: moved.record, value: { ok: true, record: moved.record } };
+    }
+  );
+
+  try {
+    return outcome.ok ? outcome.value : { ok: false, reason: "storage_unavailable" };
+  } finally {
+    db.value.close();
   }
-
-  const record = stored.value;
-  const safety = decideRejectedSaleDiscardSafety({
-    record,
-    uncertain: await readUncertainEvidence(record),
-  });
-
-  if (!safety.allowed) {
-    return { ok: false, reason: safety.reason };
-  }
-
-  // THE REJECTION CODE IS CARRIED FORWARD EXPLICITLY. transitionQueuedSale
-  // resets lastErrorCode, lastErrorMessage and nextAttemptAt to null whenever
-  // the patch omits them — right for a retry, which must not inherit a stale
-  // error, and wrong here: the code is the reason this record was resolvable at
-  // all, and a discarded sale with nothing explaining why is not evidence. Only
-  // nextAttemptAt is allowed to fall to null, because a resolved record must
-  // never carry a retry instant.
-  const moved = await updateQueueState(queueRecordId, "discarded", new Date().toISOString(), {
-    lastErrorCode: record.lastErrorCode,
-    lastErrorMessage: record.lastErrorMessage,
-  });
-
-  return moved.ok
-    ? { ok: true, record: moved.value }
-    : { ok: false, reason: "storage_unavailable" };
 }
+
+type QueueMutationDecisionOf = {
+  commit: false;
+  value: DiscardRejectedSaleResult;
+};
 
 /**
  * Every sale currently asking a person to resolve it.

@@ -18,6 +18,9 @@ import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import { describeCartModifiers, getItemQuantityInCart } from "@/lib/cart";
+import type { ReactNode } from "react";
+
+import type { CashTenderOutcome } from "@/lib/cashTenderEntry";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
 import { OFFLINE_RECEIPT_REFERENCE_LABEL } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
@@ -96,6 +99,29 @@ type PosCheckoutPanelProps = {
   // one. Only ever set by a paired device selling offline.
   provisionalReceipt?: ProvisionalReceipt | null;
   onCloseReceipt: () => void;
+
+  /**
+   * v1.3 CP-2C — the Cash Tender step, supplied by the host.
+   *
+   * A SLOT, NOT A FEATURE FLAG, and not a pad built here. This panel is shared
+   * with the Builder's EditorPreview, which has no checkout session, no
+   * revision counter and no real sale to complete; it passes nothing and
+   * therefore renders exactly what it rendered before. The runtime passes a
+   * configured CashTenderPad.
+   *
+   * When it is present it REPLACES the checkout body — header, total, payment
+   * selector and Complete Sale — rather than being appended below it. See
+   * CashTenderPad's own header for why: this overlay clips instead of
+   * scrolling, and appending would have pushed Done off a 390px panel.
+   */
+  cashTenderStep?: ReactNode;
+
+  /**
+   * v1.3 CP-2C — what a completed cash sale was settled with, for the receipt.
+   * Presentation only: it adds two lines below the Total and changes no figure
+   * on the receipt. Null, absent, or alongside a card receipt prints nothing.
+   */
+  cashTender?: CashTenderOutcome | null;
 };
 
 function formatOrderTime(createdAt: string): string {
@@ -136,6 +162,8 @@ export default function PosCheckoutPanel({
   authoritativeReceipt = null,
   provisionalReceipt = null,
   onCloseReceipt,
+  cashTenderStep = null,
+  cashTender = null,
 }: PosCheckoutPanelProps) {
   // Feature 16.2 — only ever set inside the Android shell, where printing
   // is unavailable. Stored alongside the order it was raised for and then
@@ -445,6 +473,10 @@ export default function PosCheckoutPanel({
                 </button>
               </div>
             </div>
+          ) : cashTenderStep !== null ? (
+            // v1.3 CP-2C — the Cash Tender step. It REPLACES the body below
+            // rather than being appended to it; see the cashTenderStep prop.
+            cashTenderStep
           ) : (
             <>
               <div className="flex flex-col gap-4">
@@ -581,12 +613,14 @@ export default function PosCheckoutPanel({
               <AuthoritativeReceipt
                 receipt={authoritativeReceipt}
                 presentation={livePresentation}
+                cashTender={cashTender}
               />
             ) : (
               provisionalReceipt && (
                 <OfflineReceipt
                   receipt={provisionalReceipt}
                   presentation={livePresentation}
+                  cashTender={cashTender}
                 />
               )
             )}

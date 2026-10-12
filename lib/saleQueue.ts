@@ -177,7 +177,137 @@ export type QueuedSale = {
    */
   employeePosSessionId: string | null;
   registerSessionId: string | null;
+
+  /**
+   * v1.3 CP-2B item C — what a responsible person decided about this sale when
+   * the server refused to file it against a register.
+   *
+   * APPEND-ONLY AND BOUNDED. An entry is never edited or removed, because a
+   * decision that can be overwritten is not a record of anything; the cap
+   * (BLOCKED_SALE_REVIEW_TRAIL_LIMIT) keeps one record from growing without
+   * limit on a till nobody ever resolves. The OLDEST entries are the ones
+   * dropped at the cap, so the first decision — the one that says who first
+   * saw the money — is the one kept.
+   *
+   * ADDITIVE AND OPTIONAL, exactly as Feature 1B's two claims above are. A
+   * record written before this existed reads back with an empty trail, which is
+   * the truth: nobody has reviewed it.
+   *
+   * DEVICE-LOCAL. Nothing synchronises this anywhere, and the CP-2B report says
+   * so plainly rather than calling it a financial audit trail.
+   */
+  // OPTIONAL IN THE TYPE, always an array at runtime: readQueuedSale fills it
+  // with [] for every record written before this existed. Optional so that the
+  // accepted fixtures and callers that build a record literal are untouched,
+  // which is what keeps this change additive in practice and not just in name.
+  blockedSaleReviews?: BlockedSaleReviewEntry[];
 };
+
+/**
+ * One recorded decision. Structurally identical to
+ * BlockedSaleAcknowledgement in lib/blockedSaleReview.ts, restated here so the
+ * queue envelope does not depend on the review module — the envelope is read by
+ * the sync engine, which has no business importing a review screen's types.
+ */
+export type BlockedSaleReviewEntry = {
+  action: "acknowledged" | "escalated";
+  saleRequestId: string;
+  byEmployeeId: string;
+  byDisplayName: string;
+  byRole: string;
+  atIso: string;
+  claimedRegisterSessionId: string | null;
+  /**
+   * The sale was RECORDED AS a cash payment. It is not a verified count of
+   * money in a drawer, and must never be rendered as one — see the review
+   * module. The name says what it is.
+   */
+  recordedAsCashPayment: boolean;
+  note: string | null;
+};
+
+/**
+ * How many decisions one record keeps.
+ *
+ * REACHING IT IS A REFUSAL, NOT A ROTATION. The first version silently dropped
+ * the NEWEST entry at the cap while the write still reported success, so a
+ * manager's decision could vanish and the screen would say it was saved.
+ * Independent review caught that. Nothing is discarded now: the append refuses,
+ * every existing record is preserved exactly, and the caller has to surface it.
+ */
+export const BLOCKED_SALE_REVIEW_TRAIL_LIMIT = 20;
+
+/**
+ * Reads the trail off a stored record.
+ *
+ * A MALFORMED ENTRY IS DROPPED, NOT GUESSED AT, and a malformed trail never
+ * makes the surrounding record unreadable: the money the record represents has
+ * already changed hands, and refusing to load it over a review note would be
+ * the tail wagging the dog.
+ */
+function readBlockedSaleReviews(value: unknown): BlockedSaleReviewEntry[] {
+  if (!Array.isArray(value)) return [];
+
+  const entries: BlockedSaleReviewEntry[] = [];
+
+  for (const raw of value) {
+    if (raw === null || typeof raw !== "object") continue;
+
+    const e = raw as Record<string, unknown>;
+
+    if (e.action !== "acknowledged" && e.action !== "escalated") continue;
+    if (typeof e.saleRequestId !== "string" || e.saleRequestId === "") continue;
+    if (typeof e.byEmployeeId !== "string" || e.byEmployeeId === "") continue;
+    if (typeof e.atIso !== "string" || e.atIso === "") continue;
+
+    entries.push({
+      action: e.action,
+      saleRequestId: e.saleRequestId,
+      byEmployeeId: e.byEmployeeId,
+      byDisplayName: typeof e.byDisplayName === "string" ? e.byDisplayName : "",
+      byRole: typeof e.byRole === "string" ? e.byRole : "",
+      atIso: e.atIso,
+      claimedRegisterSessionId:
+        typeof e.claimedRegisterSessionId === "string" && e.claimedRegisterSessionId !== ""
+          ? e.claimedRegisterSessionId
+          : null,
+      recordedAsCashPayment: e.recordedAsCashPayment === true,
+      note: typeof e.note === "string" && e.note !== "" ? e.note : null,
+    });
+  }
+
+  return entries.slice(0, BLOCKED_SALE_REVIEW_TRAIL_LIMIT);
+}
+
+export type AppendBlockedSaleReviewResult =
+  | { ok: true; record: QueuedSale }
+  | { ok: false; reason: "history_full" };
+
+/**
+ * Appends a decision, without touching anything else on the record.
+ *
+ * NOT A STATE TRANSITION. Acknowledging a blocked sale does not resolve it:
+ * the record stays exactly where it was in the state machine, keeps its sale
+ * id, its amount, its claim and its error code, and stays on the screen until
+ * somebody discards or retries it. This only records that a person looked.
+ */
+export function appendBlockedSaleReview(
+  record: QueuedSale,
+  entry: BlockedSaleReviewEntry
+): AppendBlockedSaleReviewResult {
+  const existing = Array.isArray(record.blockedSaleReviews) ? record.blockedSaleReviews : [];
+
+  // FULL MEANS REFUSED. Losing a decision is worse than refusing to take a new
+  // one: the existing trail is the evidence, and it is left untouched.
+  if (existing.length >= BLOCKED_SALE_REVIEW_TRAIL_LIMIT) {
+    return { ok: false, reason: "history_full" };
+  }
+
+  return {
+    ok: true,
+    record: { ...record, blockedSaleReviews: [...existing, entry] },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // The state machine
@@ -639,6 +769,9 @@ export function readQueuedSale(value: unknown): QueueReadResult {
       // readable, because the money it represents has already changed hands.
       employeePosSessionId: nonEmptyString(raw.employeePosSessionId),
       registerSessionId: nonEmptyString(raw.registerSessionId),
+      // v1.3 CP-2B item C — absent on every record written before this, which
+      // reads back as "nobody has reviewed it". See the field's own note.
+      blockedSaleReviews: readBlockedSaleReviews(raw.blockedSaleReviews),
     },
   };
 }

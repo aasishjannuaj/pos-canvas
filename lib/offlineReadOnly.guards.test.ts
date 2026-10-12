@@ -150,21 +150,97 @@ describe("checkout is impossible while running from cache", () => {
   });
 
   it("the sale request id is still only passed through, never stored here", () => {
-    // `saleRequestId` legitimately appears in the EXISTING online checkout,
-    // which hands the runtime's id to complete_sale_v3. 24.5E did not add a
-    // second one: the offline id is minted and persisted inside
-    // lib/offlineCheckout.ts and lib/saleQueueSession.ts, not here.
+    // v1.3 CP-2B FINAL — THE RULE, ASSERTED DIRECTLY INSTEAD OF COUNTED.
+    //
+    // This test used to read `expect(occurrences).toHaveLength(4)`, a raw count
+    // of the string `saleRequestId` standing in for "nothing is minted,
+    // persisted or substituted in this host". The count was never the rule, and
+    // it was strictly weaker than it looked:
+    //
+    //   - it moved whenever legitimate code was added (4 -> 9 -> 11) while the
+    //     rule itself never changed, so it had to be edited to stay true;
+    //   - deleting one legitimate reference would MASK an added illegitimate
+    //     one, because only the total was ever checked.
+    //
+    // Raising the number would re-arm exactly the same trap, so the four things
+    // the count was proxying for are now named, and the two final host gates
+    // are checked positionally rather than by textual presence.
+    //
+    // The pass-through assertions and the persistence-boundary test above are
+    // preserved verbatim.
     const app = code(read(DEVICE_APP));
-    const occurrences = app.match(/saleRequestId/g) ?? [];
 
-    // SUPERSEDED BY Cash Drawer 1A: two more occurrences, both in ONE
-    // pass-through — queueOfflineSale RETURNS the id the durable record was
-    // saved under so PosRuntime's completion hook knows which sale it was.
-    // Still minted and persisted elsewhere; still never stored here.
-    expect(occurrences).toHaveLength(4);
+    // 1. NOTHING IS MINTED HERE. The online id is allocated by
+    //    lib/saleRequest.ts and the offline one inside lib/offlineCheckout.ts.
+    for (const minter of ["createSaleRequestId", "randomUUID", "crypto.", "uuid("]) {
+      expect(app, `DeviceApp must not mint a sale identity with ${minter}`).not.toContain(minter);
+    }
+
+    // 2. NOTHING IS PERSISTED HERE. The sibling test above bans the storage
+    //    primitives; this pins the cache writer specifically.
+    expect(app, "DeviceApp must not write the offline cache itself").not.toContain("writeCacheKey");
+
+    // 3. EVERY READ COMES FROM AN APPROVED SOURCE. An unrecognised one is a new
+    //    identity route and fails however many references exist in total.
+    //
+    //      input          the runtime's online submission payload
+    //      drafted.draft  the offline draft minted by lib/offlineCheckout.ts
+    //      sale           the identity handed to the durable arm
+    //      verified.sale  what readRecoveryAuthority proved outstanding
+    //      authority.sale the same, on the remount hydration path
+    //      identity       decideUncertainSale's own recovery verdict
+    const sources = [
+      ...app.matchAll(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.saleRequestId/g),
+    ].map((match) => match[1]);
+
+    expect(sources.length).toBeGreaterThan(0);
+
+    const approved = ["input", "drafted.draft", "sale", "verified.sale", "authority.sale", "identity"];
+
+    for (const source of sources) {
+      expect(approved, `unapproved sale-identity source ${source}.saleRequestId`).toContain(source);
+    }
+
+    // 4. NO SUBSTITUTION. An id written into a payload must be the one that
+    //    arrived, never a different expression.
+    const assigned = [...app.matchAll(/saleRequestId:\s*([^,\n}]+)/g)].map((match) =>
+      match[1].trim()
+    );
+
+    for (const value of assigned) {
+      expect(
+        ["input.saleRequestId", "drafted.draft.saleRequestId"],
+        `DeviceApp assigns saleRequestId from ${value}`
+      ).toContain(value);
+    }
+
+    expect(assigned).toContain("input.saleRequestId");
+    expect(assigned).toContain("drafted.draft.saleRequestId");
     expect(app).toContain("saleRequestId: input.saleRequestId");
     expect(app).toContain("saleRequestId: drafted.draft.saleRequestId }");
-    expect(app).not.toContain("writeCacheKey");
+
+    // 5. NEITHER FINAL HOST GATE MAY BE REMOVED OR BYPASSED. Presence alone
+    //    would prove nothing — a gate that sits after the dispatch, or behind
+    //    an await, or that falls through on a refusal, is not a gate. So each
+    //    one is checked for position, atomicity and a refusal that returns.
+    for (const [gate, dispatch] of [
+      ["const dispatch = verifySubmittedSale({", "await completeDeviceSaleV5({"],
+      ["const offlineDispatch = verifySubmittedSale({", "await completeOfflineSale({"],
+    ] as const) {
+      const at = app.indexOf(gate);
+      const sent = app.indexOf(dispatch);
+
+      expect(at, `the final host gate ${gate} is missing`).toBeGreaterThan(-1);
+      expect(sent, `${dispatch} is missing or precedes its gate`).toBeGreaterThan(at);
+
+      const between = app.slice(at, sent);
+
+      expect(between, `an await separates ${gate} from ${dispatch}`).not.toContain("await ");
+      expect(between, `${gate} does not refuse on a blocked verdict`).toContain(
+        'decision === "blocked"'
+      );
+      expect(between, `${gate} does not return on a refusal`).toContain("return");
+    }
   });
 });
 

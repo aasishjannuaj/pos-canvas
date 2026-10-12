@@ -34,6 +34,20 @@ export type OfflineSaleStatus = {
    */
   nextRetryAt: string | null;
   /**
+   * v1.3 CP-2R — was the device's financial storage actually READ?
+   *
+   * REQUIRED, AND DELIBERATELY NOT OPTIONAL WITH A DEFAULT. A default of `true`
+   * would mean every caller that forgot it asserted its records were readable,
+   * which is the fail-open this field exists to remove; a default of `false`
+   * would be a silent block. A caller must say which it means.
+   *
+   * `false` is NOT "the queue is empty". It is "this device has not established
+   * what it is holding" — a store that would not open, or a listing that
+   * failed. Every count beside it is then unknown rather than zero, and the
+   * safety gates refuse on that basis alone.
+   */
+  evidenceReadable: boolean;
+  /**
    * Feature 24.5F — an ONLINE request was dispatched and never answered, and
    * its idempotency key is still on disk unresolved.
    *
@@ -59,7 +73,10 @@ export function toOfflineSaleStatus(
   summary: QueueSummary,
   quarantined: number = 0,
   nextRetryAt: string | null = null,
-  uncertainOnlineSale: boolean = false
+  uncertainOnlineSale: boolean = false,
+  /** v1.3 CP-2R — see the field. Defaulted true ONLY here, where the caller has
+   *  a successfully parsed QueueSummary in hand and has therefore read it. */
+  evidenceReadable: boolean = true
 ): OfflineSaleStatus {
   const waiting = summary.pending + summary.syncing;
   const needsAttention = summary.needsAttention + summary.permanentFailure + quarantined;
@@ -72,6 +89,7 @@ export function toOfflineSaleStatus(
     total: summary.total + quarantined,
     nextRetryAt,
     uncertainOnlineSale,
+    evidenceReadable,
   };
 }
 
@@ -132,6 +150,17 @@ function pluralSales(count: number): string {
 export function describeOfflineSaleStatus(status: OfflineSaleStatus): string[] {
   const lines: string[] = [];
 
+  // v1.3 CP-2D — SILENCE HERE READS AS "EVERYTHING IS SYNCED".
+  //
+  // An empty list is what a till shows when nothing is outstanding. When the
+  // store could not be read every count is 0, so the cashier saw exactly the
+  // same screen as a device with nothing left to send — the most reassuring
+  // possible rendering of the least certain state. This says what is actually
+  // true instead, and returns early because no count below it means anything.
+  if (status.evidenceReadable !== true) {
+    return ["Cannot check saved sales on this device"];
+  }
+
   if (status.waiting > 0) {
     lines.push(`${pluralSales(status.waiting)} waiting to sync`);
   }
@@ -175,6 +204,26 @@ export type DeviceResetSafety =
  * function only ever refuses.
  */
 export function decideDeviceResetSafety(status: OfflineSaleStatus): DeviceResetSafety {
+  // v1.3 CP-2R — UNREADABLE IS NOT EMPTY, AND IT IS CHECKED FIRST.
+  //
+  // readOfflineSaleStatus used to answer a failed queue read with zeros, and a
+  // failed uncertain-sale read with `false`. Both arrived here as "nothing
+  // outstanding", so a device that could not open its own financial storage was
+  // cleared to reset, unpair or apply a new configuration — destroying records
+  // it had never managed to look at. Independent review found that.
+  //
+  // The counts below are only meaningful if the store was read. When it was
+  // not, there is nothing to count and no safe conclusion to draw, so this
+  // refuses before reading any of them.
+  if (status.evidenceReadable !== true) {
+    return {
+      allowed: false,
+      unsynced: status.unsynced,
+      message:
+        "This device could not check the sales saved on it, so it cannot be reset yet. Close and reopen the app, and try again once it can read its own records.",
+    };
+  }
+
   // Feature 24.5F — an unresolved online request blocks a reset on its own.
   //
   // It is not a queued sale and there is no count to quote, but it is the same

@@ -483,6 +483,8 @@ describe("a queued sale survives a restart", () => {
       total: 1,
       nextRetryAt: null,
       uncertainOnlineSale: false,
+      // v1.3 CP-2R — these fixtures describe storage that WAS read.
+      evidenceReadable: true,
     });
     expect(decideDeviceResetSafety(status).allowed).toBe(false);
   });

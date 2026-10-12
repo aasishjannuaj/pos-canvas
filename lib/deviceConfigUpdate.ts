@@ -168,6 +168,22 @@ export type ApplyUpdateSafetyInput = {
  * number in a sentence, never whether the till is allowed to repin.
  */
 export function describeApplyBlockedBySales(status: OfflineSaleStatus): string {
+  // v1.3 CP-2D — UNREADABLE STORAGE HAS NO COUNT TO QUOTE.
+  //
+  // decideDeviceResetSafety already refuses in this case, and this function
+  // only phrases that refusal — but it phrased it from `status.unsynced`, which
+  // is 0 when nothing could be read. The operator was told the device "still
+  // has 0 sales that have not reached POS Canvas yet", which is both nonsense
+  // and reassuring in exactly the wrong direction. Checked FIRST, because every
+  // count below it is meaningless when this is true.
+  if (status.evidenceReadable !== true) {
+    return (
+      "This device cannot check the sales saved on it, so it cannot apply this " +
+      "update yet. Close and reopen the app, and try again once it can read its " +
+      "own records."
+    );
+  }
+
   if (status.uncertainOnlineSale) {
     return (
       "A sale on this device may already have gone through, and this device still " +

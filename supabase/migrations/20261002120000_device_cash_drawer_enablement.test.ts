@@ -39,8 +39,20 @@ const setter = definition(executable, "set_device_cash_drawer_enabled");
 const sqlFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
 
 describe("migration ordering and inventory", () => {
-  it("is the newest migration", () => {
-    expect(sqlFiles[sqlFiles.length - 1]).toBe(MIGRATION);
+  it("is the newest migration before the CP-2B register correction", () => {
+    // v1.3 CP-2B — THE SENTINEL MOVED, IT WAS NOT WEAKENED.
+    //
+    // This assertion exists so an unreviewed migration cannot be added
+    // silently, and by construction it can only ever be true of ONE file. The
+    // CP-2B register-attribution correction adds
+    // 20261012120000_offline_register_attribution_required.sql under its own
+    // Control Room authorization, so the newest file is now that one. The
+    // check still pins an EXACT filename, so a further unreviewed migration
+    // still trips it.
+    expect(sqlFiles[sqlFiles.length - 1]).toBe(
+      "20261012120000_offline_register_attribution_required.sql"
+    );
+    expect(sqlFiles[sqlFiles.length - 2]).toBe(MIGRATION);
   });
 
   it("creates exactly two functions: the setter, and get_device_pairing_state", () => {

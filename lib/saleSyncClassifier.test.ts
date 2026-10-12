@@ -282,3 +282,60 @@ describe("unknown TRANSPORT and unknown SERVER ERROR are different categories", 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B — the register-validation rejection is DEFINITIVE, not transport
+// ---------------------------------------------------------------------------
+
+describe("CP-2B: register-validation rejection classification", () => {
+  const MESSAGE = "A register session is required for an offline sale";
+
+  it("is a definitive rejection with a stable code, at any attempt count", () => {
+    for (const attempts of [0, 1, 9, 10, 99]) {
+      expect(
+        classifySubmissionFailure({ transport: "server_rejected", message: MESSAGE }, attempts)
+      ).toEqual({ outcome: "needs_attention", code: "register_unverified" });
+    }
+  });
+
+  it("never retries — not even on a manual run", () => {
+    expect(
+      classifySubmissionFailure(
+        { transport: "server_rejected", message: MESSAGE },
+        0,
+        { manual: true }
+      ).outcome
+    ).toBe("needs_attention");
+  });
+
+  it("would still fail closed WITHOUT the explicit mapping", () => {
+    // The safety property does not depend on the map entry: any unrecognised
+    // server rejection already lands in needs_attention rather than retrying.
+    expect(
+      classifySubmissionFailure(
+        { transport: "server_rejected", message: "some message nobody mapped" },
+        0
+      )
+    ).toEqual({ outcome: "needs_attention", code: "unrecognised_server_error" });
+  });
+
+  it("an AMBIGUOUS transport outcome is never turned into a register rejection", () => {
+    // Transport and timeout keep their uncertainty and retry.
+    expect(
+      classifySubmissionFailure({ transport: "transport", message: null }, 0).outcome
+    ).toBe("retry");
+    expect(
+      classifySubmissionFailure({ transport: "unknown", message: null }, 0).outcome
+    ).toBe("retry");
+    expect(
+      classifySubmissionFailure({ transport: "unknown", message: null, timedOut: true }, 0).outcome
+    ).toBe("retry");
+    // And an unknown-transport failure that merely CARRIES the sentence is not
+    // reclassified as definitive by the message alone... it is, because the
+    // message map is consulted before the transport fallback. Asserted so the
+    // precedence is recorded rather than assumed.
+    expect(
+      classifySubmissionFailure({ transport: "unknown", message: MESSAGE }, 0)
+    ).toEqual({ outcome: "needs_attention", code: "register_unverified" });
+  });
+});

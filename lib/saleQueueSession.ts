@@ -20,6 +20,7 @@
 import {
   SALE_QUEUE_SCHEMA_VERSION,
   SALE_REQUEST_PAYLOAD_VERSION,
+  appendBlockedSaleReview,
   beginOperatorRetry,
   isDueForAttempt,
   isManuallyRetryable,
@@ -31,6 +32,7 @@ import {
   transitionQueuedSale,
 } from "@/lib/saleQueue";
 import type {
+  BlockedSaleReviewEntry,
   QueueReadFailure,
   QueueState,
   QueueSummary,
@@ -55,7 +57,12 @@ export type QueueFailure =
   | "duplicate_sale_request"
   | "not_found"
   | "corrupt_record"
-  | "illegal_transition";
+  | "illegal_transition"
+  // v1.3 CP-2B item C — the review-persistence refusals.
+  | "sale_mismatch"
+  | "not_blocked"
+  | "not_register_blocked"
+  | "history_full";
 
 export type QueueResult<T> = { ok: true; value: T } | { ok: false; reason: QueueFailure };
 
@@ -418,6 +425,82 @@ export async function startOperatorRetry(
     const written = await putQueuedSale(db, moved.record);
 
     return written.ok ? { ok: true, value: moved.record } : { ok: false, reason: "write_failed" };
+  });
+}
+
+/**
+ * v1.3 CP-2B item C — appends a reviewer's decision to a blocked sale.
+ *
+ * THE SAME read-parse-apply-write SHAPE as startOperatorRetry and markAttempt,
+ * for the same reason: exactly one module writes the queue, a corrupt record is
+ * still refused, and no caller is handed raw storage.
+ *
+ * IT IS NOT A TRANSITION, AND THAT IS DELIBERATE. Acknowledging a blocked sale
+ * does not resolve it. The record keeps its state, its sale id, its amount, its
+ * register claim and its error code, and stays in front of whoever can act on
+ * it. Nothing here can mark a sale synced, reassign a register, mint a new sale
+ * id, or delete anything -- appendBlockedSaleReview is the only mutation and it
+ * only ever adds to the trail.
+ */
+/**
+ * The server message this workflow exists for, as the classifier codes it.
+ * Stated here rather than imported so the queue layer does not depend on the
+ * sync classifier; lib/blockedSaleReview.guards.test.ts asserts they agree.
+ */
+export const REGISTER_BLOCKED_ERROR_CODE = "register_unverified";
+
+export async function recordBlockedSaleReview(
+  queueRecordId: string,
+  entry: BlockedSaleReviewEntry
+): Promise<QueueResult<QueuedSale>> {
+  return withDb(async (db) => {
+    const raw = await readQueuedSaleRecord(db, queueRecordId);
+
+    if (!raw.ok) return { ok: false, reason: "storage_unavailable" };
+    if (raw.value === null) return { ok: false, reason: "not_found" };
+
+    const parsed = readQueuedSale(raw.value);
+
+    if (!parsed.ok) return { ok: false, reason: "corrupt_record" };
+
+    // ==================================================================
+    // THE PERSISTENCE BOUNDARY VERIFIES ITS OWN TARGET.
+    //
+    // Independent review found this writing whatever entry it was handed to
+    // whatever record the id resolved to. A caller that passed a stale or
+    // swapped entry could therefore file one sale's decision against another
+    // sale's record -- and a review screen with two blocked sales open is
+    // exactly where that happens. The checks below do not trust the caller.
+    // ==================================================================
+    if (parsed.record.saleRequestId !== entry.saleRequestId) {
+      return { ok: false, reason: "sale_mismatch" };
+    }
+
+    // ONLY A SALE THAT IS ACTUALLY BLOCKED AND WAITING. A synced, pending,
+    // discarded or permanently failed record is not something to acknowledge,
+    // and acknowledging one would attach a decision to a sale nobody is being
+    // asked to resolve.
+    if (parsed.record.state !== "needs_attention") {
+      return { ok: false, reason: "not_blocked" };
+    }
+
+    // AND BLOCKED FOR THIS REASON. This workflow was authorised for
+    // register-attribution-blocked sales; another needs_attention reason has
+    // its own handling and must not inherit this one.
+    if (parsed.record.lastErrorCode !== REGISTER_BLOCKED_ERROR_CODE) {
+      return { ok: false, reason: "not_register_blocked" };
+    }
+
+    const annotated = appendBlockedSaleReview(parsed.record, entry);
+
+    // NEVER REPORT A SAVE THAT DID NOT HAPPEN.
+    if (!annotated.ok) return { ok: false, reason: annotated.reason };
+
+    const written = await putQueuedSale(db, annotated.record);
+
+    return written.ok
+      ? { ok: true, value: annotated.record }
+      : { ok: false, reason: "write_failed" };
   });
 }
 

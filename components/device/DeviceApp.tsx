@@ -114,6 +114,42 @@ import {
 } from "@/lib/deviceConfigUpdate";
 import type { CheckForUpdatesOutcome } from "@/lib/deviceConfigUpdate";
 import RejectedSaleReview from "@/components/device/RejectedSaleReview";
+import {
+  buildBlockedSaleAcknowledgement,
+  decideBlockedSaleReviewer,
+  summarizeBlockedSale,
+} from "@/lib/blockedSaleReview";
+import type { BlockedSaleReviewerDecision } from "@/lib/blockedSaleReview";
+import {
+  IDLE_REVIEWER_GATE,
+  closeReviewerGate,
+  openReviewerGate,
+  reviewerGateAllows,
+  settleReviewerGate,
+} from "@/lib/blockedSaleReviewGate";
+import type { ReviewerGate } from "@/lib/blockedSaleReviewGate";
+import { recordBlockedSaleReview } from "@/lib/saleQueueSession";
+
+/**
+ * v1.3 CP-2B item C — what a refused save says to the reviewer.
+ *
+ * EVERY REASON IS NAMED. A save that did not happen must never read as one, and
+ * `history_full` in particular has to be visible: the decision was NOT recorded.
+ */
+const BLOCKED_SALE_PERSISTENCE_REFUSALS: Readonly<Record<string, string>> = Object.freeze({
+  sale_mismatch:
+    "That decision did not match this sale, so nothing was recorded. Reopen this screen and try again.",
+  not_blocked:
+    "This sale is no longer waiting to be resolved, so no decision was recorded.",
+  not_register_blocked:
+    "This sale was not held back for a register problem, so no decision was recorded here.",
+  history_full:
+    "This sale already holds the maximum number of recorded decisions. Nothing was saved — escalate it instead of recording another.",
+  not_found: "This sale is no longer on this device, so nothing was recorded.",
+  corrupt_record: "This sale could not be read, so nothing was recorded.",
+  storage_unavailable: "This device could not save that decision. Try again.",
+  write_failed: "This device could not save that decision. Try again.",
+});
 import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import OperatorMenu from "@/components/device/OperatorMenu";
 import SalesHistoryScreen from "@/components/runtime/SalesHistoryScreen";
@@ -145,11 +181,20 @@ import { resolveCashDrawerCapability } from "@/lib/windowsCashDrawer";
 import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
-  readUncertainSale,
   reconcileUncertainSaleWithQueue,
   resolveUncertainSale,
 } from "@/lib/uncertainSaleSession";
+import { decideUncertainSale } from "@/lib/saleSubmission";
 import type { UncertainSale } from "@/lib/saleSubmission";
+import { createSaleFingerprint } from "@/lib/saleRequest";
+import { canonicalLineIdentity } from "@/lib/modifiers";
+import { PENDING_RECOVERY_AUTHORITY, readRecoveryAuthority } from "@/lib/recoveryAuthority";
+import type { RecoveryAuthority } from "@/lib/recoveryAuthority";
+import type {
+  HostAuthoritySnapshot,
+  HostCheckoutPreparation,
+  HostSaleAuthorization,
+} from "@/components/runtime/PosRuntime";
 import {
   employeeLoginByCode,
   endEmployeePosSession,
@@ -212,6 +257,14 @@ const RESET_NOTE =
   "the owner's account — an owner revokes a device from the POS Canvas builder.";
 
 const EMPTY_SALE_STATUS: OfflineSaleStatus = {
+  // v1.3 CP-2R — FALSE, BECAUSE NOTHING HAS BEEN READ YET.
+  //
+  // This is the value in hand before the first durable read returns. `true`
+  // here would mean a till that has just launched asserts its records are
+  // readable and empty, which is the fail-open this correction removes — at the
+  // one moment the device genuinely knows nothing. A real status replaces it as
+  // soon as readOfflineSaleStatus answers.
+  evidenceReadable: false,
   waiting: 0,
   needsAttention: 0,
   synced: 0,
@@ -350,6 +403,27 @@ export default function DeviceApp() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyOrder, setHistoryOrder] = useState<DeviceHistoryOrder | null>(null);
   const [reviewing, setReviewing] = useState(false);
+
+  /**
+   * v1.3 CP-2B item C — who is signed in, for the blocked-sale review gate.
+   *
+   * READ FROM THE EXISTING SESSION, NEVER ASSUMED. It is refreshed every time
+   * the review screen is opened, so a shift that ended while the screen sat
+   * idle cannot leave a stale manager in place. Null means "nobody proven",
+   * which the gate treats as refused — the fail-closed direction.
+   */
+  const [reviewerGate, setReviewerGate] = useState<ReviewerGate>(IDLE_REVIEWER_GATE);
+
+  /**
+   * v1.3 CP-2B item C — which identity question is currently outstanding.
+   *
+   * A REF, BECAUSE THE ANSWER ARRIVES LATER. The number is minted before the
+   * read starts and checked when it returns, so a slow read that lands after
+   * the screen closed, or after it was reopened under a different employee,
+   * settles nothing. State could not serve: the closure would capture a stale
+   * value exactly when it matters.
+   */
+  const reviewerRequestRef = useRef(0);
   const [reviews, setReviews] = useState<RejectedSale[]>([]);
 
   // Guards against a second resolve running while the first is in flight (e.g.
@@ -499,6 +573,172 @@ export default function DeviceApp() {
     gateRef.current = gate;
   }, [gate]);
 
+  /**
+   * v1.3 CP-2B — how many times the device's pairing/configuration snapshot has
+   * been replaced.
+   *
+   * PREVENTS: a checkout prepared against one configuration being completed
+   * against another — INCLUDING when buildJobId is unchanged. The build id is
+   * moved only by an explicit Apply, but the device state is re-resolved on
+   * startup, on reconnect and on an offline-to-online transition, and each
+   * re-resolution produces a fresh pairing and configuration object from the
+   * same authoritative response.
+   *
+   * WHY EXISTING STATE CANNOT: `state` is React state, and two of its
+   * transitions are updater-form setState calls whose result React computes
+   * later — so no synchronous mirror of `state` is constructible at the call
+   * sites. `readyPairingRef` already IS written synchronously, immediately
+   * before each of those transitions, and carries the snapshot that travels
+   * with the configuration. Counting its replacements is therefore the one
+   * synchronous configuration-freshness signal this architecture can offer.
+   *
+   * FAIL-CLOSED BY CONSTRUCTION: a re-resolution that happened to produce an
+   * identical configuration still bumps the generation and still refuses the
+   * in-flight checkout. Refusing a sale that was probably fine is the safe
+   * direction; the cashier reopens the checkout and the authority is recaptured.
+   */
+  const authorityEpochRef = useRef(0);
+
+
+  /**
+   * v1.3 CP-2B — what the durable recovery store last told us, synchronously.
+   *
+   * STARTS pending, DELIBERATELY. Before the hydration read completes this
+   * device does not know whether an earlier sale is outstanding, and "do not
+   * know" must block a new sale rather than permit one.
+   */
+  const recoveryRef = useRef<RecoveryAuthority>(PENDING_RECOVERY_AUTHORITY);
+  const recoveryGenerationRef = useRef(0);
+
+  /**
+   * v1.3 CP-2B — the sale fence: which identity this till is currently
+   * protecting, and under which authority it was prepared.
+   *
+   * PREVENTS: a request that was armed under one operator being dispatched
+   * under another; an unresolved identity being replaced by a fresh one; and a
+   * cleanup that merely STARTED being mistaken for one that finished.
+   *
+   * WHY EXISTING STATE CANNOT: `uncertainSale` is React state and arrives a
+   * render late, and `recoveryRef` says what the STORE held — not which attempt
+   * this till has in flight, nor what it was authorized against.
+   */
+  const saleFenceRef = useRef<
+    | { status: "idle" }
+    | {
+        status: "arming" | "armed" | "unresolved";
+        requestId: string;
+        fingerprint: string;
+        // WHICH CHECKOUT ARMED THIS, and 0 for a fence rebuilt from disk after
+        // a restart, which belongs to no checkout in this process. Replaces the
+        // former `preparedToken`, which was stored and never once compared.
+        checkoutGeneration: number;
+      }
+  >({ status: "idle" });
+
+  /**
+   * v1.3 CP-2B FINAL — the authorization held by the checkout that is open NOW.
+   *
+   * REPLACES preparedTokenRef, WHICH WAS WRITTEN ONCE AND NEVER RESET. That ref
+   * was captured on the first authority read of the process and then frozen, so
+   * after any legitimate change of employee, register or configuration the
+   * prepared token could never again equal the live one and EVERY subsequent
+   * sale on that till was refused for the life of the process. A till that
+   * cannot sell after a shift change is not a safe till; it is a broken one.
+   *
+   * Two fields, because a token alone cannot carry the proof:
+   *
+   *   generation — minted ONLY by prepareCheckoutAuthorization, and strictly
+   *     increasing. The runtime is handed its value at preparation and must
+   *     present it again at dispatch, so the host compares the generation the
+   *     RUNTIME believes it prepared under against the one the HOST issued.
+   *     Two different sources; never a value compared with itself.
+   *
+   *   token — the authority snapshot that generation was issued against,
+   *     compared at dispatch with the authority live at that instant.
+   *
+   * Null means no checkout is authorized: before the first preparation, and
+   * after any completion, cancellation, close or authority change.
+   */
+  const checkoutAuthRef = useRef<{
+    generation: number;
+    token: string;
+    // v1.3 CP-2B RECOVERY — WHAT THIS CHECKOUT IS ALLOWED TO BE.
+    //
+    // Recorded at preparation, binding at dispatch. The two kinds are not
+    // degrees of the same permission; they are different permissions:
+    //
+    //   new_sale       — granted only over a verified-clear store and an idle
+    //                    fence. May dispatch whatever the cashier rings up.
+    //   exact_recovery — granted when a durable identity is already
+    //                    outstanding. May dispatch THAT identity and nothing
+    //                    else, ever, however the cart is edited afterwards.
+    //
+    // WHY A RECORDED SCOPE AND NOT JUST THE FENCE. The fence is read at
+    // dispatch; the scope is a statement about what was true when the cashier
+    // was granted this checkout. If the outstanding identity changed in
+    // between, the two disagree and the dispatch is refused — which is the
+    // case a dispatch-time-only check cannot see.
+    scope:
+      | { kind: "new_sale" }
+      | { kind: "exact_recovery"; requestId: string; fingerprint: string };
+  } | null>(null);
+
+  /** Monotonic source of checkout generations. Never reset, never reused. */
+  const checkoutGenerationRef = useRef(0);
+
+  /**
+   * v1.3 CP-2B FINAL — the identity the host most recently AUTHORIZED.
+   *
+   * WHY IT EXISTS: the host's own final gates sit at the invocation boundary,
+   * where the only things in hand are the submitted payload and this host's
+   * refs. Without a record of what was authorized, the only thing a gate could
+   * compare the payload against is the fence — and the fence is where the
+   * previous implementation took BOTH sides of the comparison from, which is
+   * why it always agreed with itself and verified nothing.
+   *
+   * Written by decideSaleDispatch when it answers anything other than blocked,
+   * from the attempt the RUNTIME supplied. Read by the final gates, against a
+   * fingerprint reconstructed from the ACTUAL submitted payload. Two
+   * independent origins, which is the whole point.
+   *
+   * `requestId: null` means the identity is minted by this host further down
+   * the offline path and is not knowable to the runtime. It is an explicit,
+   * typed absence — not an empty string standing in for one.
+   */
+  const authorizedAttemptRef = useRef<
+    { generation: number; requestId: string | null; fingerprint: string } | null
+  >(null);
+
+  /**
+   * v1.3 CP-2B FINAL — ADVANCED AT THE CHANGE, NOT AT THE NEXT READ.
+   *
+   * The epoch was previously derived inside readHostAuthority by comparing the
+   * pairing object against the one last seen. That made the read a WRITE, and
+   * it could only ever notice a change that was still visible at read time. An
+   * employee who signs out and back in, or a register that closes and reopens,
+   * returns every visible identity to its former value — so a comparison can
+   * see nothing, while a monotonic counter advanced at each transition can
+   * never return to a value it has already issued.
+   *
+   * Called synchronously beside every write to `gateRef` and `readyPairingRef`,
+   * which are the only authority sources this host has. Never from a passive
+   * effect: an effect runs after the commit, and a sale can be dispatched in
+   * between.
+   *
+   * It also DROPS the current checkout's authorization outright. That is the
+   * second, independent barrier: even if a token were somehow to repeat, the
+   * prepared record it would have to match is already gone.
+   *
+   * WHAT IT DELIBERATELY DOES NOT TOUCH: the durable recovery fence. An
+   * authority change abandons a local intention; it cannot un-send a request
+   * that already left the device.
+   */
+  function advanceAuthorityEpoch() {
+    authorityEpochRef.current += 1;
+    checkoutAuthRef.current = null;
+    authorizedAttemptRef.current = null;
+  }
+
 
 
   /**
@@ -595,6 +835,12 @@ export default function DeviceApp() {
           daily: { ok: false, reason: "unavailable" },
         });
 
+        // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+        // The effect that mirrors `gate` runs only after React commits, so
+        // between this call and that commit the ref still held the PREVIOUS
+        // gate — and checkout reads the ref, not the state.
+        gateRef.current = next;
+        advanceAuthorityEpoch();
         setGate(next);
         return next;
       }
@@ -610,6 +856,12 @@ export default function DeviceApp() {
           ? applyDailyRefresh(gateRef.current, { ok: false, reason: "unavailable" })
           : applyReconnectDerivation(gateRef.current, { employee, daily });
 
+      // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+      // The effect that mirrors `gate` runs only after React commits, so
+      // between this call and that commit the ref still held the PREVIOUS
+      // gate — and checkout reads the ref, not the state.
+      gateRef.current = next;
+      advanceAuthorityEpoch();
       setGate(next);
       return next;
     },
@@ -697,7 +949,15 @@ export default function DeviceApp() {
           dailyUnchangedRef.current = 0;
         }
 
-        setGate(applyDailyRefresh(gateRef.current, acquisition));
+        // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+        // The effect that mirrors `gate` runs only after React commits, so
+        // between this call and that commit the ref still held the PREVIOUS
+        // gate — and checkout reads the ref, not the state.
+        const refreshed = applyDailyRefresh(gateRef.current, acquisition);
+
+        gateRef.current = refreshed;
+        advanceAuthorityEpoch();
+        setGate(refreshed);
       })();
     }, delay);
 
@@ -752,6 +1012,12 @@ export default function DeviceApp() {
     }
 
     const clear = setTimeout(() => {
+      // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+      // The effect that mirrors `gate` runs only after React commits, so
+      // between this call and that commit the ref still held the PREVIOUS
+      // gate — and checkout reads the ref, not the state.
+      gateRef.current = EMPTY_POS_GATE_STATE;
+      advanceAuthorityEpoch();
       setGate(EMPTY_POS_GATE_STATE);
       setSelectedEmployee(null);
       setRoster(resetRoster());
@@ -813,6 +1079,12 @@ export default function DeviceApp() {
         revalidated,
       });
 
+      // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+      // The effect that mirrors `gate` runs only after React commits, so
+      // between this call and that commit the ref still held the PREVIOUS
+      // gate — and checkout reads the ref, not the state.
+      gateRef.current = next;
+      advanceAuthorityEpoch();
       setGate(next);
       setGateBusy(false);
       setSelectedEmployee(null);
@@ -848,6 +1120,106 @@ export default function DeviceApp() {
    * Every identity comparison belongs to lib/posGate.ts. This function performs
    * reads and renders the outcome; it decides nothing.
    */
+  // v1.3 CP-2B item C — THESE TWO LIVE ABOVE recoverDailyContext DELIBERATELY.
+  // lib/posGate.guards.test.ts asserts that the recovery helper sandwiches its
+  // ensure call between exactly TWO `await readEmployeeSession()` reads, and it
+  // slices from `const recoverDailyContext` to a marker that no longer exists,
+  // so its slice runs to the end of the file. A third session read placed below
+  // would therefore break that guard without any recovery behaviour changing.
+  // Declaring these here keeps the guard's region exactly as it was. They are
+  // function declarations, so hoisting makes the position otherwise immaterial.
+  /**
+   * v1.3 CP-2B item C — re-establishes who is signed in, from the existing
+   * employee session, and returns the gate's answer.
+   *
+   * CALLED AT EVERY ACTION, not once when the screen opened. Identity is read
+   * again at the moment it is used, so a session that ended or was revoked in
+   * between refuses rather than riding on what the screen was rendering.
+   */
+  async function readReviewerDecision(): Promise<BlockedSaleReviewerDecision> {
+    const read = await readEmployeeSession();
+
+    // FAIL CLOSED. An unreadable session is null, which the gate refuses.
+    return decideBlockedSaleReviewer(read.ok ? read.session : null);
+  }
+
+  /**
+   * v1.3 CP-2B item C — THE FIX FOR THE INITIALISATION DEADLOCK.
+   *
+   * The reviewer used to be refreshed only inside the two actions, and the
+   * screen hides those actions while the reviewer is unknown — so an owner who
+   * opened the screen could never reach the thing that would recognise them.
+   * Opening now asks the question itself, from the EXISTING employee session.
+   *
+   * THE SCREEN IS NOT DENIED WHILE IT LOOKS, IT IS "CHECKING": a person is not
+   * told they lack permission before anything has been read. Neither is it
+   * permitted — reviewerGateAllows is false for every state but a resolved,
+   * permitted one.
+   *
+   * BOTH RENDER PATHS GO THROUGH HERE, ready and revoked, because a revoked
+   * till is exactly where unresolved sales pile up.
+   */
+  async function openBlockedSaleReview(): Promise<void> {
+    const request = reviewerRequestRef.current + 1;
+
+    reviewerRequestRef.current = request;
+    setReviewerGate({ status: "checking", request });
+    setReviewing(true);
+
+    const decision = await readReviewerDecision();
+
+    // Settles only if this is still the question being asked.
+    setReviewerGate((previous) => settleReviewerGate(previous, request, decision));
+  }
+
+  /** Shuts the screen and DROPS the permission, so the next person starts cold. */
+  function closeBlockedSaleReview(): void {
+    reviewerRequestRef.current += 1;
+    setReviewerGate((previous) => closeReviewerGate(previous));
+    setReviewing(false);
+  }
+
+  /**
+   * v1.3 CP-2B item C — records an owner/manager decision about a blocked sale.
+   *
+   * IT RESOLVES NOTHING. recordBlockedSaleReview re-reads the record, checks the
+   * entry is for THAT sale, that it is still needs_attention, and that it is
+   * blocked for the register reason — then appends. The sale stays exactly
+   * where it was, so the screen still shows it afterwards.
+   */
+  async function handleReviewDecision(
+    queueRecordId: string,
+    action: "acknowledged" | "escalated"
+  ): Promise<string | null> {
+    const decision = await readReviewerDecision();
+
+    if (!decision.allowed) return decision.message;
+
+    const review = reviews.find((candidate) => candidate.record.queueRecordId === queueRecordId);
+    const summary = summarizeBlockedSale({
+      record: review?.record ?? null,
+      receipt: review?.receipt ?? null,
+      rejectionReason: review?.reason ?? "",
+    });
+
+    const built = buildBlockedSaleAcknowledgement({
+      action,
+      summary,
+      reviewer: decision,
+      atIso: new Date().toISOString(),
+    });
+
+    if (!built.ok) return built.message;
+
+    const saved = await recordBlockedSaleReview(queueRecordId, built.acknowledgement);
+
+    setReviews(await listRejectedSaleReviews());
+
+    if (saved.ok) return null;
+
+    return BLOCKED_SALE_PERSISTENCE_REFUSALS[saved.reason] ?? BLOCKED_SALE_PERSISTENCE_REFUSALS.write_failed;
+  }
+
   const recoverDailyContext = useCallback(async () => {
     setGateBusy(true);
     setGateError(null);
@@ -858,6 +1230,12 @@ export default function DeviceApp() {
     if (!precheck.ok) {
       // FAIL CLOSED BEFORE THE ENSURE RUNS. Nothing is attempted, so there is
       // no server-side context created under an operator nobody was recovering.
+      // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+      // The effect that mirrors `gate` runs only after React commits, so
+      // between this call and that commit the ref still held the PREVIOUS
+      // gate — and checkout reads the ref, not the state.
+      gateRef.current = precheck.state;
+      advanceAuthorityEpoch();
       setGate(precheck.state);
       setGateBusy(false);
 
@@ -880,6 +1258,12 @@ export default function DeviceApp() {
       employeeAfter,
     });
 
+    // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+    // The effect that mirrors `gate` runs only after React commits, so
+    // between this call and that commit the ref still held the PREVIOUS
+    // gate — and checkout reads the ref, not the state.
+    gateRef.current = next;
+    advanceAuthorityEpoch();
     setGate(next);
     setGateBusy(false);
 
@@ -952,6 +1336,7 @@ export default function DeviceApp() {
 
       // The ref first: it is what checkout consults.
       gateRef.current = lockedOut;
+      advanceAuthorityEpoch();
       setGate(lockedOut);
       setSelectedEmployee(null);
       // Ring Out needs no explanation -- the operator pressed it. A till that
@@ -1301,6 +1686,7 @@ export default function DeviceApp() {
       }
 
       readyPairingRef.current = fallback.pairing;
+      advanceAuthorityEpoch();
 
       setState({
         status: "ready",
@@ -1446,6 +1832,7 @@ export default function DeviceApp() {
 
 
         readyPairingRef.current = null;
+        advanceAuthorityEpoch();
         setState(next);
         return;
       }
@@ -1464,6 +1851,7 @@ export default function DeviceApp() {
       const resolved = decideConfigState(configResult, next.pairing);
 
       readyPairingRef.current = resolved.status === "ready" ? resolved.pairing : null;
+      advanceAuthorityEpoch();
 
       setState(resolved);
 
@@ -1690,6 +2078,7 @@ export default function DeviceApp() {
 
       if (next.status === "revoked") {
         readyPairingRef.current = null;
+        advanceAuthorityEpoch();
         void clearOfflineCache();
         setState(next);
         return;
@@ -1713,6 +2102,7 @@ export default function DeviceApp() {
       if (resolved.status !== "ready") {
         if (resolved.status === "revoked") {
           readyPairingRef.current = null;
+          advanceAuthorityEpoch();
           void clearOfflineCache();
         }
 
@@ -1732,6 +2122,7 @@ export default function DeviceApp() {
 
       setOfflinePrepared(persisted.stored);
       readyPairingRef.current = resolved.pairing;
+      advanceAuthorityEpoch();
 
       setState((previous) => {
         // Only a live POS may switch modes, and only one that is actually
@@ -1998,9 +2389,24 @@ export default function DeviceApp() {
       const sessionUserId = sessionUserIdRef.current;
 
       if (state.status !== "ready" || sessionUserId === null) {
-        if (!cancelled) setUncertainSale(null);
+        if (!cancelled) {
+          setUncertainSale(null);
+          // No pairing, so no identity to read a record under. `pending`, not
+          // `verified_clear`: nothing has been proven absent.
+          recoveryRef.current = PENDING_RECOVERY_AUTHORITY;
+        }
         return;
       }
+
+      // v1.3 CP-2B — EVERY re-read starts from pending, and claims a generation.
+      //
+      // Re-pairing, an applied config or a reconnect re-runs this effect, and
+      // until the new read lands the previous answer describes a DIFFERENT
+      // identity. Leaving it in place would let a sale authorize against a
+      // record that was proven absent for somebody else.
+      recoveryRef.current = PENDING_RECOVERY_AUTHORITY;
+      recoveryGenerationRef.current += 1;
+      const readGeneration = recoveryGenerationRef.current;
 
       // Feature 24.5F — release a marker the queue already owns, BEFORE reading.
       //
@@ -2010,15 +2416,51 @@ export default function DeviceApp() {
       // saleRequestId, never on "the queue is non-empty".
       await reconcileUncertainSaleWithQueue();
 
-      const outstanding = await readUncertainSale({
+      // v1.3 CP-2B — the four-state read, from lib/recoveryAuthority.ts. It
+      // reads the SAME record under the SAME identity with the SAME parser; it
+      // simply declines to report a failed read as an empty store. This host
+      // imports no persistence primitive of its own.
+      const authority = await readRecoveryAuthority({
         deviceAuthUserId: sessionUserId,
         deviceId: state.pairing.deviceId,
         projectId: state.pairing.projectId,
         buildJobId: state.pairing.buildJobId,
       });
 
-      if (!cancelled) {
-        setUncertainSale(outstanding.status === "outstanding" ? outstanding.sale : null);
+      // A LATE RESULT FROM AN OBSOLETE GENERATION MAY NOT UNLOCK ANYTHING.
+      // `cancelled` covers unmount; this covers a slower earlier read landing
+      // after a newer one has already answered for a different identity.
+      if (!cancelled && readGeneration === recoveryGenerationRef.current) {
+        recoveryRef.current = authority;
+
+        // v1.3 CP-2B FINAL — THE FENCE IS REBUILT FROM THE RECORD, under the
+        // ORIGINAL request id and fingerprint, exactly as they were written at
+        // dispatch. Nothing is minted and nothing is regenerated: a restart
+        // that invented a new identity for an outstanding sale is precisely how
+        // one customer gets two orders.
+        //
+        // Before this read lands the fence keeps whatever it held and
+        // recoveryRef reads `pending`, so an ordinary new sale is refused
+        // throughout hydration. Only `verified_clear` — a successful read that
+        // proved absence — lowers it.
+        //
+        // `blocked` changes nothing at all. A read that failed is not evidence
+        // of an empty store.
+        if (authority.status === "outstanding") {
+          saleFenceRef.current = {
+            status: "unresolved",
+            requestId: authority.sale.saleRequestId,
+            fingerprint: authority.sale.fingerprint,
+            // No checkout in THIS process armed it. An exact recovery is
+            // authorized against the fingerprint and the request id, never
+            // against a generation a dead process issued.
+            checkoutGeneration: 0,
+          };
+        } else if (authority.status === "verified_clear") {
+          saleFenceRef.current = { status: "idle" };
+        }
+
+        setUncertainSale(authority.status === "outstanding" ? authority.sale : null);
       }
     })();
 
@@ -2133,7 +2575,26 @@ export default function DeviceApp() {
    * that answer into words and refreshes what the screen is showing.
    */
   async function handleDiscard(queueRecordId: string): Promise<string | null> {
-    const result = await discardRejectedSale(queueRecordId);
+    // ======================================================================
+    // v1.3 CP-2B item C — THE CURRENT IDENTITY IS READ, AND THE MUTATION
+    // BOUNDARY DECIDES WHETHER IT WAS NEEDED.
+    //
+    // This used to ask isRegisterBlockedSale() first and apply the role gate
+    // only if the answer was yes — but discardRejectedSale then re-read the
+    // record and wrote it, so a sale that became register-blocked in between
+    // was discarded on the strength of a check taken when it was something
+    // else. Independent review found that race.
+    //
+    // There is no pre-check now. The live reviewer decision always goes in, and
+    // discardRejectedSale — which holds the record it is about to write, in one
+    // transaction — decides whether the gate applies to THAT record. The role
+    // decision and the record cannot diverge, because nothing happens between
+    // them. An unrelated rejection is unaffected: the role is consulted only
+    // when the stored reason is the register one.
+    // ======================================================================
+    const reviewer = await readReviewerDecision();
+
+    const result = await discardRejectedSale(queueRecordId, reviewer);
 
     // Re-read both regardless of outcome: a refusal usually means storage says
     // something different from what this screen was rendering, and the fix for
@@ -2151,6 +2612,18 @@ export default function DeviceApp() {
 
     if (result.reason === "storage_unavailable") {
       return "This device could not save that change. Try again.";
+    }
+
+    if (result.reason === "corrupt_record") {
+      return "This device could not read that sale, so nothing was discarded.";
+    }
+
+    // The mutation boundary refused on the record it was holding: it was
+    // register-blocked and this person may not resolve it.
+    if (result.reason === "reviewer_not_permitted") {
+      return reviewer.allowed
+        ? "This sale now needs an owner or a manager. Reopen this screen and try again."
+        : reviewer.message;
     }
 
     return DISCARD_REJECTED_SALE_REFUSALS[result.reason];
@@ -2201,6 +2674,7 @@ export default function DeviceApp() {
     await clearOfflineCache();
     await resetDeviceSession();
     readyPairingRef.current = null;
+    advanceAuthorityEpoch();
     offlineDraftRef.current = null;
     setPairingError(null);
     setState({ status: "unpaired", notice: null });
@@ -2411,6 +2885,401 @@ export default function DeviceApp() {
   }
 
   /**
+   * v1.3 CP-2B — the host's authority, read at the instant Done is pressed.
+   *
+   * EVERY VALUE COMES FROM A REF, NONE FROM A RENDER CLOSURE. `gateRef` is
+   * written in the same turn as each gate transition (see commitGate), the
+   * configuration generation is derived from `readyPairingRef` — which is
+   * written synchronously immediately before every state transition that
+   * carries a configuration — and the recovery answer lives in `recoveryRef`.
+   * So what this returns is true when it is called, not when the callback was
+   * created. That is why PosRuntime is handed a FUNCTION rather than a prop.
+   *
+   * FAIL-CLOSED: null when there is no employee, no open register, or no ready
+   * pairing. PosRuntime treats null as a refusal, never as "no check needed".
+   */
+  const readHostAuthority = useCallback((): HostAuthoritySnapshot | null => {
+    const currentGate = gateRef.current;
+    const pairing = readyPairingRef.current;
+
+    if (currentGate.employee === null || currentGate.daily === null) {
+      return null;
+    }
+
+    if (pairing === null) {
+      return null;
+    }
+
+    // ONE OPAQUE TOKEN, because PosRuntime is not permitted to know about
+    // employees, registers or attribution — and does not need to. Every fact
+    // that must not change mid-order is folded in here, where the identities
+    // already live:
+    //
+    //   the signed-in operator · the open register · the configuration pin ·
+    //   and the snapshot generation, which is what makes a configuration change
+    //   detectable even when the build id did not move.
+    //
+    // The runtime compares it for equality and learns nothing from it.
+    // THE RECOVERY FENCE LIVES HERE, NOT IN THE RUNTIME. PosRuntime knows
+    // nothing about durable sale records and must not start; it receives a
+    // sentence to show, exactly as it already does for checkoutBlockedReason.
+    //
+    // "pending" is as much a refusal as "blocked": before the read lands this
+    // device does not know whether an earlier sale is outstanding, and "do not
+    // know" must block a new sale rather than permit one.
+    const recovery = recoveryRef.current;
+    const blockedReason =
+      recovery.status === "pending"
+        ? "Checking for an unfinished sale. Try again in a moment."
+        : recovery.status === "blocked"
+          ? "This device cannot confirm whether an earlier sale finished. Reconnect before selling."
+          : null;
+
+    const authorityToken = [
+      currentGate.employee.employeeSessionId,
+      currentGate.daily.registerSessionId,
+      pairing.buildJobId,
+      String(authorityEpochRef.current),
+    ].join("\u001f");
+
+    // STRICTLY READ-ONLY, AND THAT IS NOW A RULE RATHER THAN A HABIT.
+    //
+    // This function previously recorded the prepared token on its first call
+    // and advanced the configuration generation whenever it noticed a new
+    // pairing. Both were writes performed by a read, and both were wrong:
+    // the first froze an authorization that was never reset, and the second
+    // could only see a change that was still visible by the time somebody
+    // happened to ask. Preparation is now minted by
+    // prepareCheckoutAuthorization alone, and the epoch is advanced at the
+    // transitions themselves by advanceAuthorityEpoch.
+    //
+    // So this reads gateRef, readyPairingRef, recoveryRef and the epoch, and
+    // writes nothing whatsoever.
+    return {
+      blockedReason,
+      authorityToken,
+    };
+  }, []);
+
+  /**
+   * v1.3 CP-2B — the one place a sale attempt is authorized.
+   *
+   * SHARED BY ALL THREE CALLERS: the runtime's pre-dispatch callback, the
+   * online submission callback and the offline enqueue callback. One function
+   * because three copies of a safety rule is three chances for them to differ.
+   *
+   * It compares the authority this checkout was PREPARED under against the
+   * authority live at this instant, and answers for the EXACT identity it was
+   * given — never for "the current checkout" in the abstract.
+   */
+  const prepareCheckoutAuthorization = useCallback((): HostCheckoutPreparation => {
+    const live = readHostAuthority();
+
+    if (!live) {
+      return { ok: false, reason: "Sign in an employee before taking a sale." };
+    }
+
+    if (live.blockedReason !== null) {
+      return { ok: false, reason: live.blockedReason };
+    }
+
+    const fence = saleFenceRef.current;
+    const recovery = recoveryRef.current;
+
+    // ARMING IS ALWAYS REFUSED. A durable write is in flight and this device
+    // does not yet know whether it landed, so it cannot say which identity it
+    // would be scoping a checkout to.
+    if (fence.status === "arming") {
+      return { ok: false, reason: "This sale is still being protected. Try again in a moment." };
+    }
+
+    // "DO NOT KNOW" IS ALWAYS REFUSED, and that was the original rule. What the
+    // previous implementation got wrong was treating `outstanding` — which is
+    // knowledge — as though it were ignorance, and refusing on it too. That
+    // refusal minted no generation, so nothing could ever present one, so the
+    // exact-recovery path that Feature 24.5F already owns became unreachable
+    // and the till could neither finish the sale nor be reset.
+    if (recovery.status === "pending" || recovery.status === "blocked") {
+      return { ok: false, reason: "Checking for an unfinished sale. Try again in a moment." };
+    }
+
+    let scope: NonNullable<typeof checkoutAuthRef.current>["scope"];
+
+    if (fence.status === "idle") {
+      // ORDINARY NEW CHECKOUT. Requires POSITIVE clearance, not merely the
+      // absence of a fence: a store that has not answered cannot authorize one.
+      if (recovery.status !== "verified_clear") {
+        return { ok: false, reason: "Checking for an unfinished sale. Try again in a moment." };
+      }
+
+      scope = { kind: "new_sale" };
+    } else {
+      // EXACT-IDENTITY RECOVERY. An identity is outstanding, so this checkout
+      // is scoped to it and to nothing else.
+      //
+      // THE DURABLE RECORD MUST AGREE WITH THE FENCE, through the SAME policy
+      // function the dispatch gate uses. The fence is this process's memory;
+      // decideUncertainSale answers from what the store reports. If they name
+      // different identities, this device does not know what it is protecting
+      // and must not scope a checkout to either.
+      const outstanding = recovery.status === "outstanding" ? recovery.sale : null;
+      const identity = decideUncertainSale(outstanding, fence.fingerprint);
+
+      if (identity.status !== "resume" || identity.saleRequestId !== fence.requestId) {
+        return {
+          ok: false,
+          reason:
+            "An earlier sale on this till is unfinished. Resolve it before starting a new one.",
+        };
+      }
+
+      scope = {
+        kind: "exact_recovery",
+        requestId: fence.requestId,
+        fingerprint: fence.fingerprint,
+      };
+    }
+
+    // THE ONLY PLACE A GENERATION IS EVER MINTED, and it is minted fresh. A
+    // checkout that is already open cannot reach this function — the runtime
+    // calls it at the open boundary — so no stale checkout can refresh itself
+    // by asking again.
+    checkoutGenerationRef.current += 1;
+
+    const prepared = {
+      generation: checkoutGenerationRef.current,
+      token: live.authorityToken,
+      scope,
+    };
+
+    checkoutAuthRef.current = prepared;
+    authorizedAttemptRef.current = null;
+
+    return { ok: true, generation: prepared.generation, authorityToken: prepared.token };
+  }, [readHostAuthority]);
+
+  /**
+   * v1.3 CP-2B FINAL — the checkout this generation belongs to is over.
+   *
+   * GENERATION-SCOPED ON PURPOSE. A completion, a cancel and a close can all
+   * arrive late — a promise that settles after the cashier has already started
+   * the next order. An unconditional clear would let that stale callback
+   * de-authorize the NEW checkout, turning a safety mechanism into a denial of
+   * service. So the caller names the generation it is finishing, and anything
+   * that does not match the one currently held is ignored.
+   *
+   * THE DURABLE RECOVERY FENCE IS NOT TOUCHED. Closing or completing a checkout
+   * locally says nothing about whether a request already left the device, and
+   * `saleFenceRef` / `recoveryRef` are deliberately absent from this function.
+   */
+  const invalidateCheckoutAuthorization = useCallback((generation: number) => {
+    const held = checkoutAuthRef.current;
+
+    if (held === null || held.generation !== generation) {
+      return;
+    }
+
+    checkoutAuthRef.current = null;
+    authorizedAttemptRef.current = null;
+  }, []);
+
+  const decideSaleDispatch = useCallback(
+    (attempt: {
+      requestId: string | null;
+      fingerprint: string;
+      checkoutGeneration: number;
+    }): HostSaleAuthorization => {
+      const live = readHostAuthority();
+
+      if (!live) {
+        return { decision: "blocked", reason: "Sign in an employee before taking a sale." };
+      }
+
+      if (live.blockedReason !== null) {
+        return { decision: "blocked", reason: live.blockedReason };
+      }
+
+      const prepared = checkoutAuthRef.current;
+
+      // THREE SEPARATE FACTS, AND NONE OF THEM IS THIS FUNCTION'S OWN OUTPUT.
+      //
+      //   prepared === null        — no checkout is authorized at all, which is
+      //                              what an authority change leaves behind.
+      //   generation mismatch      — the caller is presenting a checkout this
+      //                              host did not issue, or issued earlier and
+      //                              has since replaced. The value comes from
+      //                              the RUNTIME; the comparand from the HOST.
+      //   token mismatch           — the authority moved since preparation,
+      //                              even though the checkout is still open.
+      //
+      // The armed identity is deliberately NOT cleared on any of these: a
+      // refusal to dispatch is not proof that no earlier request exists.
+      if (
+        prepared === null ||
+        prepared.generation !== attempt.checkoutGeneration ||
+        prepared.token !== live.authorityToken
+      ) {
+        return {
+          decision: "blocked",
+          reason:
+            "The signed-in employee, open register or configuration changed. Review the order and try again.",
+        };
+      }
+
+      // THE RECORDED SCOPE IS BINDING, and it is checked before the fence.
+      //
+      // A checkout granted for exact recovery may dispatch the identity it was
+      // granted for and nothing else — not a re-rung cart, not a different
+      // tender, not a newly minted id. The cashier may edit the cart freely
+      // after reopening; every edit changes the fingerprint and is refused
+      // here, under the identity this checkout was scoped to at preparation.
+      //
+      // A `new_sale` scope is deliberately NOT required to match anything: an
+      // ordinary checkout whose own sale goes UNKNOWN mid-attempt must still be
+      // able to replay it, which is the in-process path Feature 24.5F owns. It
+      // is constrained instead by the fence branch directly below.
+      if (
+        prepared.scope.kind === "exact_recovery" &&
+        (attempt.requestId !== prepared.scope.requestId ||
+          attempt.fingerprint !== prepared.scope.fingerprint)
+      ) {
+        return {
+          decision: "blocked",
+          reason: "An earlier sale on this till is unfinished. Resolve it before starting a new one.",
+        };
+      }
+
+      const fence = saleFenceRef.current;
+
+      if (fence.status === "armed" || fence.status === "unresolved") {
+        // TWO INDEPENDENT AUTHORITIES MUST AGREE, and they answer different
+        // questions.
+        //
+        //   the fence — this process's record of what it put in flight.
+        //   decideUncertainSale — the fingerprint-keyed identity decision, made
+        //     against what the durable store reports, which is where a restart
+        //     gets its answer from and which this host cannot second-guess.
+        //
+        // Neither alone is sufficient. The fence knows nothing about the record
+        // on disk; decideUncertainSale knows nothing about whether this host is
+        // in a state where the requested operation is permitted at all.
+        const outstanding =
+          recoveryRef.current.status === "outstanding" ? recoveryRef.current.sale : null;
+        const identity = decideUncertainSale(outstanding, attempt.fingerprint);
+
+        const exact =
+          fence.requestId === attempt.requestId &&
+          fence.fingerprint === attempt.fingerprint &&
+          identity.status === "resume" &&
+          identity.saleRequestId === fence.requestId;
+
+        if (exact) {
+          authorizedAttemptRef.current = {
+            generation: prepared.generation,
+            requestId: fence.requestId,
+            fingerprint: fence.fingerprint,
+          };
+
+          return { decision: "resume_exact", requestId: fence.requestId };
+        }
+
+        return {
+          decision: "blocked",
+          reason: "An earlier sale on this till is unfinished. Resolve it before starting a new one.",
+        };
+      }
+
+      if (fence.status === "arming") {
+        return {
+          decision: "blocked",
+          reason: "This sale is still being protected. Try again in a moment.",
+        };
+      }
+
+      // Idle fence plus a verified-clear store is the only route to a new sale.
+      if (recoveryRef.current.status !== "verified_clear") {
+        return {
+          decision: "blocked",
+          reason: "Checking for an unfinished sale. Try again in a moment.",
+        };
+      }
+
+      authorizedAttemptRef.current = {
+        generation: prepared.generation,
+        requestId: attempt.requestId,
+        fingerprint: attempt.fingerprint,
+      };
+
+      return { decision: "new_sale" };
+    },
+    [readHostAuthority]
+  );
+
+  /**
+   * v1.3 CP-2B FINAL — does the payload about to be sent match what was
+   * authorized?
+   *
+   * THIS IS THE CORRECTION. The previous final gates passed
+   * `saleFenceRef.current.fingerprint` in as the attempt's fingerprint and the
+   * gate then compared it with `saleFenceRef.current.fingerprint`. That is a
+   * value compared with itself: it is true whenever the fence is armed, for
+   * every payload, and it verified precisely nothing.
+   *
+   * The two sides now come from places that cannot agree by construction:
+   *
+   *   submitted — reconstructed by the caller from the ACTUAL arguments it is
+   *     about to dispatch, with createSaleFingerprint over
+   *     canonicalLineIdentity, which is the same pair the cart used to build
+   *     its line keys and the same value the server hashes.
+   *   authorized — recorded by decideSaleDispatch from the identity the RUNTIME
+   *     presented at the pre-dispatch gate, under a generation this host issued.
+   *
+   * A payload whose project, payment method, tip, item, modifier or quantity
+   * differs by any amount produces a different fingerprint and is refused here,
+   * after the last await and before anything leaves the device.
+   */
+  const verifySubmittedSale = useCallback(
+    (submitted: { requestId: string; fingerprint: string }): HostSaleAuthorization => {
+      const authorized = authorizedAttemptRef.current;
+
+      if (authorized === null) {
+        return {
+          decision: "blocked",
+          reason: "This sale was not authorized. Review the order and try again.",
+        };
+      }
+
+      if (authorized.fingerprint !== submitted.fingerprint) {
+        return {
+          decision: "blocked",
+          reason: "The order changed after it was authorized. Review the order and try again.",
+        };
+      }
+
+      // `null` means this host mints the identity further down the offline
+      // path, so the runtime could not have named it. Anything else must match
+      // exactly — a substituted request id is a different sale.
+      if (authorized.requestId !== null && authorized.requestId !== submitted.requestId) {
+        return {
+          decision: "blocked",
+          reason: "The order changed after it was authorized. Review the order and try again.",
+        };
+      }
+
+      // AND THE WHOLE GATE AGAIN, against the reconstructed fingerprint rather
+      // than the recorded one, under the generation that authorized it. This
+      // re-checks live authority, the prepared token, the fence and recovery
+      // eligibility at the real invocation boundary.
+      return decideSaleDispatch({
+        requestId: submitted.requestId,
+        fingerprint: submitted.fingerprint,
+        checkoutGeneration: authorized.generation,
+      });
+    },
+    [decideSaleDispatch]
+  );
+
+  /**
    * Feature 25.1 — the EMERGENCY reset, deliberately unchanged.
    *
    * Reached from `revoked`, `config_unavailable` and `reconnect_required` — the
@@ -2462,6 +3331,7 @@ export default function DeviceApp() {
     await clearOfflineCache();
     await resetDeviceSession();
     readyPairingRef.current = null;
+    advanceAuthorityEpoch();
     offlineDraftRef.current = null;
     setPairingError(null);
     setState({ status: "unpaired", notice: null });
@@ -2499,6 +3369,55 @@ export default function DeviceApp() {
         };
       }
 
+      // v1.3 CP-2B — THE HOST'S OWN FINAL GATE, at the real invocation boundary.
+      //
+      // The runtime asks before it calls, but a runtime closure is a statement
+      // made by a render that has already happened. This check cannot be
+      // bypassed by a stale caller, because it runs here, in the host, in the
+      // same turn as the RPC.
+      // THE FINGERPRINT IS RECONSTRUCTED FROM THE ARGUMENTS BEING SENT, not
+      // read back out of the fence this check exists to test.
+      //
+      // Every field the server hashes is covered, and each comes from the
+      // payload or from this host's own authority — never from the thing being
+      // verified:
+      //
+      //   project        input.projectId
+      //   payment method input.paymentMethod
+      //   tip            input.tipAmount, as toFixed(2)
+      //   line identity  canonicalLineIdentity(itemId, modifiers), which is the
+      //                  exact call createCartItem used to build lineKey, over
+      //                  the exact selections buildSaleRequestItems carried
+      //   quantity       per line, inside the same canonical join
+      //
+      // Prices and names are excluded by createSaleFingerprint's own design;
+      // the server never accepts a client amount, so there is nothing there for
+      // a tampered figure to sit in.
+      const submittedFingerprint = createSaleFingerprint({
+        projectId: input.projectId,
+        paymentMethod: input.paymentMethod,
+        tipAmount: input.tipAmount,
+        items: input.items.map((item) => ({
+          lineKey: canonicalLineIdentity(item.itemId, item.modifiers),
+          quantity: item.quantity,
+        })),
+      });
+
+      const dispatch = verifySubmittedSale({
+        requestId: input.saleRequestId,
+        fingerprint: submittedFingerprint,
+      });
+
+      if (dispatch.decision === "blocked") {
+        // NOTHING IS SENT and the armed identity is left exactly as it is.
+        return {
+          receipt: null,
+          error: dispatch.reason,
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
       const result = await completeDeviceSaleV5({
         paymentMethod: input.paymentMethod,
         items: input.items,
@@ -2531,6 +3450,7 @@ export default function DeviceApp() {
         // recovery this refusal just raised, not the state React has yet to
         // commit.
         gateRef.current = recovering;
+        advanceAuthorityEpoch();
         setGate(recovering);
         setGateError(result.error);
         void deriveGateState("observe");
@@ -2564,12 +3484,13 @@ export default function DeviceApp() {
 
         dailyUnchangedRef.current = 0;
         gateRef.current = adopted;
+        advanceAuthorityEpoch();
         setGate(adopted);
       }
 
       return result;
     },
-    [deriveGateState]
+    [deriveGateState, verifySubmittedSale]
   );
 
   /**
@@ -2634,6 +3555,19 @@ export default function DeviceApp() {
         tipAmount: input.tipAmount,
         cart: input.cart,
         now,
+        // v1.3 CP-2B — THE HOST NOW CONSUMES THE CONTRACT IT WAS ALWAYS GIVEN.
+        //
+        // PosRuntimeQueueOfflineSale.inheritedRequest has been declared since
+        // Feature 24.5F and is passed by PosRuntime on every offline
+        // submission, but this host never read it — so an online sale whose
+        // outcome was unknown had a FRESH offline identity minted for it, and
+        // verifySubmittedSale below then refused the mismatch. That refusal was
+        // right; the missing pass-through was the defect.
+        //
+        // The resolver honours this only on an exact fingerprint match, so a
+        // changed cart or tender still gets its own identity — and the final
+        // host gate still compares whatever comes back.
+        inherited: input.inheritedRequest,
       });
 
       if (!drafted.ok) {
@@ -2651,6 +3585,39 @@ export default function DeviceApp() {
 
       if (!attribution.ok) {
         return { ok: false, message: attribution.message };
+      }
+
+      // v1.3 CP-2B — the same gate immediately before the durable enqueue, and
+      // after the awaited eligibility resolution above.
+      //
+      // canCheckoutOffline (just above) proves an employee and a register
+      // EXIST; it cannot prove they are the SAME ones this checkout was
+      // prepared under, and it knows nothing about configuration freshness or
+      // an unresolved online identity. This closes all three.
+      // RECONSTRUCTED FROM THE SUBMITTED CART, and the project identity comes
+      // from this host's authoritative session rather than from the payload —
+      // the runtime never sends one on this path, and a host that took it from
+      // the caller would be trusting the value it is supposed to be checking.
+      //
+      // CartItem already carries `lineKey`, built by createCartItem with the
+      // same canonicalLineIdentity call, so no derivation is needed here and
+      // the two sides cannot drift.
+      const submittedOfflineFingerprint = createSaleFingerprint({
+        projectId: eligibility.session.projectId,
+        paymentMethod: input.paymentMethod,
+        tipAmount: input.tipAmount,
+        items: input.cart,
+      });
+
+      const offlineDispatch = verifySubmittedSale({
+        requestId: drafted.draft.saleRequestId,
+        fingerprint: submittedOfflineFingerprint,
+      });
+
+      if (offlineDispatch.decision === "blocked") {
+        // Refused before anything durable is written. The existing draft and
+        // queue identity are untouched.
+        return { ok: false, message: offlineDispatch.reason };
       }
 
       const outcome = await completeOfflineSale({
@@ -2676,7 +3643,7 @@ export default function DeviceApp() {
 
       return { ok: true, receipt: outcome.receipt, saleRequestId: drafted.draft.saleRequestId };
     },
-    [refreshSaleStatus]
+    [refreshSaleStatus, verifySubmittedSale]
   );
 
   /**
@@ -2782,32 +3749,131 @@ export default function DeviceApp() {
         return false;
       }
 
+      const identity = {
+        deviceAuthUserId: sessionUserId,
+        deviceId: state.pairing.deviceId,
+        projectId: state.pairing.projectId,
+        buildJobId: state.pairing.buildJobId,
+      };
+
+      // v1.3 CP-2B — THE FENCE GOES UP BEFORE THE AWAIT, NOT AFTER IT.
+      //
+      // From this statement on, this till is protecting an identity whether or
+      // not the write lands. Raising it afterwards would leave the window the
+      // whole feature exists to close: a storage call in flight, nothing
+      // recorded locally, and a second Done free to mint a different key.
+      //
+      // The generation bump invalidates any recovery read already in flight —
+      // a read that began before this arm must never publish its older
+      // verified-clear answer over the outstanding state established below.
+      recoveryGenerationRef.current += 1;
+      recoveryRef.current = PENDING_RECOVERY_AUTHORITY;
+      saleFenceRef.current = {
+        status: "arming",
+        requestId: sale.saleRequestId,
+        fingerprint: sale.fingerprint,
+        checkoutGeneration: checkoutAuthRef.current?.generation ?? 0,
+      };
+
       const armed = await armUncertainSale({
         sale,
-        identity: {
-          deviceAuthUserId: sessionUserId,
-          deviceId: state.pairing.deviceId,
-          projectId: state.pairing.projectId,
-          buildJobId: state.pairing.buildJobId,
-        },
+        identity,
         dispatchedAt: new Date().toISOString(),
       });
 
       if (armed) {
-        // Mirror it locally straight away, so a process death between here and
-        // the response still leaves the runtime gating on the same request.
+        // PUBLISHED SYNCHRONOUSLY, BEFORE RETURNING. The runtime acts on this
+        // return value immediately; if the outstanding identity were only
+        // published through setUncertainSale the next authorization would read
+        // a React prop that has not committed yet.
+        recoveryRef.current = { status: "outstanding", sale };
+        saleFenceRef.current = { ...saleFenceRef.current, status: "armed" } as typeof saleFenceRef.current;
         setUncertainSale(sale);
+
+        return true;
       }
 
-      return armed;
+      // A BOOLEAN false DOES NOT PROVE ABSENCE.
+      //
+      // armUncertainSale collapses three outcomes into one `false`: a record
+      // that failed validation (no write attempted), a write that reported
+      // !ok (the transaction may still have committed), and storage that
+      // could not be opened. Only an authoritative read can tell them apart,
+      // so the store is asked — and anything short of a successful read
+      // proving absence leaves this till fenced.
+      const verified = await readRecoveryAuthority(identity);
+
+      recoveryRef.current = verified;
+
+      if (verified.status === "outstanding") {
+        // The write DID land despite reporting failure. Protect it.
+        saleFenceRef.current = {
+          status: "unresolved",
+          requestId: verified.sale.saleRequestId,
+          fingerprint: verified.sale.fingerprint,
+          checkoutGeneration: checkoutAuthRef.current?.generation ?? 0,
+        };
+        setUncertainSale(verified.sale);
+      } else if (verified.status === "verified_clear") {
+        // Proven absent by a successful read. Nothing to protect.
+        saleFenceRef.current = { status: "idle" };
+      }
+      // `blocked` keeps the fence exactly as it is: still arming, still closed.
+
+      return false;
     },
     [state]
   );
 
   /** Feature 24.5F — clears the durable record after a POSITIVE resolution. */
   const resolveOnlineSale: PosRuntimeResolveOnlineSale = useCallback(async () => {
+    // v1.3 CP-2B — THE FENCE STAYS UP UNTIL ABSENCE IS PROVEN, not until the
+    // delete was requested.
+    //
+    // The runtime calls this fire-and-forget (`void resolveOnlineSale?.()`), so
+    // nothing upstream waits for it and nothing upstream can own the window.
+    // resolveUncertainSale returns a bare boolean that reports whether the
+    // delete was ISSUED; it cannot report whether the record is gone. Between
+    // those two facts sits exactly the state where a new sale must not begin.
+    recoveryGenerationRef.current += 1;
+    recoveryRef.current = PENDING_RECOVERY_AUTHORITY;
+
     await resolveUncertainSale();
-    setUncertainSale(null);
+
+    const sessionUserId = sessionUserIdRef.current;
+    const pairing = readyPairingRef.current;
+
+    if (sessionUserId === null || pairing === null) {
+      // Nothing to verify against. Stay fenced rather than assume.
+      await refreshSaleStatus();
+
+      return;
+    }
+
+    // AUTHORITATIVE RECONCILIATION. Only a successful read proving absence
+    // lifts the fence; a failed or unreadable one leaves this till blocked.
+    const verified = await readRecoveryAuthority({
+      deviceAuthUserId: sessionUserId,
+      deviceId: pairing.deviceId,
+      projectId: pairing.projectId,
+      buildJobId: pairing.buildJobId,
+    });
+
+    recoveryRef.current = verified;
+
+    if (verified.status === "verified_clear") {
+      saleFenceRef.current = { status: "idle" };
+      setUncertainSale(null);
+    } else if (verified.status === "outstanding") {
+      saleFenceRef.current = {
+        status: "unresolved",
+        requestId: verified.sale.saleRequestId,
+        fingerprint: verified.sale.fingerprint,
+        checkoutGeneration: checkoutAuthRef.current?.generation ?? 0,
+      };
+      setUncertainSale(verified.sale);
+    }
+
     await refreshSaleStatus();
   }, [refreshSaleStatus]);
 
@@ -2846,6 +3912,8 @@ export default function DeviceApp() {
       capability: resolveCashDrawerCapability(),
     });
   }, []);
+
+
 
   const handleSaleRejected = useCallback(
     (rejection: { message: string | null; failure?: DeviceFailureKind }) => {
@@ -2924,9 +3992,11 @@ export default function DeviceApp() {
         return (
           <RejectedSaleReview
             reviews={reviews}
+            reviewerGate={reviewerGate}
+            onReviewDecision={handleReviewDecision}
             onDiscard={handleDiscard}
             onRetry={handleRetry}
-            onClose={() => setReviewing(false)}
+            onClose={closeBlockedSaleReview}
           />
         );
       }
@@ -2971,7 +4041,7 @@ export default function DeviceApp() {
           // Feature 24.5F — the way OUT of a needs_attention deadlock. Offered
           // only when something is actually unresolved, so a cleanly revoked
           // till still shows nothing extra.
-          onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : undefined}
+          onReview={saleStatus.needsAttention > 0 ? () => void openBlockedSaleReview() : undefined}
           reviewLabel={saleStatus.needsAttention === 1 ? "Review sale" : "Review sales"}
         />
       );
@@ -3052,9 +4122,11 @@ export default function DeviceApp() {
         reviewing ? (
           <RejectedSaleReview
             reviews={reviews}
+            reviewerGate={reviewerGate}
+            onReviewDecision={handleReviewDecision}
             onDiscard={handleDiscard}
             onRetry={handleRetry}
-            onClose={() => setReviewing(false)}
+            onClose={closeBlockedSaleReview}
           />
         ) : historyOrder !== null ? (
           <SalesHistoryDetail
@@ -3186,7 +4258,15 @@ export default function DeviceApp() {
               setGateError(null);
               void loadRoster();
               setSelectedEmployee(null);
-              setGate(beginEmployeeSwitch(gateRef.current));
+              // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+              // The effect that mirrors `gate` runs only after React commits, so
+              // between this call and that commit the ref still held the PREVIOUS
+              // gate — and checkout reads the ref, not the state.
+              const switched = beginEmployeeSwitch(gateRef.current);
+
+              gateRef.current = switched;
+              advanceAuthorityEpoch();
+              setGate(switched);
             }}
           />
         ) : null;
@@ -3301,7 +4381,15 @@ export default function DeviceApp() {
                 setGateError(null);
                 void loadRoster();
                 setSelectedEmployee(null);
-                setGate(beginEmployeeSwitch(gateRef.current));
+                // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
+                // The effect that mirrors `gate` runs only after React commits, so
+                // between this call and that commit the ref still held the PREVIOUS
+                // gate — and checkout reads the ref, not the state.
+                const switched = beginEmployeeSwitch(gateRef.current);
+
+                gateRef.current = switched;
+                advanceAuthorityEpoch();
+                setGate(switched);
               }}
               onLogout={() => void lockOperatorOut("ring_out")}
               onTimeClock={() => {
@@ -3319,7 +4407,7 @@ export default function DeviceApp() {
             status={saleStatus}
             syncing={syncing}
             onSyncNow={saleStatus.waiting > 0 ? () => void runSync("manual") : null}
-            onReview={saleStatus.needsAttention > 0 ? () => setReviewing(true) : null}
+            onReview={saleStatus.needsAttention > 0 ? () => void openBlockedSaleReview() : null}
           />
 
           {/* `inert` IS THE INTERACTION BOUNDARY, not the covering div.
@@ -3387,6 +4475,10 @@ export default function DeviceApp() {
               // storage grant a device does not already have.
               logoBaseUrl={process.env.NEXT_PUBLIC_SUPABASE_URL ?? null}
               onSaleRejected={handleSaleRejected}
+              readHostAuthority={readHostAuthority}
+              prepareCheckoutAuthorization={prepareCheckoutAuthorization}
+              invalidateCheckoutAuthorization={invalidateCheckoutAuthorization}
+              authorizeSaleDispatch={decideSaleDispatch}
               // Feature 24.5E — the fence now closes only when an offline sale
               // would NOT be safe. Online is unaffected (null, as always). Offline
               // and eligible passes null too, and supplies the durable handler

@@ -304,9 +304,18 @@ describe("the UI says saved only after the sale is on disk", () => {
     expect(app).toContain("queueOfflineSale={offlineSaleAllowed ? queueOfflineSale : null}");
 
     // And the runtime calls it when the checkout closes — cancelled or done.
-    const close = runtime.slice(runtime.indexOf("function closeCheckout()"));
+    //
+    // v1.3 CP-2B FINAL — bounded by the NEXT FUNCTION rather than by a 400-
+    // character window. The invariant is "closeCheckout discards the draft";
+    // the character count was only ever a cheap way of saying "in this
+    // function", and it broke the moment the function grew. Bounding it
+    // properly asserts the same rule and cannot be satisfied by a call that
+    // sits in some later function instead.
+    const closeStart = runtime.indexOf("function closeCheckout()");
+    const close = runtime.slice(closeStart, runtime.indexOf("function selectPaymentMethod(", closeStart));
 
-    expect(close.slice(0, 400)).toContain("discardOfflineSaleDraft?.();");
+    expect(closeStart).toBeGreaterThan(-1);
+    expect(close).toContain("discardOfflineSaleDraft?.();");
   });
 
   it("the identity is minted before the write and never after it", () => {
@@ -777,10 +786,35 @@ describe("the cashier is told the truth about what is waiting", () => {
 
     expect(runtime).toContain('if (failure === "transport") {');
 
-    const create = runtime.indexOf("setUncertainSale(\n          createUncertainSale({");
+    // v1.3 CP-2B — located WITHOUT depending on indentation. completeSale now
+    // wraps its protected body in try/catch/finally so the single-flight guard
+    // is released on every path, which shifted this call two columns. The
+    // invariant is unchanged and still exactly as strict: the only
+    // setUncertainSale that CREATES an uncertainty must follow the transport
+    // classification. The catch-block setUncertainSale is excluded by name
+    // because it re-asserts an ALREADY-ARMED identity rather than creating one.
+    const create = runtime.search(/setUncertainSale\(\s*\n\s*createUncertainSale\(\{/);
     const transport = runtime.indexOf('if (failure === "transport") {');
 
     expect(create).toBeGreaterThan(transport);
+
+    // THE IN-MEMORY MIRROR IS STILL CREATED EXACTLY ONCE, and only there.
+    // Anything else that constructs an identity must not reach setUncertainSale
+    // by its own route.
+    expect([...runtime.matchAll(/setUncertainSale\(\s*\n\s*createUncertainSale\(\{/g)])
+      .toHaveLength(1);
+
+    // v1.3 CP-2B — the catch re-asserts an ALREADY-ARMED identity; it never
+    // fabricates one. The identity is assigned only after the durable arm
+    // returned true, so a refused arm leaves it null and the catch classifies
+    // the failure as genuinely pre-dispatch.
+    const arm = runtime.indexOf("const armed = await armOnlineSale(");
+    const record = runtime.indexOf("armedUncertainty = createUncertainSale({");
+
+    expect(record).toBeGreaterThan(arm);
+    expect(runtime.slice(arm, record)).toContain("SALE_UNPROTECTED_MESSAGE");
+    expect(runtime).toContain("if (armedUncertainty !== null) {");
+    expect(runtime).toContain("setUncertainSale(armedUncertainty);");
     // It carries the key that was actually sent, not a fresh one.
     expect(runtime).toContain("saleRequestId: plan.request.id,");
     expect(runtime).toContain("fingerprint: plan.request.fingerprint,");
@@ -908,12 +942,34 @@ describe("the cashier is told the truth about what is waiting", () => {
     expect(fn).toContain("if (!parsed.ok) {");
 
     // And it runs before the session reads its outstanding request.
+    //
+    // v1.3 CP-2B — the host now reads through lib/recoveryAuthority.ts, which
+    // distinguishes a failed read from a verified-absent one; readUncertainSale
+    // collapsed both to "none". The ORDERING invariant this guard protects is
+    // unchanged — reconciliation still runs before the read-back — and is now
+    // asserted against the reader the host actually uses. Duplicating the read
+    // merely to keep the old literal would be two observations of a thing that
+    // can change between them, which is worse than the spelling it preserved.
     const app = code(read(DEVICE_APP));
     const reconcile = app.indexOf("await reconcileUncertainSaleWithQueue();");
-    const readBack = app.indexOf("const outstanding = await readUncertainSale({");
+    const readBack = app.indexOf("const authority = await readRecoveryAuthority({");
 
     expect(reconcile).toBeGreaterThan(-1);
     expect(readBack).toBeGreaterThan(reconcile);
+
+    // The read-back is keyed on the FULL pairing identity, exactly as before.
+    const hydration = app.slice(reconcile, readBack + 400);
+
+    expect(hydration).toContain("deviceAuthUserId: sessionUserId,");
+    expect(hydration).toContain("deviceId: state.pairing.deviceId,");
+    expect(hydration).toContain("projectId: state.pairing.projectId,");
+    expect(hydration).toContain("buildJobId: state.pairing.buildJobId,");
+
+    // The host still imports NO persistence primitive of its own: the four-state
+    // read lives in lib/, which is what keeps the boundary guard above true.
+    expect(app).toContain('from "@/lib/recoveryAuthority"');
+    expect(app).not.toContain("openOfflineDb");
+    expect(app).not.toContain("readUncertainSaleRecordRaw");
   });
 
   it("evidence survives a cache clear, a revocation and a re-pair", () => {
@@ -1109,5 +1165,689 @@ describe("24.5E changed nothing it was not meant to", () => {
     );
     expect(exists("windows-shell/build/icon.ico")).toBe(true);
     expect(read("lib/windowsRelease.ts")).toContain("isPrerelease: false");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B — the ORDERING properties of the sale authorization boundary
+//
+// Structural for the same reason the rest of this file is: the guarded property
+// is an ordering one, and a React component cannot be exercised under this
+// repository's DOM-free vitest environment. Source order can be read, and
+// source order is what makes the boundary atomic.
+// ---------------------------------------------------------------------------
+
+describe("CP-2B: the Done boundary is synchronous and atomic", () => {
+  const runtime = code(read(RUNTIME));
+
+  it("has NO await between the authorization check and the guard claim", () => {
+    const check = runtime.indexOf("if (saleInFlightRef.current || isSubmitBlocked(saleSaveStatus))");
+    const claim = runtime.indexOf("saleInFlightRef.current = true;");
+
+    expect(check).toBeGreaterThan(-1);
+    expect(claim).toBeGreaterThan(check);
+    expect(runtime.slice(check, claim)).not.toContain("await ");
+  });
+
+  it("reads host authority live, inside that same window", () => {
+    const check = runtime.indexOf("if (saleInFlightRef.current || isSubmitBlocked(saleSaveStatus))");
+    const claim = runtime.indexOf("saleInFlightRef.current = true;");
+    const between = runtime.slice(check, claim);
+
+    expect(between).toContain("readHostAuthority?.()");
+    expect(between).toContain("decideSaleAuthorization({");
+  });
+
+  it("claims the guard before the first await of the submission", () => {
+    const claim = runtime.indexOf("saleInFlightRef.current = true;");
+
+    expect(runtime.indexOf("await ", claim)).toBeGreaterThan(claim);
+  });
+
+  it("releases the guard in a finally, so a throw cannot strand it", () => {
+    const fin = runtime.lastIndexOf("} finally {");
+
+    expect(fin).toBeGreaterThan(-1);
+    expect(runtime.slice(fin)).toContain("saleInFlightRef.current = false;");
+  });
+
+  it("establishes the recovery fence BEFORE the finally releases the guard", () => {
+    const katch = runtime.lastIndexOf("} catch {");
+    const fin = runtime.indexOf("} finally {", katch);
+
+    expect(katch).toBeGreaterThan(-1);
+    expect(fin).toBeGreaterThan(katch);
+    expect(runtime.slice(katch, fin)).toContain("setUncertainSale(armedUncertainty);");
+  });
+
+  it("keeps the existing offline fence first and the uncertainty gate intact", () => {
+    const fn = runtime.indexOf("async function completeSale()");
+    const fence = runtime.indexOf("if (checkoutBlockedReason !== null)", fn);
+    const authz = runtime.indexOf("decideSaleAuthorization({", fn);
+
+    expect(fence).toBeGreaterThan(fn);
+    expect(authz).toBeGreaterThan(fence);
+    expect(runtime).toContain("isSubmitBlocked(saleSaveStatus)");
+    expect(runtime).toContain("decideUncertainSale(");
+    expect(runtime).toContain("createSaleFingerprint({");
+  });
+
+  it("captures the prepared authority on open and drops it on close", () => {
+    expect(runtime).toContain("preparedAuthorityRef.current = readHostAuthority?.() ?? null;");
+    expect(runtime).toContain("preparedAuthorityRef.current = null;");
+  });
+
+  it("fabricates no tender authorization before CP-2C", () => {
+    expect(runtime).toContain("tender: { required: false },");
+    expect(runtime).not.toContain("consumed: true");
+  });
+});
+
+describe("CP-2B: the host writes its authority synchronously", () => {
+  const app = code(read(DEVICE_APP));
+
+  it("writes the gate ref synchronously at EVERY transition", () => {
+    // THE PROPERTY. The effect that mirrors `gate` into the ref runs only after
+    // React commits, so between any setGate and that commit the ref still held
+    // the PREVIOUS gate — and checkout reads the ref, not the state. Every
+    // transition must therefore write the ref in its own turn.
+    //
+    // Asserted over the source rather than by renaming the setter, because
+    // three guard files outside this one assert on the literal `setGate(`.
+    const lines = app.split("\n");
+    const unguarded: string[] = [];
+
+    lines.forEach((line, index) => {
+      if (!line.includes("setGate(") || line.includes("const [gate, setGate]")) return;
+
+      const before = lines.slice(Math.max(0, index - 6), index).join("\n");
+
+      if (!before.includes("gateRef.current =")) unguarded.push(line.trim());
+    });
+
+    expect(unguarded).toEqual([]);
+  });
+
+  it("writes the ref BEFORE the state at every transition", () => {
+    const lines = app.split("\n");
+
+    lines.forEach((line, index) => {
+      if (!line.includes("setGate(") || line.includes("const [gate, setGate]")) return;
+
+      const before = lines.slice(Math.max(0, index - 6), index).join("\n");
+
+      // The ref write precedes the state write, never the other way round.
+      expect(before.lastIndexOf("gateRef.current =")).toBeGreaterThan(-1);
+    });
+  });
+
+  it("evaluates a gate transition exactly once, never twice", () => {
+    // Hoisting the ref write must not re-run the transition: a site written as
+    // `gateRef.current = f(gateRef.current); setGate(f(gateRef.current));`
+    // would apply f twice, the second time to an already-updated gate.
+    expect(app).not.toMatch(/gateRef\.current = (\w+)\(gateRef\.current[^;]*\);\s*\n\s*setGate\(\1\(/);
+  });
+
+  it("reads every authority value from a ref, never from a render closure", () => {
+    const fn = app.indexOf("const readHostAuthority = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, []);", fn));
+
+    expect(body).toContain("gateRef.current");
+    expect(body).toContain("readyPairingRef.current");
+    expect(body).toContain("recoveryRef.current");
+    expect(body).toContain("authorityEpochRef.current");
+  });
+
+  it("folds the identities into ONE opaque token, keeping them out of the runtime", () => {
+    // PosRuntime "knows nothing about employees, registers or attribution" —
+    // posGate.guards.test.ts enforces that. The host therefore collapses every
+    // fact that must not change mid-order into a token the runtime compares
+    // for equality and never interprets.
+    const fn = app.indexOf("const readHostAuthority = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, []);", fn));
+
+    expect(body).toContain("const authorityToken = [");
+    expect(body).toContain("currentGate.employee.employeeSessionId");
+    expect(body).toContain("currentGate.daily.registerSessionId");
+    expect(body).toContain("pairing.buildJobId");
+    expect(body).toContain("String(authorityEpochRef.current)");
+
+    // v1.3 CP-2B FINAL — AND THE READ WRITES NOTHING.
+    //
+    // It previously recorded the prepared token on its first call, which froze
+    // an authorization that was never reset, and advanced the epoch whenever it
+    // happened to notice a new pairing. Both are gone: preparation is minted
+    // only by prepareCheckoutAuthorization, and the epoch is advanced at the
+    // transitions themselves.
+    for (const write of [
+      "preparedTokenRef",
+      "checkoutAuthRef.current =",
+      "authorizedAttemptRef.current =",
+      "checkoutGenerationRef.current +=",
+      "authorityEpochRef.current +=",
+      "advanceAuthorityEpoch()",
+      "saleFenceRef.current =",
+      "recoveryRef.current =",
+    ]) {
+      expect(body, `readHostAuthority must not write ${write}`).not.toContain(write);
+    }
+
+    const runtimeSource = code(read(RUNTIME));
+
+    expect(runtimeSource).toContain("authorityToken: string;");
+    expect(runtimeSource).not.toContain("registerSessionId");
+    expect(runtimeSource).not.toContain("employeePosSessionId");
+  });
+
+  it("advances the authority epoch at every transition, never at the read", () => {
+    // buildJobId alone cannot see a re-resolution that kept the same pin, and a
+    // COMPARISON cannot see an identity that returned to its former value. Only
+    // a counter advanced at each transition can, so every synchronous write to
+    // either authority source must be followed by an advance.
+    //
+    // The passive effect that mirrors `gate` into the ref is deliberately NOT
+    // instrumented and must not be: an effect runs after the commit, and a sale
+    // can be dispatched in between.
+    const lines = app.split("\n");
+    const unadvanced: string[] = [];
+
+    lines.forEach((line, index) => {
+      const isWrite =
+        line.includes("gateRef.current = ") || line.includes("readyPairingRef.current = ");
+
+      if (!isWrite) return;
+
+      // The mirror effect, which is the one site that must stay a pure mirror.
+      if (line.includes("gateRef.current = gate;")) return;
+
+      if (!lines.slice(index + 1, index + 2).join("").includes("advanceAuthorityEpoch();")) {
+        unadvanced.push(`${index + 1}: ${line.trim()}`);
+      }
+    });
+
+    expect(unadvanced).toEqual([]);
+
+    // And the advance both bumps the epoch and drops the open authorization —
+    // two independent barriers, so a token that somehow repeated would still
+    // have no prepared record left to match.
+    const fn = app.indexOf("function advanceAuthorityEpoch() {");
+    const body = app.slice(fn, app.indexOf("\n  }", fn));
+
+    expect(fn).toBeGreaterThan(-1);
+    expect(body).toContain("authorityEpochRef.current += 1;");
+    expect(body).toContain("checkoutAuthRef.current = null;");
+    expect(body).toContain("authorizedAttemptRef.current = null;");
+
+    // IT NEVER TOUCHES DURABLE RECOVERY. An authority change abandons a local
+    // intention; it cannot un-send a request that already left the device.
+    expect(body).not.toContain("saleFenceRef");
+    expect(body).not.toContain("recoveryRef");
+  });
+
+  it("fails closed with no employee, no register or no ready pairing", () => {
+    const fn = app.indexOf("const readHostAuthority = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, []);", fn));
+
+    expect(body).toContain("return null;");
+    expect(body).toContain("pairing === null");
+  });
+
+  it("starts recovery pending and re-pends on every re-read", () => {
+    expect(app).toContain("useRef<RecoveryAuthority>(PENDING_RECOVERY_AUTHORITY)");
+    expect(app).toContain("recoveryRef.current = PENDING_RECOVERY_AUTHORITY;");
+  });
+
+  it("discards a late recovery result from an obsolete generation", () => {
+    expect(app).toContain("recoveryGenerationRef.current += 1;");
+    expect(app).toContain("readGeneration === recoveryGenerationRef.current");
+  });
+
+  it("hands PosRuntime a function, not a captured value", () => {
+    expect(app).toContain("readHostAuthority={readHostAuthority}");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B corrections — the three blockers, structurally
+// ---------------------------------------------------------------------------
+
+describe("CP-2B corrections: the fence and the two final gates", () => {
+  const app = code(read(DEVICE_APP));
+  const runtime = code(read(RUNTIME));
+
+  it("raises the fence BEFORE awaiting the durable arm", () => {
+    const fn = app.indexOf("const armOnlineSale: PosRuntimeArmOnlineSale");
+    const fence = app.indexOf('saleFenceRef.current = {', fn);
+    const await_ = app.indexOf("await armUncertainSale(", fn);
+
+    expect(fence).toBeGreaterThan(fn);
+    expect(await_).toBeGreaterThan(fence);
+    // And nothing is awaited between raising it and the arm.
+    expect(app.slice(fence, await_)).not.toContain("await ");
+  });
+
+  it("invalidates in-flight hydration when the fence goes up", () => {
+    const fn = app.indexOf("const armOnlineSale: PosRuntimeArmOnlineSale");
+    const body = app.slice(fn, app.indexOf("await armUncertainSale(", fn));
+
+    expect(body).toContain("recoveryGenerationRef.current += 1;");
+    expect(body).toContain("recoveryRef.current = PENDING_RECOVERY_AUTHORITY;");
+  });
+
+  it("publishes the outstanding identity synchronously on a successful arm", () => {
+    const fn = app.indexOf("const armOnlineSale: PosRuntimeArmOnlineSale");
+    const body = app.slice(fn, app.indexOf("const queueOfflineSale", fn));
+
+    expect(body).toContain('recoveryRef.current = { status: "outstanding", sale };');
+    // Before returning, not via a React commit.
+    const publish = body.indexOf('recoveryRef.current = { status: "outstanding", sale };');
+    const ret = body.indexOf("return true;", publish);
+
+    expect(ret).toBeGreaterThan(publish);
+  });
+
+  it("verifies the store after an ambiguous arm instead of assuming absence", () => {
+    const fn = app.indexOf("const armOnlineSale: PosRuntimeArmOnlineSale");
+    const body = app.slice(fn, app.indexOf("const queueOfflineSale", fn));
+
+    expect(body).toContain("const verified = await readRecoveryAuthority(identity);");
+    expect(body).toContain('verified.status === "verified_clear"');
+  });
+
+  it("keeps the fence through resolution until absence is proven", () => {
+    const fn = app.indexOf("const resolveOnlineSale: PosRuntimeResolveOnlineSale");
+    const body = app.slice(fn, fn + 2600);
+
+    expect(body).toContain("recoveryRef.current = PENDING_RECOVERY_AUTHORITY;");
+    expect(body).toContain("await readRecoveryAuthority({");
+
+    // The fence is only released on a verified-clear reconciliation.
+    const clear = body.indexOf('verified.status === "verified_clear"');
+    const idle = body.indexOf('saleFenceRef.current = { status: "idle" };', clear);
+
+    expect(clear).toBeGreaterThan(-1);
+    expect(idle).toBeGreaterThan(clear);
+  });
+
+  it("gates the ONLINE dispatch inside the host, before the RPC", () => {
+    const fn = app.indexOf("const completeSale: PosRuntimeCompleteSale");
+    const gate = app.indexOf("const dispatch = verifySubmittedSale({", fn);
+    const rpc = app.indexOf("await completeDeviceSaleV5({", fn);
+
+    expect(gate).toBeGreaterThan(fn);
+    expect(rpc).toBeGreaterThan(gate);
+    expect(app.slice(gate, rpc)).not.toContain("await ");
+  });
+
+  it("gates the OFFLINE enqueue after eligibility and before the durable write", () => {
+    const fn = app.indexOf("const queueOfflineSale: PosRuntimeQueueOfflineSale");
+    const existing = app.indexOf("canCheckoutOffline(gateRef.current)", fn);
+    const gate = app.indexOf("const offlineDispatch = verifySubmittedSale({", fn);
+    const durable = app.indexOf("await completeOfflineSale({", fn);
+
+    // The existing check is preserved and still runs first.
+    expect(existing).toBeGreaterThan(fn);
+    expect(gate).toBeGreaterThan(existing);
+    expect(durable).toBeGreaterThan(gate);
+    expect(app.slice(gate, durable)).not.toContain("await ");
+  });
+
+  it("compares the PREPARED generation and token, never a value with itself", () => {
+    const fn = app.indexOf("const decideSaleDispatch = useCallback(");
+    const body = app.slice(fn, app.indexOf("[readHostAuthority]", fn));
+
+    expect(body).toContain("const prepared = checkoutAuthRef.current;");
+    // THREE facts, and the generation comes from the RUNTIME while the
+    // comparand comes from the HOST.
+    expect(body).toContain("prepared === null");
+    expect(body).toContain("prepared.generation !== attempt.checkoutGeneration");
+    expect(body).toContain("prepared.token !== live.authorityToken");
+
+    // The frozen single-token ref is gone from the whole component.
+    expect(app).not.toContain("preparedTokenRef");
+  });
+
+  it("authorizes only an EXACT replay against an outstanding identity", () => {
+    const fn = app.indexOf("const decideSaleDispatch = useCallback(");
+    const body = app.slice(fn, app.indexOf("[readHostAuthority]", fn));
+
+    expect(body).toContain("fence.requestId === attempt.requestId");
+    expect(body).toContain("fence.fingerprint === attempt.fingerprint");
+    expect(body).toContain('decision: "resume_exact"');
+  });
+
+  it("the runtime asks the host immediately before each dispatch", () => {
+    const online = runtime.indexOf("const dispatchAuthorization = authorizeSaleDispatch?.({");
+    const submit = runtime.indexOf("await submitSale({", online);
+
+    expect(online).toBeGreaterThan(-1);
+    expect(submit).toBeGreaterThan(online);
+    expect(runtime.slice(online, submit)).not.toContain("await ");
+
+    const offline = runtime.indexOf("const offlineAuthorization = authorizeSaleDispatch?.({");
+    const queue = runtime.indexOf("await queueOfflineSale({", offline);
+
+    expect(offline).toBeGreaterThan(-1);
+    expect(queue).toBeGreaterThan(offline);
+    expect(runtime.slice(offline, queue)).not.toContain("await ");
+  });
+
+  it("a refused dispatch preserves the armed identity and mints nothing", () => {
+    const at = runtime.indexOf('if (dispatchAuthorization.decision === "blocked")');
+    const body = runtime.slice(at, at + 400);
+
+    expect(at).toBeGreaterThan(-1);
+    expect(body).toContain("return;");
+    // No resolution, no new identity on the refusal path.
+    expect(body).not.toContain("resolveOnlineSale");
+    expect(body).not.toContain("createSaleRequestId");
+  });
+
+  it("keeps the runtime free of employee, register and recovery internals", () => {
+    for (const banned of ["registerSessionId", "employeePosSessionId", "recoveryRef", "saleFenceRef"]) {
+      expect(`${RUNTIME}: ${banned}`).toBe(`${RUNTIME}: ${banned}`);
+      expect(runtime).not.toContain(banned);
+    }
+  });
+
+  it("the host still imports no persistence primitive of its own", () => {
+    expect(app).toContain('from "@/lib/recoveryAuthority"');
+    expect(app).not.toContain("openOfflineDb");
+    expect(app).not.toContain("readUncertainSaleRecordRaw");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.3 CP-2B FINAL — the three contracts, structurally
+// ---------------------------------------------------------------------------
+
+describe("CP-2B final: the checkout authorization lifecycle", () => {
+  const app = code(read(DEVICE_APP));
+  const runtime = code(read(RUNTIME));
+
+  it("mints a generation in ONE place, and only at a permitted preparation", () => {
+    // THE DEFECT THIS CLOSES. preparedTokenRef was written once, under
+    // `if (preparedTokenRef.current === null)`, and never reset — so after any
+    // legitimate authority change the prepared token could never again equal
+    // the live one and every later sale was refused for the life of the
+    // process. The replacement is minted deliberately, and only here.
+    const mints = [...app.matchAll(/checkoutGenerationRef\.current \+= 1;/g)];
+
+    expect(mints).toHaveLength(1);
+
+    const fn = app.indexOf("const prepareCheckoutAuthorization = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, [readHostAuthority]);", fn));
+
+    expect(fn).toBeGreaterThan(-1);
+    expect(body).toContain("checkoutGenerationRef.current += 1;");
+
+    // v1.3 CP-2B RECOVERY — TWO SCOPES, AND EVERY REFUSAL BEFORE THE MINT.
+    //
+    // This previously asserted a blanket refusal on any non-idle fence and on
+    // anything other than `verified_clear`. That was the defect: it refused on
+    // `outstanding`, which is KNOWLEDGE, so no generation was ever minted and
+    // the exact-recovery path became unreachable. The replacement asserts the
+    // explicit distinction rather than the blanket refusal, which is strictly
+    // more than the old assertion checked.
+    const arming = body.indexOf('fence.status === "arming"');
+    const pending = body.indexOf('recovery.status === "pending" || recovery.status === "blocked"');
+    const idle = body.indexOf('fence.status === "idle"');
+    const clear = body.indexOf('recovery.status !== "verified_clear"');
+    const policy = body.indexOf("decideUncertainSale(outstanding, fence.fingerprint)");
+    const mismatch = body.indexOf('identity.status !== "resume" || identity.saleRequestId !== fence.requestId');
+    const mint = body.indexOf("checkoutGenerationRef.current += 1;");
+
+    // Still refused: an in-flight durable write, and a store that has not
+    // answered or could not be read.
+    expect(arming, "arming is not refused").toBeGreaterThan(-1);
+    expect(pending, "pending/blocked recovery is not refused").toBeGreaterThan(-1);
+
+    // The ordinary branch still demands POSITIVE clearance.
+    expect(idle, "the new-sale branch is not keyed on an idle fence").toBeGreaterThan(-1);
+    expect(clear, "the new-sale branch does not require verified_clear").toBeGreaterThan(-1);
+
+    // The recovery branch validates the durable identity through the EXISTING
+    // recovery policy, not by trusting the fence alone.
+    expect(policy, "the recovery branch does not consult decideUncertainSale").toBeGreaterThan(-1);
+    expect(mismatch, "a mismatched durable identity is not refused").toBeGreaterThan(-1);
+
+    // And both scopes are recorded explicitly.
+    expect(body).toContain('scope = { kind: "new_sale" };');
+    expect(body).toContain('kind: "exact_recovery"');
+
+    // NOTHING IS MINTED UNTIL EVERY REFUSAL HAS BEEN PASSED.
+    for (const [name, at] of [
+      ["arming", arming],
+      ["pending/blocked", pending],
+      ["verified_clear", clear],
+      ["recovery policy", policy],
+      ["identity mismatch", mismatch],
+    ] as const) {
+      expect(mint, `the generation is minted before the ${name} refusal`).toBeGreaterThan(at);
+    }
+  });
+
+  it("the recorded scope is BINDING at dispatch, and checked before the fence", () => {
+    const fn = app.indexOf("const decideSaleDispatch = useCallback(");
+    const body = app.slice(fn, app.indexOf("[readHostAuthority]", fn));
+    const scope = body.indexOf('prepared.scope.kind === "exact_recovery"');
+    const fence = body.indexOf("const fence = saleFenceRef.current;");
+
+    expect(scope, "the scope is not enforced at dispatch").toBeGreaterThan(-1);
+    expect(fence).toBeGreaterThan(scope);
+
+    // An exact-recovery checkout may dispatch ONLY the identity it was scoped
+    // to — neither a different id nor a different fingerprint.
+    expect(body).toContain("attempt.requestId !== prepared.scope.requestId");
+    expect(body).toContain("attempt.fingerprint !== prepared.scope.fingerprint");
+
+    // A new_sale scope is deliberately NOT required to match an identity: the
+    // in-process replay of a checkout's own UNKNOWN sale must stay reachable.
+    expect(body).not.toContain('prepared.scope.kind === "new_sale" &&');
+  });
+
+  it("invalidation is generation-scoped, so a late callback cannot strand a new checkout", () => {
+    const fn = app.indexOf("const invalidateCheckoutAuthorization = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, []);", fn));
+
+    expect(fn).toBeGreaterThan(-1);
+    // The guard that makes a delayed close from an OLDER checkout harmless.
+    expect(body).toContain("held === null || held.generation !== generation");
+    expect(body).toContain("checkoutAuthRef.current = null;");
+
+    // AND IT NEVER RELEASES DURABLE RECOVERY.
+    expect(body).not.toContain("saleFenceRef");
+    expect(body).not.toContain("recoveryRef");
+    expect(body).not.toContain("setUncertainSale");
+  });
+
+  it("the runtime prepares at open and invalidates at close and at both successes", () => {
+    expect(runtime).toContain("const preparation = prepareCheckoutAuthorization();");
+    // Preserved: the legacy capture for a host with no preparation function.
+    expect(runtime).toContain("preparedAuthorityRef.current = readHostAuthority?.() ?? null;");
+    expect(runtime).toContain("preparedAuthorityRef.current = null;");
+
+    const invalidations = [...runtime.matchAll(/invalidateCheckoutAuthorization\?\.\(/g)];
+
+    // close + offline success + online success.
+    expect(invalidations).toHaveLength(3);
+
+    const close = runtime.indexOf("function closeCheckout()");
+    const closeBody = runtime.slice(close, runtime.indexOf("function selectPaymentMethod(", close));
+
+    expect(closeBody).toContain("invalidateCheckoutAuthorization?.(finished.generation);");
+    // The durable fence survives the close, exactly as uncertainSale does.
+    expect(closeBody).not.toContain("setUncertainSale");
+  });
+
+  it("a stale checkout cannot re-prepare itself", () => {
+    // Preparation is reachable ONLY from the open boundary. If Done could call
+    // it, a checkout whose authority had moved would simply re-authorize
+    // itself, and the whole lifecycle would be decorative.
+    const done = runtime.indexOf("async function completeSale()");
+    const body = runtime.slice(done);
+
+    expect(done).toBeGreaterThan(-1);
+    expect(body).not.toContain("prepareCheckoutAuthorization");
+
+    const open = runtime.indexOf("function openCheckout()");
+    const openBody = runtime.slice(open, runtime.indexOf("function closeCheckout()", open));
+
+    expect(openBody).toContain("prepareCheckoutAuthorization();");
+  });
+
+  it("presents the prepared generation at BOTH dispatch gates, and never a sentinel id", () => {
+    for (const site of [
+      "const offlineAuthorization = authorizeSaleDispatch?.({",
+      "const dispatchAuthorization = authorizeSaleDispatch?.({",
+    ]) {
+      const at = runtime.indexOf(site);
+      const body = runtime.slice(at, runtime.indexOf("});", at));
+
+      expect(at, `${site} is missing`).toBeGreaterThan(-1);
+      expect(
+        body,
+        `${site} does not present the prepared generation`
+      ).toContain("checkoutGeneration: preparedCheckoutRef.current?.generation ?? -1,");
+    }
+
+    // The offline path names an explicit typed absence, not an empty string.
+    expect(runtime).toContain("requestId: resumed?.id ?? null,");
+    expect(runtime).not.toContain('requestId: resumed?.id ?? "",');
+  });
+
+  it("refuses Done outright when the host refused to prepare the checkout", () => {
+    const at = runtime.indexOf("if (prepareRefusalRef.current !== null) {");
+    const claim = runtime.indexOf("saleInFlightRef.current = true;");
+
+    expect(at).toBeGreaterThan(-1);
+    // Before the claim, and before anything is planned, armed or sent.
+    expect(claim).toBeGreaterThan(at);
+    expect(runtime.slice(at, claim)).not.toContain("await ");
+  });
+});
+
+describe("CP-2B final: the submitted payload is verified independently", () => {
+  const app = code(read(DEVICE_APP));
+
+  it("reconstructs the ONLINE fingerprint from the submitted input, not from the fence", () => {
+    const fn = app.indexOf("const completeSale: PosRuntimeCompleteSale");
+    const build = app.indexOf("const submittedFingerprint = createSaleFingerprint({", fn);
+    const gate = app.indexOf("const dispatch = verifySubmittedSale({", fn);
+    const rpc = app.indexOf("await completeDeviceSaleV5({", fn);
+    const body = app.slice(build, gate);
+
+    expect(build).toBeGreaterThan(fn);
+    expect(gate).toBeGreaterThan(build);
+    expect(rpc).toBeGreaterThan(gate);
+
+    // EVERY value comes from the payload. Not one of them is read back out of
+    // the fence the comparison exists to test.
+    expect(body).toContain("projectId: input.projectId,");
+    expect(body).toContain("paymentMethod: input.paymentMethod,");
+    expect(body).toContain("tipAmount: input.tipAmount,");
+    expect(body).toContain("lineKey: canonicalLineIdentity(item.itemId, item.modifiers),");
+    expect(body).toContain("quantity: item.quantity,");
+    expect(body).not.toContain("saleFenceRef");
+
+    // And the submitted fingerprint — never the fence's — is what is verified.
+    expect(app.slice(gate, rpc)).toContain("fingerprint: submittedFingerprint,");
+  });
+
+  it("reconstructs the OFFLINE fingerprint from the submitted cart and the host's own project", () => {
+    const fn = app.indexOf("const queueOfflineSale: PosRuntimeQueueOfflineSale");
+    const existing = app.indexOf("canCheckoutOffline(gateRef.current)", fn);
+    const build = app.indexOf("const submittedOfflineFingerprint = createSaleFingerprint({", fn);
+    const gate = app.indexOf("const offlineDispatch = verifySubmittedSale({", fn);
+    const durable = app.indexOf("await completeOfflineSale({", fn);
+    const body = app.slice(build, gate);
+
+    // The existing eligibility check is preserved and still runs first.
+    expect(existing).toBeGreaterThan(fn);
+    expect(build).toBeGreaterThan(existing);
+    expect(gate).toBeGreaterThan(build);
+    expect(durable).toBeGreaterThan(gate);
+    // Nothing is awaited between the verdict and the durable write.
+    expect(app.slice(gate, durable)).not.toContain("await ");
+
+    // THE PROJECT COMES FROM THE HOST'S SESSION, not from the caller.
+    expect(body).toContain("projectId: eligibility.session.projectId,");
+    expect(body).toContain("paymentMethod: input.paymentMethod,");
+    expect(body).toContain("tipAmount: input.tipAmount,");
+    // CartItem already carries lineKey, built by the same canonical call.
+    expect(body).toContain("items: input.cart,");
+    expect(body).not.toContain("saleFenceRef");
+
+    // The original draft identity is preserved, never replaced.
+    expect(app.slice(gate, durable)).toContain("requestId: drafted.draft.saleRequestId,");
+  });
+
+  it("never compares a fingerprint with itself at either gate", () => {
+    // THE DEFECT THIS CLOSES, stated as a ban. Both gates used to pass
+    // `saleFenceRef.current.fingerprint` in as the attempt's fingerprint, and
+    // the gate then compared it with `saleFenceRef.current.fingerprint` — true
+    // whenever the fence was armed, for every payload, verifying nothing.
+    expect(app).not.toContain('saleFenceRef.current.status === "idle"\n          ? ""');
+    expect(app).not.toContain("fingerprint: saleFenceRef.current.fingerprint");
+
+    for (const fn of [
+      "const completeSale: PosRuntimeCompleteSale",
+      "const queueOfflineSale: PosRuntimeQueueOfflineSale",
+    ]) {
+      const at = app.indexOf(fn);
+      const body = app.slice(at, app.indexOf("\n  );", at));
+
+      expect(at, `${fn} is missing`).toBeGreaterThan(-1);
+      expect(body, `${fn} reads the fence it is supposed to verify against`).not.toContain(
+        "saleFenceRef"
+      );
+    }
+  });
+
+  it("the verifier compares two independently sourced values, then re-runs the whole gate", () => {
+    const fn = app.indexOf("const verifySubmittedSale = useCallback(");
+    const body = app.slice(fn, app.indexOf("}, [decideSaleDispatch]);", fn));
+
+    expect(fn).toBeGreaterThan(-1);
+    // authorized: recorded from what the RUNTIME presented.
+    // submitted:  reconstructed from what is ACTUALLY being dispatched.
+    expect(body).toContain("const authorized = authorizedAttemptRef.current;");
+    expect(body).toContain("authorized.fingerprint !== submitted.fingerprint");
+    expect(body).toContain("authorized.requestId !== null && authorized.requestId !== submitted.requestId");
+    // An unauthorized payload is refused outright, never defaulted to allowed.
+    expect(body).toContain("authorized === null");
+    // And the full gate runs again, on the reconstructed value.
+    expect(body).toContain("return decideSaleDispatch({");
+    expect(body).toContain("fingerprint: submitted.fingerprint,");
+  });
+
+  it("requires BOTH identity authorities to agree before an exact replay", () => {
+    const fn = app.indexOf("const decideSaleDispatch = useCallback(");
+    const body = app.slice(fn, app.indexOf("[readHostAuthority]", fn));
+
+    // The fence knows what this process put in flight. decideUncertainSale
+    // answers from what the durable store reports. Neither alone is sufficient.
+    expect(body).toContain("const identity = decideUncertainSale(outstanding, attempt.fingerprint);");
+    expect(body).toContain("fence.requestId === attempt.requestId");
+    expect(body).toContain("fence.fingerprint === attempt.fingerprint");
+    expect(body).toContain('identity.status === "resume"');
+    expect(body).toContain("identity.saleRequestId === fence.requestId");
+    expect(body).toContain('decision: "resume_exact"');
+  });
+
+  it("rebuilds the fence from the record on remount, under the original identity", () => {
+    const at = app.indexOf("if (authority.status === \"outstanding\") {");
+    const body = app.slice(at, app.indexOf("setUncertainSale(authority.status", at));
+
+    expect(at).toBeGreaterThan(-1);
+    expect(body).toContain("requestId: authority.sale.saleRequestId,");
+    expect(body).toContain("fingerprint: authority.sale.fingerprint,");
+    expect(body).toContain('status: "unresolved"');
+    // Only a successful read PROVING absence lowers it; `blocked` changes
+    // nothing at all.
+    expect(body).toContain('authority.status === "verified_clear"');
+    expect(body).toContain('saleFenceRef.current = { status: "idle" };');
+    expect(body).not.toContain("createSaleRequestId");
+    expect(body).not.toContain("randomUUID");
   });
 });

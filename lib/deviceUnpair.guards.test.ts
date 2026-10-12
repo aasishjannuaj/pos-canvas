@@ -41,6 +41,8 @@ function status(patch: Partial<OfflineSaleStatus> = {}): OfflineSaleStatus {
     total: 0,
     nextRetryAt: null,
     uncertainOnlineSale: false,
+    // v1.3 CP-2R — these fixtures describe storage that WAS read.
+    evidenceReadable: true,
     ...patch,
   };
 }

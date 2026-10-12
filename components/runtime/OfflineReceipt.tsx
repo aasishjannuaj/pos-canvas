@@ -5,6 +5,8 @@ import {
   OFFLINE_RECEIPT_EXPLANATION_LINES,
   OFFLINE_RECEIPT_REFERENCE_LABEL,
 } from "@/lib/provisionalReceipt";
+import CashTenderReceiptLines from "@/components/runtime/CashTenderReceiptLines";
+import type { CashTenderOutcome } from "@/lib/cashTenderEntry";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 
 // Feature 24.5E — the receipt for a sale saved on this device.
@@ -36,6 +38,15 @@ import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
 type OfflineReceiptProps = {
   receipt: ProvisionalReceipt;
   presentation: ResolvedReceiptPresentation;
+  /**
+   * v1.3 CP-2C — what the cash sale was settled with.
+   *
+   * PRESENTATION ONLY, AND IT CHANGES NO FIGURE ON THIS RECEIPT. Every amount
+   * above still comes from the payload; these two lines sit below the Total and
+   * describe how the money crossed the counter. Absent, null, or present
+   * alongside a card payment, nothing is printed — see cashTenderReceiptLines.
+   */
+  cashTender?: CashTenderOutcome | null;
 };
 
 function formatReceiptDateTime(value: string): string {
@@ -51,7 +62,11 @@ function formatReceiptDateTime(value: string): string {
   });
 }
 
-export default function OfflineReceipt({ receipt, presentation }: OfflineReceiptProps) {
+export default function OfflineReceipt({
+  receipt,
+  presentation,
+  cashTender = null,
+}: OfflineReceiptProps) {
   const { businessProfile, receipt: receiptSettings, currencySymbol } = presentation;
 
   const addressLines = [
@@ -172,6 +187,13 @@ export default function OfflineReceipt({ receipt, presentation }: OfflineReceipt
             {receipt.total}
           </span>
         </div>
+
+        <CashTenderReceiptLines
+          paymentMethod={receipt.paymentMethod}
+          outcome={cashTender}
+          receiptTotalFixed={receipt.total}
+          currencySymbol={currencySymbol}
+        />
 
         {/* A LABEL, never an authorization. POS Canvas does not process, approve
             or capture a card payment online, and it must not appear to do so

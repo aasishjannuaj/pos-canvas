@@ -109,6 +109,13 @@ export const KNOWN_SERVER_ERRORS: Readonly<Record<string, string>> = {
   // Contract — the request itself is not acceptable.
   "Invalid sale source": "invalid_source",
   "Sale request ID was already used for a different order": "hash_conflict",
+  // v1.3 CP-2B — a NEW offline sale whose original register claim could not be
+  // verified. DEFINITIVE, not transport: the claim will not heal by itself, so
+  // this must land in needs_attention rather than retry. Without this entry the
+  // message still classifies as needs_attention via the
+  // `unrecognised_server_error` fallback below; the entry exists to give the
+  // operator-facing surface a stable, specific code.
+  "A register session is required for an offline sale": "register_unverified",
   "Tips are not supported on this device": "tip_rejected",
   "Invalid payment method": "invalid_payment_method",
   "A sale request ID is required": "missing_request_id",

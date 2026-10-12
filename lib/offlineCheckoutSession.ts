@@ -39,7 +39,7 @@ import {
 import { summarizeQueue } from "@/lib/saleQueue";
 import type { QueuedSale } from "@/lib/saleQueue";
 import { earliestRetryAt, toOfflineSaleStatus } from "@/lib/offlineSaleStatus";
-import { hasUncertainSaleEvidence } from "@/lib/uncertainSaleSession";
+import { readUncertainSaleEvidence } from "@/lib/uncertainSaleSession";
 import type { OfflineSaleStatus } from "@/lib/offlineSaleStatus";
 import {
   openOfflineDb,
@@ -292,8 +292,19 @@ export async function reconstructProvisionalReceipt(input: {
  */
 export async function readOfflineSaleStatus(): Promise<OfflineSaleStatus> {
   const listing = await listQueuedSales();
+  // v1.3 CP-2R — THREE ANSWERS, not two. `unreadable` is what distinguishes a
+  // device with no outstanding request from one that could not look.
+  const evidence = await readUncertainSaleEvidence();
 
-  if (!listing.ok) {
+  if (!listing.ok || evidence === "unreadable") {
+    // THE COUNTS ARE UNKNOWN, NOT ZERO.
+    //
+    // This used to answer a failed read with zeros, which reached
+    // decideDeviceResetSafety as "nothing outstanding" and cleared the device
+    // to reset, unpair or apply a configuration over records it had never
+    // managed to read. The zeros remain — there is genuinely nothing to count —
+    // but evidenceReadable now says they mean nothing, and the gate refuses on
+    // that alone.
     return {
       waiting: 0,
       needsAttention: 0,
@@ -301,7 +312,9 @@ export async function readOfflineSaleStatus(): Promise<OfflineSaleStatus> {
       unsynced: 0,
       total: 0,
       nextRetryAt: null,
-      uncertainOnlineSale: await hasUncertainSaleEvidence(),
+      // A record that IS there still blocks, even if the queue read failed.
+      uncertainOnlineSale: evidence === "present",
+      evidenceReadable: false,
     };
   }
 
@@ -314,7 +327,9 @@ export async function readOfflineSaleStatus(): Promise<OfflineSaleStatus> {
     earliestRetryAt(listing.value.sales),
     // Feature 24.5F — evidence, not a queue row. Read alongside so the reset
     // gate and the cashier's counts describe one consistent moment.
-    await hasUncertainSaleEvidence()
+    evidence === "present",
+    // Both reads succeeded, so the counts above mean what they say.
+    true
   );
 }
 
