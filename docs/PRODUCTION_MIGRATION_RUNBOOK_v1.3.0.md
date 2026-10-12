@@ -6,7 +6,7 @@
 > **not** been contacted during its preparation, and no migration below has been
 > applied to production or to staging as part of writing this runbook.
 
-This runbook covers the 14 migrations that take production from the v1.2.0
+This runbook covers the 15 migrations that take production from the v1.2.0
 baseline to the v1.3.0 schema. It is written against the migration files as they
 exist in the tree, and every claim below was read out of those files rather than
 recalled.
@@ -17,9 +17,9 @@ recalled.
 
 | Fact | Expected value |
 |---|---|
-| Total migrations in the v1.3.0 tree | **35** |
+| Total migrations in the v1.3.0 tree | **36** |
 | v1.2.0 baseline migrations, already applied to production | **21** |
-| v1.3.0 migrations to apply | **14** |
+| v1.3.0 migrations to apply | **15** |
 | Released product in production | **v1.2.0** |
 | Employee tables (`employees`, `employee_pos_sessions`, …) | **absent** — every one is created by this release |
 | `register_sessions`, `employee_time_sessions`, `cash_movements` | **absent** — created by this release |
@@ -35,7 +35,7 @@ does not describe it.
 Confirm the baseline before doing anything else:
 
 ```sql
--- Expect 21 rows, and none of the 14 filenames in §3.
+-- Expect 21 rows, and none of the 15 filenames in §3.
 select name from supabase_migrations.schema_migrations order by version;
 ```
 
@@ -81,6 +81,45 @@ select proname from pg_proc p
 join pg_namespace n on n.oid = p.pronamespace
 where n.nspname = 'public' and proname like 'complete_sale_v%'
 order by proname;
+
+-- 6. MIGRATION 15 PREREQUISITE — the exact eight-argument signature.
+--
+-- Run this AGAIN immediately before migration 15, not only here: 15 is a
+-- `create or replace`, and `create or replace` only replaces in place while the
+-- argument list is identical. A changed default or a reordered parameter leaves
+-- the old function standing beside the new one and PostgreSQL chooses between
+-- them by overload resolution.
+select count(*) as definitions from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'complete_sale_v5';
+-- Expect exactly 1.
+
+select pg_get_function_identity_arguments(p.oid) as signature,
+       p.prosecdef                               as security_definer,
+       array_to_string(p.proconfig, ',')          as settings
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'complete_sale_v5';
+-- Expect exactly one row:
+--   signature        = p_payment_method text, p_tip_amount numeric,
+--                      p_items jsonb, p_sale_request_id uuid,
+--                      p_occurred_at timestamp with time zone, p_source text,
+--                      p_employee_pos_session_id uuid,
+--                      p_register_session_id uuid
+--   security_definer = t
+--   settings         = search_path=public, pg_temp
+
+-- 7. MIGRATION 15 PREREQUISITE — the predecessor ACL it inherits.
+--
+-- Migration 15 restates the revokes from `public` and `anon` but NOT from
+-- `service_role`. That is safe ONLY because migrations 4 and 8 already revoked
+-- it and `create or replace` preserves an existing ACL. Confirm it is already
+-- revoked BEFORE applying 15.
+select r.rolname,
+       has_function_privilege(r.rolname,
+         'public.complete_sale_v5(text,numeric,jsonb,uuid,timestamptz,text,uuid,uuid)',
+         'EXECUTE') as may_execute
+from (values ('public'),('anon'),('authenticated'),('service_role')) as r(rolname);
+-- Expect `authenticated` = true and public, anon, service_role = false.
 ```
 
 Operational preflight:
@@ -96,10 +135,15 @@ Operational preflight:
 
 ---
 
-## 3. The 14 migrations, in order
+## 3. The 15 migrations, in order
 
 Apply in exactly this order. The order is not cosmetic — see the dependency
 column.
+
+**Apply strictly in timestamp order.** Every file name begins with a
+fixed-width timestamp, so lexicographic order IS chronological order: no
+file may be applied before any file that sorts earlier than it. Migration 15
+makes this a safety requirement rather than a convention — see §7.
 
 | # | File | What it does | Depends on |
 |---|---|---|---|
@@ -117,6 +161,7 @@ column.
 | 12 | `20260928120000_owner_reporting_contracts.sql` | Owner reporting RPCs (Sales, Sales by Employee, Employee Time, Cash Activity) | 4, 8, 10, 11 |
 | 13 | `20260929120000_list_employees_employee_code.sql` | Redefines `list_employees` to return the Employee ID | 5 |
 | 14 | `20261002120000_device_cash_drawer_enablement.sql` | Adds `paired_devices.cash_drawer_enabled` (`not null default false`) + `set_device_cash_drawer_enabled` | v1.2 `paired_devices` |
+| 15 | `20261012120000_offline_register_attribution_required.sql` | **Redefines `complete_sale_v5`** again: a new `offline_queued` sale must carry its ORIGINAL register session. The claim is validated by its own identity instead of being re-derived, and an unprovable claim now raises instead of committing with NULL attribution. Forward-only: no backfill, no data change, no historical order touched | 4, 8 |
 
 ### Order-critical pairs
 
@@ -127,6 +172,15 @@ column.
 - **4, 7 before 11 and 12.** Cash Movements and the reporting contracts both
   read the DAILY register context.
 - **5 before 13.** `list_employees` returns a column 5 adds.
+- **4 and 8 before 15.** 15 is a `create or replace` of `complete_sale_v5`, not
+  a `create`. It restates the revokes from `public` and `anon` but **not** from
+  `service_role`, which 4 and 8 both do, and relies on `create or replace`
+  preserving the ACL they left. Applied where the function does not already
+  exist it would CREATE it, and under Supabase's default privileges on `public`
+  the new function is born executable by `anon`, `authenticated` AND
+  `service_role` — so `service_role` would silently keep `EXECUTE` on the
+  checkout RPC. §2.6 and §2.7 verify both prerequisites; §7 stops the release
+  if either does not hold.
 
 ---
 
@@ -243,16 +297,64 @@ where n.nspname='public' and proname='set_device_cash_drawer_enabled';
 -- Expect 1 row.
 ```
 
+### Group E — offline register attribution (migration 15)
+
+Its own group, because it is the only migration in this release that changes
+how a sale is accepted or refused, and because every check below must hold
+AFTER the replacement exactly as §2.6 and §2.7 required it BEFORE.
+
+```sql
+-- Still exactly ONE definition, with the same signature: a changed argument
+-- list would have left an overload behind rather than replacing in place.
+select count(*) as definitions,
+       pg_get_function_identity_arguments(p.oid) as signature,
+       p.prosecdef as security_definer,
+       array_to_string(p.proconfig, ',') as settings
+from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public' and p.proname = 'complete_sale_v5'
+group by 2, 3, 4;
+-- Expect ONE row: definitions = 1, the §2.6 signature, security_definer = t,
+-- settings = search_path=public, pg_temp.
+
+-- The ACL survived the replacement. 15 does not restate the `service_role`
+-- revoke, so this is the check that proves the inherited ACL is still intact.
+select r.rolname,
+       has_function_privilege(r.rolname,
+         'public.complete_sale_v5(text,numeric,jsonb,uuid,timestamptz,text,uuid,uuid)',
+         'EXECUTE') as may_execute
+from (values ('public'),('anon'),('authenticated'),('service_role')) as r(rolname);
+-- Expect `authenticated` = true and public, anon, service_role = false.
+-- If `service_role` reads true, STOP: see §7.
+
+-- Nothing historical was rewritten. 15 is forward-only with no backfill.
+select count(*) as orders_with_null_register
+from public.orders where register_session_id is null;
+-- Expect the SAME number as before migration 15. The guard applies only to
+-- NEW offline sales; existing rows are deliberately untouched.
+
+-- And the predecessor RPCs a v1.2 client still calls are intact.
+select proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+where n.nspname='public' and proname in ('complete_sale_v3','complete_sale_v4')
+order by proname;
+-- Expect both rows.
+```
+
+The behavioural check belongs in the application, not here: a till with an
+unprovable register claim must receive `A register session is required for an
+offline sale` and the sale must land in the owner review queue rather than
+committing. `supabase/migrations/20261012120000_offline_register_attribution_required.db.test.ts`
+executes that end to end against a real PostgreSQL and is the authority for it.
+
 ---
 
 ## 6. Final verification
 
 ```sql
--- 1. All 35 migrations recorded.
+-- 1. All 36 migrations recorded.
 select count(*) from supabase_migrations.schema_migrations;
--- Expect 35.
+-- Expect 36.
 
--- 2. All 14 of this release recorded, exactly once each.
+-- 2. All 15 of this release recorded, exactly once each.
 select name, count(*) from supabase_migrations.schema_migrations
 where name like '202609%' or name like '202610%'
 group by name having count(*) <> 1;
@@ -300,6 +402,16 @@ Stop immediately, apply nothing further, and escalate if **any** of these occur:
 - Any `anon` or `authenticated` effective privilege appears on a new table.
 - `cash_drawer_enabled` is `true` for any device.
 - Anything suggests you are connected to a project other than production.
+- **Migration 15 prerequisites do not hold.** Before applying
+  `20261012120000_offline_register_attribution_required.sql`, §2.6 must report
+  exactly ONE `complete_sale_v5` with the exact eight-argument signature,
+  `security_definer = t` and `search_path=public, pg_temp`, and §2.7 must report
+  `authenticated` alone holding `EXECUTE`. If the function is absent,
+  duplicated, differently shaped, or if `service_role` still holds `EXECUTE`,
+  **STOP and apply nothing further.** 15 would then either create a second
+  overload or create the function outright and leave `service_role` executing
+  the checkout RPC, because 15 does not restate that revoke itself.
+- Any migration is applied out of timestamp order (§3).
 
 **Do not improvise a fix mid-release.** Stop, record the exact state, and
 decide the recovery route deliberately.

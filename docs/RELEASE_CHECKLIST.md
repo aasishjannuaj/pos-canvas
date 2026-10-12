@@ -5,12 +5,13 @@
 > | | |
 > |---|---|
 > | Released product | **v1.2.0** — web, Android, Windows. Published, downloadable, checksum-verified |
-> | In preparation | **v1.3.0** — release candidate on `release/v1.3.0-rc`. **Not released, no artifacts built, no production migration applied** |
+> | In preparation | **v1.3.0** — release candidate on `release/v1.3.0-rc-final`. **Not released, no artifacts built, no production migration applied** |
 > | Accepted v1.3 product base | `018a76f05849599a9e5755a77daada4e64f0cf50` |
+> | v1.3 release source | `922f38ff60ce7a2f9c8c07a907fd150204000f75` — tip of `release/v1.3.0-rc-final`, pushed; `main` untouched |
 > | Test-harness hardening | `44ddf224fcc5db0e31d16b27a21e0c59abe33464` |
 > | v1.3 feature scope | **FROZEN** |
 > | v1.3 scope, deferrals and limits | `RELEASE_NOTES_v1.3.0.md` |
-> | v1.3 production migrations | `PRODUCTION_MIGRATION_RUNBOOK_v1.3.0.md` — **14 migrations, none applied** |
+> | v1.3 production migrations | `PRODUCTION_MIGRATION_RUNBOOK_v1.3.0.md` — **15 migrations, none applied** |
 > | Cash Drawer | software 1A–1D only. **Physical end-to-end validation NOT YET COMPLETED** (1E not performed, 1E-PREP paused), `cash_drawer_enabled = false` |
 >
 > §0 below carries the **active** version target. The banners and per-item
@@ -139,7 +140,7 @@ and checksum-verified — step 8 of §10.**
 
 - [ ] `main` == `origin/main`, no tracked working-tree changes
 - [ ] Only `supabase/config.toml` remains untracked (see §9 — it must never be committed or pushed)
-- [ ] 35 migrations on disk == 35 tracked (21 v1.2 baseline + 14 for v1.3)
+- [ ] 36 migrations on disk == 36 tracked (21 v1.2 baseline + 15 for v1.3)
 - [ ] Production and staging migration state known and recorded (§10)
 - [ ] Release freeze declared: no feature work, only P0 fixes
 
@@ -150,15 +151,35 @@ and checksum-verified — step 8 of §10.**
 Run from a clean tree. All five must pass:
 
 ```bash
-npm test && npm run lint && npx tsc --noEmit && npm run build && git diff --check
+npm test && npm run lint && npm run build && npx tsc --noEmit && git diff --check
 ```
 
-Expected at `ee29ce1`: **108 test files, 3331 passed, 1 skipped, 0 failed.**
+**`npm run build` comes BEFORE `npx tsc --noEmit`, and the order is not
+cosmetic.** `next-env.d.ts` is generated and gitignored, and it carries the
+`next/image-types/global` reference that makes `*.png` an importable module.
+A clean checkout has no such file, so running `tsc` first fails with two
+`TS2307` errors on `components/brand/PosCanvasLockup.tsx` and then passes once
+the build has produced it. Measured at `922f38f`: `tsc` exits 2 with exactly
+those two errors when `.next` and `next-env.d.ts` are absent, and exits 0 with
+none after `npm run build`. Do not waive the gate on that basis — reorder it.
 
-The one skip is `windowsStartup.smoke.test.ts > reports why the Electron smoke
-test did not run` — it is skipped *because* the smoke test ran. If that test
-starts **passing**, the Electron smoke test did not execute and the Windows
-evidence below is void.
+Expected at `922f38f`: **212 test files, 8038 passed, 7 skipped, 0 failed.**
+
+All seven skips are hardware and platform gates, and the accounting is exact:
+
+| Skipped | Why | Count |
+|---|---|---|
+| `windowsStartup.smoke.test.ts > the Windows shell actually starts` | `canRun = electronAvailable && runtimeBuilt`; neither `windows-shell/node_modules` nor `windows-shell/runtime/index.html` is present outside a packaging run | 3 |
+| `windowsCashDrawerSpooler.test.ts > the real koffi declarations, through async calls` | not Windows x64 | 4 |
+
+The companion test `windowsStartup.smoke.test.ts > smoke test prerequisites >
+reports why the Electron smoke test did not run` **inverts**: it is skipped
+when the smoke test ran, and it PASSES when the smoke test did not. If it
+passes, the Electron smoke test did not execute and the Windows evidence below
+is **void**. It passed at `922f38f`, so the Windows shell boot evidence must
+come from the packaging gate and not from this run. The database group's own
+`describe.skip` fires only when no local PostgreSQL is found; it did not fire
+at `922f38f`, so all 11 database suites executed.
 
 Suites that must be green individually, because each one guards a defect that
 actually shipped:
