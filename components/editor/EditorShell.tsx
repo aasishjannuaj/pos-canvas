@@ -59,6 +59,7 @@ import {
   getModifierSaveBlockerMessage,
   normalizeConfigModifiers,
 } from "@/lib/modifierAuthoring";
+import { getPriceSaveBlockerMessage } from "@/lib/menuItemPricing";
 import {
   calculateCartSummary,
   canAddItemQuantity,
@@ -1459,6 +1460,24 @@ export default function EditorShell({
     if (modifierSaveBlocker !== null) {
       setSaveStatus("error");
       setSaveError(modifierSaveBlocker);
+      return;
+    }
+
+    // v1.3 D-1 — the price save boundary, blocked rather than clamped.
+    //
+    // A negative price was previously accepted, previewed as $-5.00, saved, and
+    // still there after a reload. Every checkout RPC already refuses to sell one
+    // ('Menu item % has an invalid price' in v3, v4 and v5), so the money was
+    // never at risk; what was missing was telling the owner BEFORE they saved a
+    // menu their till would reject. Same mechanism as the modifier blocker
+    // directly above, and deliberately NOT a silent clamp to 0 — rewriting a
+    // price the owner typed is how an item quietly sells for nothing.
+    // $0.00 stays valid.
+    const priceSaveBlocker = getPriceSaveBlockerMessage(projectConfig);
+
+    if (priceSaveBlocker !== null) {
+      setSaveStatus("error");
+      setSaveError(priceSaveBlocker);
       return;
     }
 

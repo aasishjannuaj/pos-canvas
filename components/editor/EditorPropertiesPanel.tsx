@@ -42,6 +42,7 @@ import {
   describePublishProgress,
 } from "@/lib/publishProgress";
 import type { PublishProgress } from "@/lib/publishProgress";
+import { isValidMenuItemPrice } from "@/lib/menuItemPricing";
 import {
   BUILD_PROCESSING_STARTED_MESSAGE,
   getBuildProcessingUnavailableMessage,
@@ -793,6 +794,16 @@ export default function EditorPropertiesPanel({
                       }
                       className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none"
                     />
+                    {/* v1.3 D-1 — min="0" above is a browser hint, not a
+                        guarantee: a number input still accepts a typed "-5".
+                        The value the owner typed is left exactly as typed and
+                        Save refuses it (EditorShell), rather than being rewritten
+                        to 0 behind their back. */}
+                    {!isValidMenuItemPrice(selectedItem.price) && (
+                      <p className="text-xs text-red-600">
+                        Price cannot be negative. Enter 0 or more.
+                      </p>
+                    )}
                   </div>
 
                   <div className="flex flex-col gap-1.5">
