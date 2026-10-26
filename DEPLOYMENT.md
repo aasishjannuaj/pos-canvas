@@ -463,7 +463,7 @@ leaves the machine — Android refuses to install a lower code over a higher one
 | First | `1.0.0` | 1 | Published |
 | 1.1.0 | `1.1.0` | 2 | Published and checksum-verified from its served URL |
 | 1.2.0 | `1.2.0` | 3 | Published and checksum-verified from its served URL — the **released** baseline today |
-| v1.3.0 candidate | `1.3.0` | **4** | **Version bumped in the tree; artifact NOT yet built or published.** `CURRENT_ANDROID_RELEASE` still points at 1.2.0 on purpose |
+| v1.3.4 candidate | `1.3.4` | **8** | **Version bumped in the tree; artifact NOT yet built or published.** Codes 4–7 were used by v1.3 STAGING test builds (1.3.0–1.3.3), so the release is 8 to install over them. `CURRENT_ANDROID_RELEASE` still points at 1.2.0 on purpose |
 
 **How codes advance — an illustration, not a schedule:**
 
@@ -561,9 +561,9 @@ install over the existing app.
 ## 5. Deployment order
 
 1. Apply migrations to the Supabase project (if not already applied).
-   For the v1.3.0 candidate this is **14 migrations in a fixed order** with its
+   For the v1.3.4 candidate this is **19 migrations in a fixed order** with its
    own preflight, grouped verification and STOP conditions — follow
-   [docs/PRODUCTION_MIGRATION_RUNBOOK_v1.3.0.md](./docs/PRODUCTION_MIGRATION_RUNBOOK_v1.3.0.md)
+   [docs/PRODUCTION_MIGRATION_RUNBOOK_v1.3.4.md](./docs/PRODUCTION_MIGRATION_RUNBOOK_v1.3.4.md)
    rather than applying them ad hoc. None of them has been applied to
    production.
 2. Create the Vercel project from GitHub; keep default install/build commands.
