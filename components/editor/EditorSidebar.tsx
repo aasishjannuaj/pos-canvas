@@ -18,18 +18,26 @@ const sections: { label: EditorSection; icon: string }[] = [
   { label: "Inventory Summary", icon: "📦" },
 ];
 
+// LF-2 Scope 2 — only for businesses with local_first_enabled.
+const heldSalesSection: { label: EditorSection; icon: string } = { label: "Held Sales", icon: "⏸" };
+
 type EditorSidebarProps = {
   editorSection: EditorSection;
   setEditorSection: (section: EditorSection) => void;
+  /** LF-2 Scope 2 — null hides the Held Sales section; a number is its badge. */
+  heldSalesCount?: number | null;
 };
 
 export default function EditorSidebar({
   editorSection,
   setEditorSection,
+  heldSalesCount = null,
 }: EditorSidebarProps) {
+  const visible = heldSalesCount === null ? sections : [...sections, heldSalesSection];
+
   return (
     <aside className="flex w-60 flex-none flex-col gap-1 border-r border-neutral-200 bg-white p-4">
-      {sections.map((section) => {
+      {visible.map((section) => {
         const isActive = editorSection === section.label;
 
         return (
@@ -45,6 +53,11 @@ export default function EditorSidebar({
           >
             <span className="text-base">{section.icon}</span>
             {section.label}
+            {section.label === "Held Sales" && heldSalesCount !== null && heldSalesCount > 0 && (
+              <span className="ml-auto rounded-full bg-amber-500 px-2 text-xs text-white" data-testid="held-badge">
+                {heldSalesCount}
+              </span>
+            )}
           </button>
         );
       })}

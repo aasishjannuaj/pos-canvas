@@ -18,6 +18,8 @@ import type {
   RestockStatus,
 } from "./EditorShell";
 import type { InventoryTransaction } from "@/lib/inventory.types";
+import { QUARANTINE_ACKNOWLEDGEMENT } from "@/lib/inventoryPending";
+import type { QuarantineView } from "@/lib/inventoryPending";
 import type { GeneratedPosExportEligibility } from "@/lib/generatedPosConfig";
 import ModifierGroupsEditor from "./ModifierGroupsEditor";
 import BrandingLogoField from "./BrandingLogoField";
@@ -108,6 +110,29 @@ type EditorPropertiesPanelProps = {
   adjustError: string | null;
   adjustSuccessMessage: string | null;
   onAdjust: (itemId: string, newQuantity: number) => void;
+  // Batch A (Inventory foundations) — a SAVED item's stock and tracking belong to
+  // the database: stock changes only through "Received +N" / "Counted = N", and
+  // tracking only through the tracking action. An unsaved item still sets its
+  // opening stock and tracking through the ordinary edit.
+  isItemSaved?: (itemId: string) => boolean;
+  onSetTracking?: (itemId: string, enabled: boolean) => void;
+  trackingError?: string | null;
+  // Batch B — stale-catalog / recovered-action notice, and the owner audit feed.
+  catalogNotice?: string | null;
+  /** Correction C1 — unresolved pending stock storage; stock actions are refused. */
+  pendingBlockMessage?: string | null;
+  /** Correction C4 — unreadable pending records with their raw bytes, for owner review. */
+  unreadableRecords?: { key: string; raw: string | null }[];
+  /** Correction C4 — protected quarantine (explicit acknowledgement); returns the outcome message. */
+  onQuarantine?: ((key: string, expectedRaw: string, reason: string, acknowledged: boolean) => Promise<string>) | null;
+  /** Correction C4 — every quarantined record; never emptied. */
+  quarantineViews?: QuarantineView[];
+  /** Correction C4 — the result of the owner's last quarantine request. */
+  quarantineNotice?: string | null;
+  /** Request ids seen in the inventory audit history (annotation only — never proof). */
+  historyRequestIds?: Set<string>;
+  historyLines?: { key: string; text: string; at: string }[];
+  historyError?: string | null;
   // Feature 14.4 — null whenever there's no saved project id yet
   // (mirrors exportEligibility.canExport being false for the same reason).
   // A plain value passed down from EditorShell, never state.
@@ -300,6 +325,18 @@ export default function EditorPropertiesPanel({
   adjustError,
   adjustSuccessMessage,
   onAdjust,
+  isItemSaved = () => false,
+  onSetTracking,
+  trackingError = null,
+  catalogNotice = null,
+  pendingBlockMessage = null,
+  unreadableRecords = [],
+  onQuarantine = null,
+  quarantineViews = [],
+  quarantineNotice = null,
+  historyRequestIds = new Set<string>(),
+  historyLines = [],
+  historyError = null,
   runtimeUrl,
   exportEligibility,
   exportStatus,
@@ -432,6 +469,52 @@ export default function EditorPropertiesPanel({
 
   return (
     <aside className="flex w-80 min-h-0 flex-none flex-col gap-4 overflow-y-auto border-l border-neutral-200 bg-white p-6">
+      {/* Batch B — shown in both modes: the stale-catalog warning matters most while editing items. */}
+      {catalogNotice !== null && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">
+          {catalogNotice}
+        </p>
+      )}
+      {pendingBlockMessage !== null && (
+        <div className="flex flex-col gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800" role="alert" data-testid="pending-block">
+          <p>{pendingBlockMessage}</p>
+          {onQuarantine !== null &&
+            unreadableRecords.map((r) => <QuarantineForm key={r.key} record={r} onQuarantine={onQuarantine} />)}
+        </div>
+      )}
+      {quarantineNotice !== null && (
+        <p className="rounded-lg bg-neutral-100 px-3 py-2 text-xs text-neutral-800" role="status" data-testid="quarantine-notice">
+          {quarantineNotice}
+        </p>
+      )}
+      {quarantineViews.length > 0 && (
+        <section className="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900" data-testid="quarantine-list">
+          <h3 className="font-semibold">Quarantined stock records — outcome unknown</h3>
+          <p>These could not be read. They are kept as found, are never sent again and are not resolved. Reconcile them against your stock.</p>
+          {quarantineViews.map((v) =>
+            v.kind === "record" ? (
+              <div key={v.key} className="flex flex-col gap-0.5 border-t border-amber-200 pt-1" data-testid="quarantine-record">
+                <span>Request reference: {v.record.requestReference ?? "none readable"}</span>
+                <span>Server outcome: <strong>unknown — not proven</strong></span>
+                {v.record.requestReference !== null && historyRequestIds.has(v.record.requestReference) && (
+                  <span data-testid="quarantine-history-note">
+                    A server record with this reference appears in the audit history. That alone does not prove what this record was; the outcome stays unknown.
+                  </span>
+                )}
+                <span>Quarantined {new Date(v.record.quarantinedAt).toLocaleString()} by {v.record.actor.label}</span>
+                <span>Reason: {v.record.reason}</span>
+                <span>Original key: <code>{v.record.originalKey}</code></span>
+                <pre className="whitespace-pre-wrap break-all rounded bg-white p-1" data-testid="quarantine-raw">{v.record.rawValue}</pre>
+              </div>
+            ) : (
+              <div key={v.key} className="border-t border-amber-200 pt-1" data-testid="quarantine-damaged">
+                Damaged quarantine record (kept as found): <code>{v.key}</code>
+                <pre className="whitespace-pre-wrap break-all rounded bg-white p-1">{v.raw ?? "(unreadable)"}</pre>
+              </div>
+            )
+          )}
+        </section>
+      )}
       {editorMode === "preview" ? (
         <>
           <h2 className="text-sm font-semibold tracking-tight text-neutral-900">
@@ -525,7 +608,7 @@ export default function EditorPropertiesPanel({
 
           <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
             <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
-              Restock Inventory
+              Received +N
             </h3>
 
             {trackedItems.length === 0 ? (
@@ -596,7 +679,7 @@ export default function EditorPropertiesPanel({
                   disabled={restockDisabled}
                   className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {restockStatus === "saving" ? "Restocking..." : "Restock"}
+                  {restockStatus === "saving" ? "Recording..." : "Record received"}
                 </button>
               </>
             )}
@@ -604,7 +687,7 @@ export default function EditorPropertiesPanel({
 
           <div className="flex flex-col gap-3 border-t border-neutral-200 pt-4">
             <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
-              Manual Inventory Adjustment
+              Counted = N
             </h3>
 
             {trackedItems.length === 0 ? (
@@ -675,7 +758,7 @@ export default function EditorPropertiesPanel({
                   disabled={adjustDisabled}
                   className="w-full rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {adjustStatus === "saving" ? "Adjusting..." : "Adjust Inventory"}
+                  {adjustStatus === "saving" ? "Recording..." : "Record count"}
                 </button>
               </>
             )}
@@ -721,6 +804,27 @@ export default function EditorPropertiesPanel({
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 border-t border-neutral-200 pt-4" data-testid="inventory-history">
+            <h3 className="text-sm font-semibold tracking-tight text-neutral-900">
+              Inventory audit history
+            </h3>
+            {historyError !== null && (
+              <p className="text-xs text-red-600" role="alert">{historyError}</p>
+            )}
+            {historyLines.length === 0 ? (
+              <p className="text-sm text-neutral-500">No audited stock changes yet.</p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {historyLines.map((line) => (
+                  <li key={line.key} className="flex flex-col text-xs">
+                    <span className="text-neutral-800">{line.text}</span>
+                    <span className="text-neutral-400">{formatTransactionTime(line.at)}</span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         </>
@@ -830,9 +934,11 @@ export default function EditorPropertiesPanel({
                       type="checkbox"
                       checked={selectedItem.trackInventory}
                       onChange={(event) =>
-                        onUpdate(selectedItem.id, {
-                          trackInventory: event.target.checked,
-                        })
+                        isItemSaved(selectedItem.id) && onSetTracking
+                          ? onSetTracking(selectedItem.id, event.target.checked)
+                          : onUpdate(selectedItem.id, {
+                              trackInventory: event.target.checked,
+                            })
                       }
                       className="h-4 w-4 cursor-pointer accent-blue-600"
                     />
@@ -840,14 +946,15 @@ export default function EditorPropertiesPanel({
 
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-medium uppercase tracking-wide text-neutral-400">
-                      Stock Quantity
+                      {isItemSaved(selectedItem.id) ? "Stock Quantity" : "Opening Stock"}
                     </label>
                     <input
                       type="number"
                       step="1"
                       min="0"
                       value={selectedItem.stockQuantity}
-                      disabled={!selectedItem.trackInventory}
+                      readOnly={isItemSaved(selectedItem.id)}
+                      disabled={!selectedItem.trackInventory || isItemSaved(selectedItem.id)}
                       onChange={(event) =>
                         onUpdate(selectedItem.id, {
                           stockQuantity: Math.max(
@@ -858,6 +965,16 @@ export default function EditorPropertiesPanel({
                       }
                       className="rounded-lg border border-neutral-200 px-3 py-2 text-sm text-neutral-900 transition-colors focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
                     />
+                    {isItemSaved(selectedItem.id) && (
+                      <p className="text-xs text-neutral-500">
+                        Live stock. Change it with Received +N or Counted = N.
+                      </p>
+                    )}
+                    {trackingError !== null && (
+                      <p className="text-xs text-red-600" role="alert">
+                        {trackingError}
+                      </p>
+                    )}
                   </div>
 
                   {/* v1.3 Feature 1E-A — optional barcode, stored on the item
@@ -1815,6 +1932,51 @@ function AboutPosCanvas() {
       </dl>
 
       <p className="text-xs text-neutral-400">{info.companyDisplayName}</p>
+    </div>
+  );
+}
+
+/** Correction C4 — one unreadable record: its raw bytes, a required reason and an explicit acknowledgement. */
+function QuarantineForm({
+  record,
+  onQuarantine,
+}: {
+  record: { key: string; raw: string | null };
+  onQuarantine: (key: string, expectedRaw: string, reason: string, acknowledged: boolean) => Promise<string>;
+}) {
+  const [reason, setReason] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  return (
+    <div className="flex flex-col gap-1 border-t border-red-200 pt-2" data-testid="quarantine-form">
+      <span>Record: <code>{record.key}</code></span>
+      <pre className="whitespace-pre-wrap break-all rounded bg-white p-1" data-testid="unreadable-raw">{record.raw ?? "(cannot be read)"}</pre>
+      <textarea
+        aria-label="Quarantine reason"
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        className="rounded border border-red-200 bg-white p-1"
+        placeholder="Why this record is being quarantined"
+      />
+      <label className="flex items-start gap-2">
+        <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} aria-label="Acknowledge unknown outcome" />
+        <span>{QUARANTINE_ACKNOWLEDGEMENT}</span>
+      </label>
+      <button
+        type="button"
+        disabled={busy || record.raw === null || reason.trim() === "" || !acknowledged}
+        onClick={async () => {
+          setBusy(true);
+          setMessage(await onQuarantine(record.key, record.raw as string, reason, acknowledged));
+          setBusy(false);
+        }}
+        className="self-start rounded-full border border-red-300 px-3 py-1 font-medium disabled:opacity-50"
+      >
+        Quarantine this record
+      </button>
+      {message && <span role="status" data-testid="quarantine-message">{message}</span>}
     </div>
   );
 }

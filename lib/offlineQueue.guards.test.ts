@@ -191,7 +191,12 @@ describe("24.5C stores intents and submits nothing", () => {
       .filter((file) => file !== SESSION)
       .filter((file) => code(read(file)).includes("enqueueSale"));
 
-    expect(callers).toEqual(["lib/offlineCheckoutSession.ts"]);
+    // SUPERSEDED IN PART BY G-1-CLIENT-1: a second LIBRARY module now writes to
+    // the queue — lib/saleRecoverySession.ts, which transfers an uncertain sale
+    // into a strict-recovery record under its original identity. The surviving
+    // property is unchanged in kind: library modules only, named exactly, and
+    // never a React component (asserted below).
+    expect(callers).toEqual(["lib/offlineCheckoutSession.ts", "lib/saleRecoverySession.ts"]);
 
     // The UI asks a library to persist a sale; it never persists one itself.
     for (const file of [RUNTIME, DEVICE_APP]) {

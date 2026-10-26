@@ -24,6 +24,10 @@ import {
 import { parseIsoTime } from "@/lib/deviceOfflineCache";
 import type { QueueSummary } from "@/lib/saleQueue";
 import type { QueuedSale } from "@/lib/saleQueue";
+import { isStrictRecoverySale } from "@/lib/saleQueue";
+import { beginStrictRecoverySubmission } from "@/lib/recoveryCheckoutCoordinator";
+import { GATE_LOCK, acquireLock, lockManager, submissionLock } from "@/lib/tabLocks";
+import type { LockManagerLike } from "@/lib/tabLocks";
 import { classifySubmissionFailure, nextAttemptAtFrom } from "@/lib/saleSyncClassifier";
 import { submitQueuedSale } from "@/lib/offlineSaleRpc";
 import type { OfflineSaleSubmission } from "@/lib/offlineSaleRpc";
@@ -234,12 +238,81 @@ async function drain(deps: SyncDeps): Promise<SyncRunReport> {
   return report;
 }
 
+/**
+ * G-1-CLIENT-1B — a STRICT-RECOVERY submission holds the recovery-activity
+ * counter (lib/recoveryCheckoutCoordinator.ts) from BEFORE its claim until
+ * AFTER its final state write has committed, released in a finally on every
+ * path: synced, retry, needs_attention, a skipped claim, or a throw. A new
+ * checkout's final gate refuses while it is held or if it moved. Ordinary
+ * records never touch it, so ordinary sync and ordinary checkout are unchanged.
+ */
+//
+// BATCH B — ACROSS TABS (lib/tabLocks.ts). Every record is submitted only while
+// this tab holds that record's SUBMISSION lock, taken ifAvailable before the
+// claim and released after the final write: a second tab draining at the same
+// moment skips the record instead of racing the claim (Batch A, M3), and
+// another tab's startup recovery cannot return it to pending mid-flight (M2).
+// A STRICT record is additionally claimed only while holding the GATE lock, so
+// the claim cannot land inside another tab's checkout read-then-act window
+// (M1). Without a LockManager the engine behaves as before; the fail-closed
+// half lives in the checkout gate and in startup recovery.
 async function syncOne(record: QueuedSale, deps: SyncDeps): Promise<SyncedOutcome> {
+  const manager = lockManager();
+  const rowLock =
+    manager === null
+      ? null
+      : await acquireLock(manager, submissionLock(record.queueRecordId), { ifAvailable: true });
+
+  if (manager !== null && rowLock === null) {
+    return skippedOutcome(record, "locked_by_another_tab");
+  }
+
+  try {
+    if (!isStrictRecoverySale(record)) {
+      return await syncOneRecord(record, deps, null);
+    }
+
+    const release = beginStrictRecoverySubmission();
+
+    try {
+      return await syncOneRecord(record, deps, manager);
+    } finally {
+      release();
+    }
+  } finally {
+    rowLock?.release();
+  }
+}
+
+function skippedOutcome(record: QueuedSale, code: string): SyncedOutcome {
+  return { queueRecordId: record.queueRecordId, result: "skipped", code, orderNumber: null };
+}
+
+async function syncOneRecord(
+  record: QueuedSale,
+  deps: SyncDeps,
+  gateManager: LockManagerLike | null
+): Promise<SyncedOutcome> {
   const startedAt = new Date(deps.now()).toISOString();
+
+  // Batch B — a strict claim waits (bounded) for the cross-tab gate and holds it
+  // only for the claim's read-and-write. If the gate stays busy, the record is
+  // left pending for the next drain; nothing was claimed.
+  const gate = gateManager === null ? null : await acquireLock(gateManager, GATE_LOCK);
+
+  if (gateManager !== null && gate === null) {
+    return skippedOutcome(record, "recovery_gate_busy");
+  }
 
   // pending -> syncing BEFORE the request leaves. If the process dies now, the
   // record is recoverable by exactly the rule that recovered it above.
-  const claimed = await updateQueueState(record.queueRecordId, "syncing", startedAt);
+  let claimed: Awaited<ReturnType<typeof updateQueueState>>;
+
+  try {
+    claimed = await updateQueueState(record.queueRecordId, "syncing", startedAt);
+  } finally {
+    gate?.release();
+  }
 
   if (!claimed.ok) {
     // Someone else moved it, or it is unreadable. Either way this run does not

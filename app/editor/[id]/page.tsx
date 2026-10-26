@@ -74,6 +74,7 @@ export default async function EditorPage({
         initialOrderTotals={orderTotals}
         initialOrderTotalsError={orderTotalsError}
         layout={layout}
+        initialCatalogVersion={project.catalog_version ?? 0}
       />
     );
   }

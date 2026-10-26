@@ -1652,10 +1652,14 @@ describe("OF-29: a definite database rejection releases only a first dispatch", 
 // ---------------------------------------------------------------------------
 
 describe("OF-30: a marker the queue already owns is reconciled, not stranded", () => {
-  it("clears a stale marker whose exact key is durably queued", async () => {
+  // SUPERSEDED BY G-1-CLIENT-1 (requirement 8): the key alone is no longer
+  // enough to release a marker. The queued record must be a verified transfer of
+  // THIS sale — same key, same pairing, same payload — so this fixture now
+  // queues the marker's own items. The key-only case is pinned below.
+  it("clears a stale marker whose exact SALE is durably queued", async () => {
     // The crash: enqueue committed, the marker delete never ran.
     await arm();
-    await enqueueSale(input({ saleRequestId: DISPATCHED_ID }));
+    await enqueueSale(input({ saleRequestId: DISPATCHED_ID, items: dispatched().items }));
 
     restartProcess();
 
@@ -1667,6 +1671,17 @@ describe("OF-30: a marker the queue already owns is reconciled, not stranded", (
 
     expect(listing.ok && listing.value.sales).toHaveLength(1);
     expect(listing.ok && listing.value.sales[0].saleRequestId).toBe(DISPATCHED_ID);
+  });
+
+  it("G-1-CLIENT-1: does NOT clear a marker whose key is queued under a DIFFERENT payload", async () => {
+    await arm();
+    // Same key, different items: this record does not carry the marker's sale.
+    await enqueueSale(input({ saleRequestId: DISPATCHED_ID }));
+
+    restartProcess();
+
+    expect(await reconcileUncertainSaleWithQueue()).toBe(false);
+    expect((await readUncertainSale(IDENTITY)).status).toBe("outstanding");
   });
 
   it("does NOT clear a marker merely because some unrelated sale is queued", async () => {

@@ -1,7 +1,7 @@
 {
   "name": "pos-canvas-windows-shell",
   "productName": "POS Canvas",
-  "version": "1.3.0",
+  "version": "1.3.3",
   "private": true,
   "description": "Universal POS Canvas Windows shell — serves the packaged device runtime from app://poscanvas.",
   "main": "main.mjs",
@@ -11,7 +11,7 @@
     "build:windows": "electron-builder --win --x64 --publish never"
   },
   "devDependencies": {
-    "electron": "43.4.0",
+    "electron": "43.8.3",
     "electron-builder": "26.15.3"
   },
   "build": {

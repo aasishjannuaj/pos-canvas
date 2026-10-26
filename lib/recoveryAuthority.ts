@@ -20,6 +20,7 @@
 // returns a verdict.
 
 import { openOfflineDb, readUncertainSaleRecordRaw } from "@/lib/deviceOfflineStore";
+import { readQueueRecoveryProtection } from "@/lib/saleQueueSession";
 import {
   ownsUncertainSale,
   readUncertainSaleRecord,
@@ -41,7 +42,15 @@ export type RecoveryBlockedReason =
   /** Something IS stored and cannot be understood. Not absence. */
   | "unreadable"
   /** A record belonging to a different pairing, project or build. */
-  | "identity_mismatch";
+  | "identity_mismatch"
+  /**
+   * G-1-CLIENT-1A — a strict-recovery queue record carries an unresolved
+   * conflict (recoveryProtection). The marker may be long gone — the sale was
+   * transferred — but the conflict is not resolved, so no new checkout.
+   */
+  | "recovery_conflict"
+  /** G-1-CLIENT-1A — a queue row that looks like strict recovery state cannot be read. */
+  | "unreadable_recovery_record";
 
 /**
  * What the durable recovery store actually said.
@@ -83,6 +92,32 @@ export function recoveryPermitsNewSale(authority: RecoveryAuthority): boolean {
 export async function readRecoveryAuthority(
   identity: UncertainSaleIdentity
 ): Promise<RecoveryAuthority> {
+  const marker = await readMarkerAuthority(identity);
+
+  // Anything the marker already refuses stays refused.
+  if (marker.status === "blocked") return marker;
+
+  // G-1-CLIENT-1A — THE QUEUE IS THE SECOND SOURCE OF PROTECTION. After a
+  // verified transfer the marker is deleted, so the marker alone would read
+  // verified_clear while the transferred sale sits in an unresolved recovery
+  // conflict. The fence now also requires the queue to hold no such conflict —
+  // and, as everywhere in this file, a read that failed is not "nothing there".
+  const queue = await readQueueRecoveryProtection();
+
+  if (queue === "protected") return { status: "blocked", reason: "recovery_conflict" };
+  // G-1-CLIENT-1B — a strict submission IN FLIGHT is deliberately NOT cached
+  // here. This answer is cached until the next refresh, and a transient state
+  // cached that way goes stale the moment the submission ends (it showed a
+  // "being sent" refusal after the recovery had already filed its conflict).
+  // In-flight activity is enforced where it is re-read every time: the final
+  // checkout gates (lib/recoveryCheckoutCoordinator.ts).
+  if (queue === "unreadable") return { status: "blocked", reason: "unreadable_recovery_record" };
+  if (queue === "read_failed") return { status: "blocked", reason: "read_failed" };
+
+  return marker;
+}
+
+async function readMarkerAuthority(identity: UncertainSaleIdentity): Promise<RecoveryAuthority> {
   const opened = await openOfflineDb();
 
   if (!opened.ok) {

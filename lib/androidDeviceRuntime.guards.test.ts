@@ -828,7 +828,22 @@ describe("a sale that needs attention is reachable from every screen that report
     expect(session).not.toContain("complete_sale_v4");
     expect(session).not.toContain("submitQueuedSale");
     expect(session).not.toContain("markSynced");
-    expect(session).toContain("startOperatorRetry(");
+
+    // W-02-RETRY-UX-FIX-2 — this used to require `startOperatorRetry(`. The
+    // requirement it stood for is unchanged: ONE retry path, which only returns
+    // the row to pending through the shared transition. That path now applies
+    // the same beginOperatorRetry transition inside a single guarded
+    // withQueueRecordMutation transaction (read, policy, write), so the check
+    // pins that path instead.
+    const retry = session.slice(session.indexOf("export async function retryRejectedSale"));
+    const retryBody = retry.slice(0, retry.indexOf("\n}\n") + 2);
+
+    expect(retryBody).toContain("withQueueRecordMutation<RetryRejectedSaleResult>(");
+    expect(retryBody).toContain("decideRejectedSaleRetrySafety(");
+    expect(retryBody).toContain("beginOperatorRetry(record, now)");
+    expect(retryBody.match(/withQueueRecordMutation</g)?.length).toBe(1);
+    expect(retryBody).not.toContain("startOperatorRetry(");
+    expect(retryBody).not.toContain("putQueuedSale(");
   });
 
   it("a manual attempt cannot be the one that exhausts the budget", () => {

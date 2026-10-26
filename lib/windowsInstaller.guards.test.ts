@@ -200,7 +200,9 @@ describe("the packaged identity matches the locked design", () => {
   });
 
   it("Electron and electron-builder are pinned exactly", () => {
-    expect(shellPackage.devDependencies.electron).toBe("43.4.0");
+    // Batch B security: 43.4.0 → 43.8.3, a targeted patch release inside the
+    // same major (REPORT §BB security; Control Room authorization).
+    expect(shellPackage.devDependencies.electron).toBe("43.8.3");
     expect(shellPackage.devDependencies["electron-builder"]).toBe("26.15.3");
 
     for (const version of Object.values(shellPackage.devDependencies)) {
@@ -214,7 +216,7 @@ describe("the packaged identity matches the locked design", () => {
       packages: Record<string, { version?: string }>;
     };
 
-    expect(lock.packages["node_modules/electron"]?.version).toBe("43.4.0");
+    expect(lock.packages["node_modules/electron"]?.version).toBe("43.8.3");
     expect(lock.packages["node_modules/electron-builder"]?.version).toBe("26.15.3");
   });
 });

@@ -20,6 +20,18 @@
 // process exits WITHOUT ever touching the database or claiming a real
 // job — this is what makes `parseArgs` itself safely testable/callable
 // without a live Supabase project.
+//
+// OFF-2-EXACT-CLAIM-1 — EXACT-JOB MODE. `--job <uuid> --project <uuid>`
+// (both, together, with the usual explicit --target) replaces the global
+// claim_next_build_job with claim_build_job_by_id: one named job of one
+// named business, only while it is still queued (migration
+// 20261016120000). Everything after the claim — the scoped ownership
+// re-read, heartbeat, upload, read-back verification and finalize — is the
+// same code path, with one extra condition on the re-read: the row's
+// project must be the one named. Exact mode NEVER falls back to the global
+// claim; a job that is missing, unavailable or mismatched stops the run
+// (exit 1) without building anything. Without the two flags the worker is
+// exactly what it was.
 import { pathToFileURL } from "node:url";
 import type { BuildTarget } from "@/lib/buildJobs";
 import {
@@ -47,14 +59,49 @@ import type { ArtifactFailureReason } from "@/lib/buildJobs.artifact";
 import { createGeneratedPosConfigFilename } from "@/lib/generatedPosConfig";
 import { createWorkerAdminClient } from "@/worker/supabase";
 
+/** OFF-2-EXACT-CLAIM-1 — the one job, of the one business, exact mode may claim. */
+export type ExactJobSelection = { jobId: string; projectId: string };
+
 export type ParsedWorkerArgs =
-  | { ok: true; target: BuildTarget }
+  | { ok: true; target: BuildTarget; exact?: ExactJobSelection }
   | {
       ok: false;
-      reason: "help_requested" | "missing_target" | "invalid_target";
+      reason:
+        | "help_requested"
+        | "missing_target"
+        | "invalid_target"
+        | "exact_job_incomplete"
+        | "exact_flag_repeated"
+        | "invalid_job_id"
+        | "invalid_project_id";
     };
 
 const TARGET_FLAG = "--target";
+const JOB_FLAG = "--job";
+const PROJECT_FLAG = "--project";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Every occurrence of `--flag value` or `--flag=value`. A bare flag, or one
+ * followed by another flag, contributes `null` — present but valueless, which
+ * the caller treats as malformed rather than as absent.
+ */
+function readFlagValues(argv: string[], flag: string): (string | null)[] {
+  const values: (string | null)[] = [];
+
+  argv.forEach((arg, index) => {
+    if (arg === flag) {
+      const next = argv[index + 1];
+
+      values.push(next === undefined || next.startsWith("--") ? null : next);
+    } else if (arg.startsWith(`${flag}=`)) {
+      values.push(arg.slice(flag.length + 1));
+    }
+  });
+
+  return values;
+}
 
 // Feature 15.5 — pure, dependency-free argument parsing: no Supabase, no
 // process.exit, no I/O. Accepts either `--target android` or
@@ -70,7 +117,7 @@ export function parseArgs(argv: string[]): ParsedWorkerArgs {
 
   if (equalsForm) {
     const target = parseBuildTargetArg(equalsForm.slice(TARGET_FLAG.length + 1));
-    return target ? { ok: true, target } : { ok: false, reason: "invalid_target" };
+    return target ? withExactSelection(argv, target) : { ok: false, reason: "invalid_target" };
   }
 
   const flagIndex = argv.indexOf(TARGET_FLAG);
@@ -80,16 +127,148 @@ export function parseArgs(argv: string[]): ParsedWorkerArgs {
   }
 
   const target = parseBuildTargetArg(argv[flagIndex + 1]);
-  return target ? { ok: true, target } : { ok: false, reason: "invalid_target" };
+  return target ? withExactSelection(argv, target) : { ok: false, reason: "invalid_target" };
+}
+
+/**
+ * OFF-2-EXACT-CLAIM-1 — layered on a target that already parsed. No --job and
+ * no --project returns exactly what parseArgs always returned. Otherwise both
+ * must be present, once each, and both must be UUIDs; anything else is
+ * refused here, before any Supabase client exists.
+ */
+function withExactSelection(argv: string[], target: BuildTarget): ParsedWorkerArgs {
+  const jobs = readFlagValues(argv, JOB_FLAG);
+  const projects = readFlagValues(argv, PROJECT_FLAG);
+
+  if (jobs.length === 0 && projects.length === 0) {
+    return { ok: true, target };
+  }
+
+  if (jobs.length === 0 || projects.length === 0) {
+    return { ok: false, reason: "exact_job_incomplete" };
+  }
+
+  if (jobs.length > 1 || projects.length > 1) {
+    return { ok: false, reason: "exact_flag_repeated" };
+  }
+
+  const [jobId] = jobs;
+  const [projectId] = projects;
+
+  if (jobId === null || !UUID_PATTERN.test(jobId)) {
+    return { ok: false, reason: "invalid_job_id" };
+  }
+
+  if (projectId === null || !UUID_PATTERN.test(projectId)) {
+    return { ok: false, reason: "invalid_project_id" };
+  }
+
+  return { ok: true, target, exact: { jobId: jobId.toLowerCase(), projectId: projectId.toLowerCase() } };
 }
 
 export const HELP_TEXT = `Usage: npm run worker:once -- --target <android|desktop>
+       npm run worker:once -- --target <android|desktop> --job <uuid> --project <uuid>
 
 Claims at most one queued (or reclaimable stale) build job for the given
 target, generates a real json_config artifact, uploads it to private
 storage, verifies it, and marks the job succeeded only after that
 succeeds. Does not generate APKs, desktop installers, or any signed
-artifact — see the approved Feature 15.6 scope.`;
+artifact — see the approved Feature 15.6 scope.
+
+With --job and --project (both required together), claims ONLY that build
+job of that project, and only while it is still queued. It never falls
+back to claiming any other job; if that job cannot be claimed, the run
+stops with exit code 1 and builds nothing.`;
+
+const PARSE_FAILURE_MESSAGES: Record<Exclude<Extract<ParsedWorkerArgs, { ok: false }>["reason"], "help_requested">, string> = {
+  missing_target: "Missing required --target argument.",
+  invalid_target: 'Invalid --target argument (expected "android" or "desktop").',
+  exact_job_incomplete: "--job and --project must be given together.",
+  exact_flag_repeated: "--job and --project may each be given only once.",
+  invalid_job_id: "Invalid --job argument (expected a build job UUID).",
+  invalid_project_id: "Invalid --project argument (expected a project UUID).",
+};
+
+// ---------------------------------------------------------------------------
+// OFF-2-EXACT-CLAIM-1 — which claim RPC runs, and what its answer means.
+// Pure: no Supabase, no I/O. main() calls exactly these, so the routing the
+// tests prove is the routing that runs.
+// ---------------------------------------------------------------------------
+
+export type ClaimPlan =
+  | {
+      mode: "queue";
+      rpc: "claim_next_build_job";
+      args: { p_target: BuildTarget; p_worker_id: string; p_lease_seconds: number };
+    }
+  | {
+      mode: "exact";
+      rpc: "claim_build_job_by_id";
+      exact: ExactJobSelection;
+      args: {
+        p_build_job_id: string;
+        p_project_id: string;
+        p_target: BuildTarget;
+        p_worker_id: string;
+        p_lease_seconds: number;
+      };
+    };
+
+export function planClaim(
+  parsed: Extract<ParsedWorkerArgs, { ok: true }>,
+  workerId: string,
+  leaseSeconds: number = DEFAULT_LEASE_SECONDS
+): ClaimPlan {
+  if (parsed.exact === undefined) {
+    return {
+      mode: "queue",
+      rpc: "claim_next_build_job",
+      args: { p_target: parsed.target, p_worker_id: workerId, p_lease_seconds: leaseSeconds },
+    };
+  }
+
+  return {
+    mode: "exact",
+    rpc: "claim_build_job_by_id",
+    exact: parsed.exact,
+    args: {
+      p_build_job_id: parsed.exact.jobId,
+      p_project_id: parsed.exact.projectId,
+      p_target: parsed.target,
+      p_worker_id: workerId,
+      p_lease_seconds: leaseSeconds,
+    },
+  };
+}
+
+export type ClaimOutcome =
+  /** Proceed with the shared post-claim path. */
+  | { kind: "claimed" }
+  /** Queue mode only: an empty queue is a normal, successful run (exit 0). */
+  | { kind: "no_job_available" }
+  /** Exact mode: the named job could not be claimed. Stop, build nothing (exit 1). */
+  | { kind: "exact_job_unavailable" }
+  /** Exact mode: the claim answered with a different job or target. Stop, build nothing (exit 1). */
+  | { kind: "exact_job_mismatch" };
+
+export function decideClaimOutcome(
+  plan: ClaimPlan,
+  claimed: { id?: unknown; target?: unknown } | null | undefined
+): ClaimOutcome {
+  if (plan.mode === "queue") {
+    return claimed ? { kind: "claimed" } : { kind: "no_job_available" };
+  }
+
+  if (!claimed) {
+    return { kind: "exact_job_unavailable" };
+  }
+
+  const id = typeof claimed.id === "string" ? claimed.id.toLowerCase() : null;
+
+  return id === plan.exact.jobId && claimed.target === plan.args.p_target
+    ? { kind: "claimed" }
+    : { kind: "exact_job_mismatch" };
+}
 
 // Feature 15.5 — a single structured, single-line log record per step:
 // workerId, jobId (once known), target, event, and (on the final step)
@@ -196,11 +375,7 @@ export async function main(): Promise<void> {
       return;
     }
 
-    console.error(
-      parsed.reason === "missing_target"
-        ? `Missing required --target argument.\n\n${HELP_TEXT}`
-        : `Invalid --target argument (expected "android" or "desktop").\n\n${HELP_TEXT}`
-    );
+    console.error(`${PARSE_FAILURE_MESSAGES[parsed.reason]}\n\n${HELP_TEXT}`);
     process.exitCode = 1;
     return;
   }
@@ -208,25 +383,25 @@ export async function main(): Promise<void> {
   const { target } = parsed;
   const workerId = generateWorkerId();
   const startedAt = Date.now();
+  const plan = planClaim(parsed, workerId);
 
   // Feature 15.5 — createWorkerAdminClient() only ever runs after argument
   // validation has already passed, so a malformed CLI invocation never
   // even attempts to read Supabase env/create a service-role client.
   const admin = createWorkerAdminClient();
 
-  log({ workerId, target, event: "claim_attempt" });
-
-  const { data: claimRows, error: claimError } = await admin.rpc(
-    "claim_next_build_job",
-    {
-      p_target: target,
-      p_worker_id: workerId,
-      p_lease_seconds: DEFAULT_LEASE_SECONDS,
-    }
+  log(
+    plan.mode === "exact"
+      ? { workerId, target, mode: "exact", jobId: plan.exact.jobId, event: "claim_attempt" }
+      : { workerId, target, event: "claim_attempt" }
   );
 
+  // OFF-2-EXACT-CLAIM-1 — ONE claim call, chosen by planClaim. There is no
+  // second call: exact mode cannot fall through to the global claim.
+  const { data: claimRows, error: claimError } = await admin.rpc(plan.rpc, plan.args);
+
   if (claimError) {
-    console.error("claim_next_build_job failed:", claimError.message);
+    console.error(`${plan.rpc} failed:`, claimError.message);
     process.exitCode = 1;
     return;
   }
@@ -236,13 +411,31 @@ export async function main(): Promise<void> {
     | null
     | undefined;
 
-  if (!claimed) {
+  const claimOutcome = decideClaimOutcome(plan, claimed);
+
+  if (claimOutcome.kind === "no_job_available") {
     log({
       workerId,
       target,
       event: "no_job_available",
       durationMs: Date.now() - startedAt,
     });
+    return;
+  }
+
+  if (claimOutcome.kind !== "claimed" || !claimed) {
+    // Exact mode only. Nothing is built, uploaded or finalized. A mismatched
+    // claim (which the SQL cannot produce) is deliberately left alone rather
+    // than failed: this worker cannot prove the row it would touch is its own.
+    log({
+      workerId,
+      target,
+      mode: "exact",
+      jobId: plan.mode === "exact" ? plan.exact.jobId : undefined,
+      event: claimOutcome.kind,
+      durationMs: Date.now() - startedAt,
+    });
+    process.exitCode = 1;
     return;
   }
 
@@ -257,14 +450,23 @@ export async function main(): Promise<void> {
   // claim_token = the exact token this claim returned, and lease still
   // valid — the same trust boundary as Feature 15.5, just reading two
   // more columns from that same already-authorized row.
-  const { data: jobRow, error: readError } = await admin
+  //
+  // OFF-2-EXACT-CLAIM-1 — in exact mode the row must ALSO belong to the
+  // project that was named, so even a row returned by mistake could not be
+  // built under another business.
+  let ownedRowQuery = admin
     .from("build_jobs")
     .select("config_snapshot, config_schema_version, config_hash, owner_id, project_id")
     .eq("id", buildJobId)
     .eq("status", "building")
     .eq("claim_token", claimToken)
-    .gt("lease_expires_at", new Date().toISOString())
-    .maybeSingle();
+    .gt("lease_expires_at", new Date().toISOString());
+
+  if (plan.mode === "exact") {
+    ownedRowQuery = ownedRowQuery.eq("project_id", plan.exact.projectId);
+  }
+
+  const { data: jobRow, error: readError } = await ownedRowQuery.maybeSingle();
 
   if (readError) {
     // Feature 15.5 hardening correction — a genuine query error, not a

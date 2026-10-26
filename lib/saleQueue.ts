@@ -44,6 +44,24 @@ export const SALE_QUEUE_SCHEMA_VERSION = 1 as const;
  */
 export const SALE_REQUEST_PAYLOAD_VERSION = 4 as const;
 
+/**
+ * G-1-CLIENT-1 — the payload version of a STRICT-RECOVERY record: a sale whose
+ * online outcome was unknown, transferred into the queue with the ORIGINAL
+ * employee session, register and first-attempt time, and submitted only
+ * through complete_sale_recovery_v1.
+ *
+ * WHY A VERSION AND NOT JUST A FIELD. The strict requirement has to survive
+ * every reader that ever touches the record — this build after a restart, a
+ * retry, a sync, and an OLDER build after a rollback. A field alone fails the
+ * last one: an older reader ignores unknown fields and would submit the record
+ * through complete_sale_v5, which stores NULL for a claim it cannot prove. An
+ * unknown payload version is refused by every reader since 24.5C, so an older
+ * build quarantines the record instead of downgrading it. And in this build,
+ * version 5 with missing or damaged strict metadata is malformed — it is never
+ * read back as an ordinary sale.
+ */
+export const STRICT_RECOVERY_PAYLOAD_VERSION = 5 as const;
+
 // ---------------------------------------------------------------------------
 // The record
 // ---------------------------------------------------------------------------
@@ -201,7 +219,45 @@ export type QueuedSale = {
   // accepted fixtures and callers that build a record literal are untouched,
   // which is what keeps this change additive in practice and not just in name.
   blockedSaleReviews?: BlockedSaleReviewEntry[];
+
+  /**
+   * G-1-CLIENT-1 — present exactly when requestPayloadVersion is
+   * STRICT_RECOVERY_PAYLOAD_VERSION, and bound to the record's own claims:
+   * employeePosSessionId, registerSessionId and occurredAt must equal the
+   * originals here, or the record does not read back at all.
+   *
+   * Optional in the type for the same reason blockedSaleReviews is: every
+   * existing record literal and fixture stays valid.
+   */
+  strictRecovery?: StrictRecoveryClaims | null;
+
+  /**
+   * G-1-CLIENT-1A — set when strict recovery hit an unresolved conflict; keeps
+   * the till fenced until a validated receipt syncs the record. Strict records
+   * only; see applyRecoveryProtection.
+   */
+  recoveryProtection?: RecoveryProtection | null;
 };
+
+/** G-1-CLIENT-1A — why, and since when, a strict record keeps the till fenced. */
+export type RecoveryProtection = { code: string; since: string };
+
+/** G-1-CLIENT-1 — what a strict-recovery record was armed with, originally. */
+export type StrictRecoveryClaims = {
+  originalEmployeeId: string;
+  originalEmployeePosSessionId: string;
+  originalRegisterSessionId: string;
+  originalAttemptAt: string;
+};
+
+/** G-1-CLIENT-1 — must this record be submitted through strict recovery? */
+export function isStrictRecoverySale(record: QueuedSale): boolean {
+  return (
+    record.requestPayloadVersion === STRICT_RECOVERY_PAYLOAD_VERSION &&
+    record.strictRecovery !== undefined &&
+    record.strictRecovery !== null
+  );
+}
 
 /**
  * One recorded decision. Structurally identical to
@@ -384,17 +440,106 @@ export function transitionQueuedSale(
     return { ok: false, reason: "illegal_transition", from: record.state, to };
   }
 
-  return {
-    ok: true,
-    record: {
-      ...record,
-      state: to,
-      updatedAt: now,
-      lastErrorCode: patch.lastErrorCode ?? null,
-      lastErrorMessage: patch.lastErrorMessage ?? null,
-      nextAttemptAt: patch.nextAttemptAt ?? null,
-    },
+  const moved: QueuedSale = {
+    ...record,
+    state: to,
+    updatedAt: now,
+    lastErrorCode: patch.lastErrorCode ?? null,
+    lastErrorMessage: patch.lastErrorMessage ?? null,
+    nextAttemptAt: patch.nextAttemptAt ?? null,
   };
+
+  return { ok: true, record: applyRecoveryProtection(moved, to, patch.lastErrorCode ?? null, now) };
+}
+
+// ---------------------------------------------------------------------------
+// G-1-CLIENT-1A — persistent recovery-conflict protection
+// ---------------------------------------------------------------------------
+
+/**
+ * The strict-recovery answers that mean the server holds — or will not let
+ * this till prove — something it cannot reconcile with the sale's ORIGINAL
+ * identity and attribution: a conflict, another till's order, a different sale
+ * under the id, unprovable claims, unreadable strict metadata or an unreadable
+ * answer. Under the approved rule these keep the till FENCED (no new checkout)
+ * until the sale is authoritatively resolved.
+ *
+ * DELIBERATELY NOT HERE: the no-answer outcomes (transport, timeout, unknown,
+ * and their exhausted forms) and a missing recovery function. Those mean "not
+ * yet known"; the sale is durably queued under its own id and simply retries,
+ * exactly like any healthy queued sale.
+ */
+export const RECOVERY_PROTECTION_CODES: readonly string[] = [
+  "attribution_conflict",
+  "not_this_device",
+  "hash_conflict",
+  "recovery_attribution_unproven",
+  "recovery_employee_unverified",
+  "recovery_register_unverified",
+  "recovery_claims_missing",
+  "recovery_time_missing",
+  "recovery_not_recorded",
+  "recovery_metadata_invalid",
+  "unrecognised_server_error",
+];
+
+/**
+ * The protection is set ONCE, when a strict record is filed as needing
+ * attention for one of the codes above, and then survives every later
+ * transition — Retry back to pending, backoff, startup recovery, a later
+ * no-answer failure — because those spread the record. It is cleared by one
+ * transition only: `synced`, which markSynced reaches solely with a validated
+ * server receipt. Ordinary records never carry it.
+ */
+function applyRecoveryProtection(
+  record: QueuedSale,
+  to: QueueState,
+  code: string | null,
+  now: string
+): QueuedSale {
+  if (to === "synced") {
+    if (record.recoveryProtection === undefined) return record;
+
+    const { recoveryProtection: _cleared, ...resolved } = record;
+
+    void _cleared;
+
+    return resolved;
+  }
+
+  if (
+    to === "needs_attention" &&
+    isStrictRecoverySale(record) &&
+    (record.recoveryProtection === undefined || record.recoveryProtection === null) &&
+    code !== null &&
+    RECOVERY_PROTECTION_CODES.includes(code)
+  ) {
+    return { ...record, recoveryProtection: { code, since: now } };
+  }
+
+  return record;
+}
+
+/** G-1-CLIENT-1A — does this readable record keep the till fenced? */
+export function isRecoveryProtected(record: QueuedSale): boolean {
+  return record.recoveryProtection !== undefined && record.recoveryProtection !== null;
+}
+
+/**
+ * G-1-CLIENT-1A — a stored row that could not be read, but LOOKS like strict
+ * recovery state. Its protection cannot be proven absent, so it fails safe.
+ * An unreadable ORDINARY row keeps today's policy (shown, never blocking).
+ */
+export function looksLikeStrictRecoveryRow(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+
+  const raw = value as Record<string, unknown>;
+
+  return (
+    raw.requestPayloadVersion === STRICT_RECOVERY_PAYLOAD_VERSION ||
+    (raw.strictRecovery !== undefined && raw.strictRecovery !== null) ||
+    (raw.recoveryProtection !== undefined && raw.recoveryProtection !== null)
+  );
 }
 
 /**
@@ -656,9 +801,26 @@ export function readQueuedSale(value: unknown): QueueReadResult {
 
   if (
     raw.queueSchemaVersion !== SALE_QUEUE_SCHEMA_VERSION ||
-    raw.requestPayloadVersion !== SALE_REQUEST_PAYLOAD_VERSION
+    (raw.requestPayloadVersion !== SALE_REQUEST_PAYLOAD_VERSION &&
+      raw.requestPayloadVersion !== STRICT_RECOVERY_PAYLOAD_VERSION)
   ) {
     return { ok: false, reason: "unsupported_schema" };
+  }
+
+  const requestPayloadVersion: number = raw.requestPayloadVersion;
+
+  // G-1-CLIENT-1 — the strict requirement and its metadata travel TOGETHER or
+  // the record does not read. A strict version without valid originals, or an
+  // ordinary version carrying strict metadata, is malformed: quarantined and
+  // visible, never submitted as something it is not.
+  const strictRecovery = readStrictRecoveryClaims(raw.strictRecovery);
+
+  if (
+    strictRecovery === "malformed" ||
+    (requestPayloadVersion === STRICT_RECOVERY_PAYLOAD_VERSION && strictRecovery === null) ||
+    (requestPayloadVersion === SALE_REQUEST_PAYLOAD_VERSION && strictRecovery !== null)
+  ) {
+    return { ok: false, reason: "malformed" };
   }
 
   const queueRecordId = nonEmptyString(raw.queueRecordId);
@@ -733,11 +895,35 @@ export function readQueuedSale(value: unknown): QueueReadResult {
     return { ok: false, reason: "invalid_items" };
   }
 
+  const employeePosSessionId = nonEmptyString(raw.employeePosSessionId);
+  const registerSessionId = nonEmptyString(raw.registerSessionId);
+
+  // G-1-CLIENT-1 — a strict record's submitted claims ARE its originals. Any
+  // divergence means the record could sync under something other than what was
+  // armed, so it does not read back.
+  if (
+    strictRecovery !== null &&
+    (employeePosSessionId !== strictRecovery.originalEmployeePosSessionId ||
+      registerSessionId !== strictRecovery.originalRegisterSessionId ||
+      occurredAt !== strictRecovery.originalAttemptAt)
+  ) {
+    return { ok: false, reason: "malformed" };
+  }
+
+  // G-1-CLIENT-1A — protection is strict-only and must be well formed. A
+  // damaged one, or one on an ordinary record, does not read back: the row is
+  // quarantined and, being strict-looking, fails safe in the fence.
+  const recoveryProtection = readRecoveryProtection(raw.recoveryProtection);
+
+  if (recoveryProtection === "malformed" || (recoveryProtection !== null && strictRecovery === null)) {
+    return { ok: false, reason: "malformed" };
+  }
+
   return {
     ok: true,
     record: {
       queueSchemaVersion: SALE_QUEUE_SCHEMA_VERSION,
-      requestPayloadVersion: SALE_REQUEST_PAYLOAD_VERSION,
+      requestPayloadVersion,
       queueRecordId,
       saleRequestId,
       deviceAuthUserId,
@@ -767,12 +953,55 @@ export function readQueuedSale(value: unknown): QueueReadResult {
       // and absent whenever the till had nothing to claim. Null either way: a
       // missing claim is never a reason to refuse a record that is otherwise
       // readable, because the money it represents has already changed hands.
-      employeePosSessionId: nonEmptyString(raw.employeePosSessionId),
-      registerSessionId: nonEmptyString(raw.registerSessionId),
+      employeePosSessionId,
+      registerSessionId,
       // v1.3 CP-2B item C — absent on every record written before this, which
       // reads back as "nobody has reviewed it". See the field's own note.
       blockedSaleReviews: readBlockedSaleReviews(raw.blockedSaleReviews),
+      // G-1-CLIENT-1 — only a strict record carries the key at all, so every
+      // ordinary record reads back exactly as it did before.
+      ...(strictRecovery !== null ? { strictRecovery } : {}),
+      ...(recoveryProtection !== null ? { recoveryProtection } : {}),
     },
+  };
+}
+
+function readRecoveryProtection(value: unknown): RecoveryProtection | null | "malformed" {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "malformed";
+
+  const raw = value as Record<string, unknown>;
+  const code = nonEmptyString(raw.code);
+  const since = isoTimestamp(raw.since);
+
+  return code === null || since === null ? "malformed" : { code, since };
+}
+
+/** Absent is null; present must be complete, or it is malformed. */
+function readStrictRecoveryClaims(value: unknown): StrictRecoveryClaims | null | "malformed" {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "malformed";
+
+  const raw = value as Record<string, unknown>;
+  const originalEmployeeId = nonEmptyString(raw.originalEmployeeId);
+  const originalEmployeePosSessionId = nonEmptyString(raw.originalEmployeePosSessionId);
+  const originalRegisterSessionId = nonEmptyString(raw.originalRegisterSessionId);
+  const originalAttemptAt = isoTimestamp(raw.originalAttemptAt);
+
+  if (
+    originalEmployeeId === null ||
+    originalEmployeePosSessionId === null ||
+    originalRegisterSessionId === null ||
+    originalAttemptAt === null
+  ) {
+    return "malformed";
+  }
+
+  return {
+    originalEmployeeId,
+    originalEmployeePosSessionId,
+    originalRegisterSessionId,
+    originalAttemptAt,
   };
 }
 

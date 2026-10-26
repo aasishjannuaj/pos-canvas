@@ -824,8 +824,12 @@ describe("the cashier is told the truth about what is waiting", () => {
     const runtime = code(read(RUNTIME));
     const clears = runtime.split("setUncertainSale(null)").length - 1;
 
-    // Exactly two: an online receipt, and a durable offline enqueue.
-    expect(clears).toBe(2);
+    // SUPERSEDED IN PART BY G-1-CLIENT-1: exactly THREE — an online receipt, a
+    // durable offline enqueue, and a host-reported recovery resolution (a
+    // validated receipt, a validated lookup match, or a verified strict queue
+    // transfer). The third is pinned positionally below: never on a protected
+    // outcome.
+    expect(clears).toBe(3);
 
     // Never on a rejection — authorization is checked before the idempotency
     // lookup, so a refusal proves nothing about the original request.
@@ -834,6 +838,17 @@ describe("the cashier is told the truth about what is waiting", () => {
 
     expect(failure).toBeGreaterThan(-1);
     expect(runtime.slice(failure, rejectReturn)).not.toContain("setUncertainSale(null)");
+
+    // G-1-CLIENT-1 — a PROTECTED recovery outcome returns before any clear.
+    const recovered = runtime.indexOf("const recovered = await recoverOutstandingSale(");
+    const protectedBranch = runtime.indexOf('if (recovered.kind === "protected") {', recovered);
+    const protectedReturn = runtime.indexOf("return;", protectedBranch);
+    const recoveryClear = runtime.indexOf("setUncertainSale(null)", recovered);
+
+    expect(recovered).toBeGreaterThan(-1);
+    expect(protectedBranch).toBeGreaterThan(recovered);
+    expect(runtime.slice(recovered, protectedReturn)).not.toContain("setUncertainSale(null)");
+    expect(recoveryClear).toBeGreaterThan(protectedReturn);
   });
 
   it("the gate compares the SAME fingerprint the server hashes", () => {
@@ -1669,8 +1684,10 @@ describe("CP-2B final: the checkout authorization lifecycle", () => {
 
     const invalidations = [...runtime.matchAll(/invalidateCheckoutAuthorization\?\.\(/g)];
 
-    // close + offline success + online success.
-    expect(invalidations).toHaveLength(3);
+    // close + offline success + online success, and — SUPERSEDED IN PART BY
+    // G-1-CLIENT-1 — a resolved recovery, which spends its checkout exactly as
+    // either success does.
+    expect(invalidations).toHaveLength(4);
 
     const close = runtime.indexOf("function closeCheckout()");
     const closeBody = runtime.slice(close, runtime.indexOf("function selectPaymentMethod(", close));

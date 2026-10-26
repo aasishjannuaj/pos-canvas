@@ -67,12 +67,41 @@ export type PersistedUncertainSale = {
   fingerprint: string;
   /** ISO, device clock: when the request was about to leave. */
   dispatchedAt: string;
+  /**
+   * G-1-CLIENT-1 — who rang this sale, on which register, and when it was
+   * FIRST attempted. Captured once, at the first arm, and never rewritten.
+   *
+   * NULL MEANS LEGACY, never "use whoever is signed in now". A record written
+   * before this field existed reads back with null, and nothing anywhere may
+   * fill it in later from the current gate: that substitution is exactly the
+   * G-1 defect. A null record can only be resolved by a server lookup match.
+   *
+   * ADDITIVE AND OPTIONAL in storage, so the envelope version does not move
+   * and an older build reading a newer record simply ignores it.
+   */
+  originalAttribution: OriginalSaleAttribution | null;
+};
+
+/**
+ * G-1-CLIENT-1 — the original attribution claims, exactly as the server's
+ * complete_sale_recovery_v1 takes them. The employee id is carried for the
+ * client's own routing decision only; the server derives the employee from the
+ * session and never accepts it from the caller.
+ */
+export type OriginalSaleAttribution = {
+  employeeId: string;
+  employeePosSessionId: string;
+  registerSessionId: string;
+  /** ISO, device clock: the first time this sale was attempted. */
+  attemptedAt: string;
 };
 
 export function buildUncertainSaleRecord(input: {
   sale: UncertainSale;
   identity: UncertainSaleIdentity;
   dispatchedAt: string;
+  /** G-1-CLIENT-1 — null only when the host has nothing to claim. */
+  originalAttribution?: OriginalSaleAttribution | null;
 }): PersistedUncertainSale {
   return {
     schemaVersion: UNCERTAIN_SALE_SCHEMA_VERSION,
@@ -94,7 +123,42 @@ export function buildUncertainSaleRecord(input: {
     })),
     fingerprint: input.sale.fingerprint,
     dispatchedAt: input.dispatchedAt,
+    originalAttribution:
+      input.originalAttribution === undefined || input.originalAttribution === null
+        ? null
+        : { ...input.originalAttribution },
   };
+}
+
+/**
+ * G-1-CLIENT-1 — the record a RE-ARM of an already-armed sale writes.
+ *
+ * Re-arming happens when the same sale is dispatched again under its original
+ * key. By then a different employee may be signed in, the register may have
+ * rolled over, and the clock has moved — none of which may touch who rang the
+ * sale or when. So everything is taken from the stored record and only
+ * `dispatchedAt` moves.
+ *
+ * REFUSES (null) whenever the stored record is not provably this same sale:
+ * a different key, a different fingerprint or a different pairing. Overwriting
+ * it would destroy the only evidence of a different request.
+ *
+ * A LEGACY RECORD STAYS LEGACY. Its null attribution is carried through as
+ * null; the caller's current employee is never used to fill it in.
+ */
+export function rearmUncertainSaleRecord(
+  stored: PersistedUncertainSale,
+  next: PersistedUncertainSale
+): PersistedUncertainSale | null {
+  if (
+    stored.saleRequestId !== next.saleRequestId ||
+    stored.fingerprint !== next.fingerprint ||
+    !ownsUncertainSale(stored, next)
+  ) {
+    return null;
+  }
+
+  return { ...stored, dispatchedAt: next.dispatchedAt };
 }
 
 export type UncertainSaleReadFailure = "missing" | "malformed" | "unsupported_schema";
@@ -177,6 +241,15 @@ export function readUncertainSaleRecord(value: unknown): UncertainSaleReadResult
     return { ok: false, reason: "malformed" };
   }
 
+  // G-1-CLIENT-1 — absent is legacy; present must be complete and well formed.
+  // A half-written attribution is NOT read as legacy, because "legacy" may be
+  // resolved by a lookup match while a damaged claim proves nothing at all.
+  const originalAttribution = readOriginalAttribution(raw.originalAttribution);
+
+  if (originalAttribution === "malformed") {
+    return { ok: false, reason: "malformed" };
+  }
+
   return {
     ok: true,
     record: {
@@ -191,8 +264,34 @@ export function readUncertainSaleRecord(value: unknown): UncertainSaleReadResult
       items,
       fingerprint,
       dispatchedAt,
+      originalAttribution,
     },
   };
+}
+
+function readOriginalAttribution(value: unknown): OriginalSaleAttribution | null | "malformed" {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "malformed";
+
+  const raw = value as Record<string, unknown>;
+  const employeeId = nonEmptyString(raw.employeeId);
+  const employeePosSessionId = nonEmptyString(raw.employeePosSessionId);
+  const registerSessionId = nonEmptyString(raw.registerSessionId);
+  const attemptedAt =
+    typeof raw.attemptedAt === "string" && parseIsoTime(raw.attemptedAt) !== null
+      ? raw.attemptedAt
+      : null;
+
+  if (
+    employeeId === null ||
+    employeePosSessionId === null ||
+    registerSessionId === null ||
+    attemptedAt === null
+  ) {
+    return "malformed";
+  }
+
+  return { employeeId, employeePosSessionId, registerSessionId, attemptedAt };
 }
 
 function readItems(value: unknown): SaleSubmissionItem[] | null {

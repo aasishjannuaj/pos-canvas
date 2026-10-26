@@ -106,6 +106,27 @@ export const KNOWN_SERVER_ERRORS: Readonly<Record<string, string>> = {
   "This device is not linked to a usable build": "build_unavailable",
   "Authentication required": "not_authenticated",
 
+  // G-1-CLIENT-1 — strict recovery (complete_sale_recovery_v1). Every one is a
+  // DEFINITE answer about this sale's attribution or scope, so it goes to
+  // needs_attention and stays there: retrying it would get the same answer, and
+  // retrying it anywhere else (complete_sale_v5) would store the wrong one.
+  "Recovery requires the original employee session and register": "recovery_claims_missing",
+  "Recovery requires the original attempt time": "recovery_time_missing",
+  "The original employee session could not be verified": "recovery_employee_unverified",
+  "The original register could not be verified": "recovery_register_unverified",
+  "The original employee and register could not be proven for this sale":
+    "recovery_attribution_unproven",
+  "The recovered sale was not recorded": "recovery_not_recorded",
+  "Only the original employee can recover this sale online": "recovery_wrong_employee",
+  "An online recovery cannot declare its own sale time": "recovery_source_mismatch",
+  "Online recovery requires the signed-in employee session": "recovery_session_missing",
+  // Synthesized by lib/offlineSaleRpc.ts from a VALID non-receipt answer or a
+  // missing function. Never parsed from free text the server chose.
+  "Recovery attribution conflict": "attribution_conflict",
+  "Recovery refused: the order belongs to another device": "not_this_device",
+  "Strict recovery is not available on this server": "recovery_unavailable",
+  "Strict recovery metadata is missing or unreadable": "recovery_metadata_invalid",
+
   // Contract — the request itself is not acceptable.
   "Invalid sale source": "invalid_source",
   "Sale request ID was already used for a different order": "hash_conflict",
@@ -133,6 +154,13 @@ export const KNOWN_SERVER_ERRORS: Readonly<Record<string, string>> = {
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
+
+/** G-1-CLIENT-1 — the synthesized strict-recovery messages, named once. */
+export const STRICT_RECOVERY_CONFLICT_MESSAGE = "Recovery attribution conflict";
+export const STRICT_RECOVERY_NOT_THIS_DEVICE_MESSAGE =
+  "Recovery refused: the order belongs to another device";
+export const STRICT_RECOVERY_UNAVAILABLE_MESSAGE = "Strict recovery is not available on this server";
+export const STRICT_RECOVERY_METADATA_MESSAGE = "Strict recovery metadata is missing or unreadable";
 
 export type SyncOutcome =
   | { outcome: "retry"; code: string }

@@ -18,9 +18,18 @@
 import { getDeviceSupabaseClient } from "@/lib/supabase/deviceClient";
 import { isCompletedSaleReceipt } from "@/lib/completedSale";
 import type { CompletedSaleReceipt } from "@/lib/completedSale";
-import { toSubmissionFailure } from "@/lib/saleSyncClassifier";
+import {
+  STRICT_RECOVERY_CONFLICT_MESSAGE,
+  STRICT_RECOVERY_METADATA_MESSAGE,
+  STRICT_RECOVERY_NOT_THIS_DEVICE_MESSAGE,
+  STRICT_RECOVERY_UNAVAILABLE_MESSAGE,
+  toSubmissionFailure,
+} from "@/lib/saleSyncClassifier";
 import type { SubmissionFailure } from "@/lib/saleSyncClassifier";
+import { STRICT_RECOVERY_PAYLOAD_VERSION, isStrictRecoverySale } from "@/lib/saleQueue";
 import type { QueuedSale } from "@/lib/saleQueue";
+import { submitSaleRecovery } from "@/lib/saleRecoveryRpc";
+import type { RecoveryRpcCall } from "@/lib/saleRecoveryRpc";
 
 export type OfflineSaleSubmission =
   | { ok: true; receipt: CompletedSaleReceipt }
@@ -87,10 +96,19 @@ const defaultRpc: SaleRpcCall = async (args, signal) => {
  */
 export async function submitQueuedSale(
   record: QueuedSale,
-  options: { timeoutMs?: number; rpc?: SaleRpcCall } = {}
+  options: { timeoutMs?: number; rpc?: SaleRpcCall; recoveryRpc?: RecoveryRpcCall } = {}
 ): Promise<OfflineSaleSubmission> {
   const timeoutMs = options.timeoutMs ?? SALE_SUBMISSION_TIMEOUT_MS;
   const rpc = options.rpc ?? defaultRpc;
+
+  // G-1-CLIENT-1 — A STRICT RECORD NEVER REACHES complete_sale_v5. Decided on
+  // the payload version OR the presence of strict metadata, whichever says
+  // "strict", and checked before anything is built for v5: a record that is
+  // strict in any respect but whose metadata is unusable is refused here, not
+  // downgraded.
+  if (record.requestPayloadVersion === STRICT_RECOVERY_PAYLOAD_VERSION || record.strictRecovery != null) {
+    return submitStrictRecoverySale(record, { timeoutMs, rpc: options.recoveryRpc });
+  }
 
   const controller = new AbortController();
 
@@ -195,4 +213,96 @@ export async function submitQueuedSale(
  */
 function timeoutFailure(): SubmissionFailure {
   return { transport: "unknown", message: SALE_TIMEOUT_MESSAGE, timedOut: true };
+}
+
+/**
+ * G-1-CLIENT-1 — submits a STRICT-RECOVERY record through
+ * complete_sale_recovery_v1, under its original employee session, register and
+ * first-attempt time, and through nothing else.
+ *
+ * The same persisted saleRequestId as always, so a retry after a lost response
+ * replays; and the server either stores exactly the originals or rolls the
+ * whole sale back — it never stores a NULL or substituted attribution.
+ *
+ * Every non-receipt answer becomes a SubmissionFailure the existing classifier
+ * already knows how to file: a timeout or an unknown transport retries under
+ * the same id; an attribution conflict, another till's order, a missing
+ * function or an unreadable answer goes to needs_attention. None of them is
+ * ever retried through complete_sale_v5.
+ */
+async function submitStrictRecoverySale(
+  record: QueuedSale,
+  options: { timeoutMs: number; rpc?: RecoveryRpcCall }
+): Promise<OfflineSaleSubmission> {
+  const strict = record.strictRecovery;
+
+  if (!isStrictRecoverySale(record) || strict == null) {
+    return {
+      ok: false,
+      failure: { transport: "server_rejected", message: STRICT_RECOVERY_METADATA_MESSAGE },
+    };
+  }
+
+  const result = await submitSaleRecovery(
+    {
+      saleRequestId: record.saleRequestId,
+      paymentMethod: record.paymentMethod,
+      tipAmount: record.tipAmount,
+      items: record.items,
+      originalEmployeePosSessionId: strict.originalEmployeePosSessionId,
+      originalRegisterSessionId: strict.originalRegisterSessionId,
+      source: "offline_queued",
+      originalAttemptAt: strict.originalAttemptAt,
+    },
+    { timeoutMs: options.timeoutMs, rpc: options.rpc }
+  );
+
+  if (result.kind === "failed") {
+    if (result.timedOut) {
+      return { ok: false, failure: timeoutFailure() };
+    }
+
+    if (result.failure === "missing") {
+      return {
+        ok: false,
+        failure: { transport: "server_rejected", message: STRICT_RECOVERY_UNAVAILABLE_MESSAGE },
+      };
+    }
+
+    return {
+      ok: false,
+      failure: {
+        transport:
+          result.failure === "transport"
+            ? "transport"
+            : result.failure === "rejected"
+              ? "server_rejected"
+              : "unknown",
+        message: result.message,
+      },
+    };
+  }
+
+  const answer = result.answer;
+
+  switch (answer.status) {
+    case "created":
+    case "replayed":
+      return { ok: true, receipt: answer.receipt };
+    case "attribution_conflict":
+      return {
+        ok: false,
+        failure: { transport: "server_rejected", message: STRICT_RECOVERY_CONFLICT_MESSAGE },
+      };
+    case "not_this_device":
+      return {
+        ok: false,
+        failure: { transport: "server_rejected", message: STRICT_RECOVERY_NOT_THIS_DEVICE_MESSAGE },
+      };
+    case "malformed":
+      return {
+        ok: false,
+        failure: { transport: "server_rejected", message: "Malformed sale response" },
+      };
+  }
 }

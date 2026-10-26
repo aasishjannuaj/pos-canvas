@@ -14,7 +14,30 @@ import {
   runtimeSupportedTimezones,
 } from "@/lib/businessTimezone";
 import { completeSaleOrderV3 } from "@/lib/orders";
-import { restockInventory, adjustInventory } from "@/lib/inventory";
+import {
+  countInventory,
+  describeInventoryActionError,
+  isDefinitiveInventoryActionError,
+  receiveInventory,
+  setItemTracking,
+} from "@/lib/inventoryActions";
+import type { InventoryAction, InventoryActionResult } from "@/lib/inventoryActions";
+import { browserStorage } from "@/lib/inventoryPending";
+import type { QuarantineResult, QuarantineView } from "@/lib/inventoryPending";
+// Correction C5 — atomic IndexedDB storage; localStorage is read only as the migration source.
+import {
+  beginPendingStore,
+  quarantineStore,
+  readPendingStore,
+  readQuarantineStore,
+  settlePendingStore,
+} from "@/lib/inventoryPendingStore";
+import type { StoreRead } from "@/lib/inventoryPendingStore";
+import { createClient } from "@/lib/supabase/client";
+import type { PendingInventoryAction } from "@/lib/inventoryPending";
+import { afterAction, afterSave, isStructuralChange } from "@/lib/catalogVersion";
+import { describeHistory, fetchInventoryHistory } from "@/lib/inventoryHistory";
+import type { HistoryEntry } from "@/lib/inventoryHistory";
 import type { InventoryTransaction } from "@/lib/inventory.types";
 import type { OrderTotal } from "@/lib/dashboard.types";
 import ProjectDashboard from "@/components/dashboard/ProjectDashboard";
@@ -24,6 +47,8 @@ import CashActivityReport from "@/components/dashboard/CashActivityReport";
 import EmployeeManagementPanel from "@/components/employees/EmployeeManagementPanel";
 import ProductPerformance from "@/components/dashboard/ProductPerformance";
 import InventorySummary from "@/components/dashboard/InventorySummary";
+import HeldSales from "@/components/dashboard/HeldSales";
+import { fetchHoldList } from "@/lib/saleHolds";
 import ReceiptPreview from "./ReceiptPreview";
 import {
   CURRENCY_SYMBOLS,
@@ -155,9 +180,36 @@ export type EditorSection =
   // v1.3 Task 5E — owner-facing cash movement events.
   | "Cash Activity"
   | "Product Performance"
-  | "Inventory Summary";
+  | "Inventory Summary"
+  // LF-2 Scope 2 — owner review of held uploads; local_first_enabled only.
+  | "Held Sales";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+// Correction C1 — owner-facing refusals; in each case NOTHING was sent.
+const PENDING_BLOCK_MESSAGE: Record<"storage_unavailable" | "unreadable_record" | "history_uncertain", string> = {
+  storage_unavailable:
+    "This browser cannot keep a record of stock changes, so none can be sent safely. Nothing was sent. Allow site storage, or use another browser.",
+  unreadable_record:
+    "An earlier stock change on this browser cannot be read, so it is unknown whether it was recorded. Nothing new was sent. Check the inventory audit history below, then clear the unreadable record.",
+  // C7: readable, but this browser's history shows that request may already have been settled or quarantined.
+  history_uncertain:
+    "An earlier stock change on this browser may already have been recorded or set aside (this browser's history mentions it). It will not be sent automatically. Nothing new was sent. Review it below.",
+};
+// Correction C4 — what happened when the owner asked to quarantine a record.
+const QUARANTINE_RESULT_MESSAGE: Record<QuarantineResult["status"], string> = {
+  quarantined: "Quarantined. The original bytes are kept; the server outcome stays unknown.",
+  gone: "Nothing done: this record was already handled in another window.",
+  changed: "Nothing done: this record changed since you reviewed it. Review it again.",
+  repaired: "Nothing done: this record is readable again and will be finished normally.",
+  quarantine_failed: "Nothing done: the quarantine copy could not be saved, so the original is kept. Stock changes stay blocked.",
+  archived_original_kept: "A copy was quarantined, but the original changed before it could be moved. The original is kept; review it again.",
+  archived_removal_pending:
+    "A verified copy was quarantined, but the original could not be moved yet. It will be finished the next time this page loads; stock changes stay blocked until then.",
+  invalid: "A reason and the acknowledgement are required.",
+};
+const PERSIST_FAILED_MESSAGE =
+  "This browser could not save the stock change before sending it (storage full or blocked). Nothing was sent; try again.";
 
 // Feature 14.2 — fully separate from SaveStatus/isDirty above. Export never
 // reuses or mutates the save-state model: it only ever reads projectId/
@@ -235,6 +287,8 @@ type EditorShellProps = {
   // stored in ProjectConfig). Optional/defaulted here as a defensive
   // fallback only — the page component always resolves and passes a value.
   layout?: PosLayout;
+  /** Batch A — projects.catalog_version at load time (0 for a new project). */
+  initialCatalogVersion?: number;
 };
 
 export default function EditorShell({
@@ -250,6 +304,7 @@ export default function EditorShell({
   initialOrderTotals,
   initialOrderTotalsError,
   layout = DEFAULT_POS_LAYOUT,
+  initialCatalogVersion,
 }: EditorShellProps) {
   const router = useRouter();
 
@@ -329,6 +384,8 @@ export default function EditorShell({
 
   // Feature 9.6 — restock status for the current restock attempt.
   const [restockStatus, setRestockStatus] = useState<RestockStatus>("idle");
+  // Batch A — tracking-switch errors for saved items (set_item_tracking).
+  const [trackingError, setTrackingError] = useState<string | null>(null);
   const [restockError, setRestockError] = useState<string | null>(null);
   const [restockSuccessMessage, setRestockSuccessMessage] = useState<
     string | null
@@ -398,6 +455,33 @@ export default function EditorShell({
   // state are both derived from the combination of the two in
   // EditorTopBar, not stored redundantly here.
   const [projectId, setProjectId] = useState<string | null>(initialProjectId ?? null);
+  // Batch A (Inventory foundations) — the catalog version this copy was loaded
+  // at (sent as base_catalog_version on save), the ids the server already holds
+  // (their stock and tracking change only through the audited actions), and the
+  // request ids of stock actions awaiting a definitive answer.
+  const [savedItemIds, setSavedItemIds] = useState<ReadonlySet<string>>(
+    () => new Set((initialProjectId ?? null) !== null ? (initialConfig?.menuItems ?? []).map((item) => item.id) : [])
+  );
+  // The version used for the NEXT save, read synchronously by the version rules.
+  const catalogVersionRef = useRef<number>(initialCatalogVersion ?? 0);
+  const [catalogStale, setCatalogStale] = useState(false);
+  // LF-2 Scope 2 — null until the server says this business has local-first
+  // sales enabled; the RPC being absent (migration not applied) also leaves it null.
+  const [heldSalesCount, setHeldSalesCount] = useState<number | null>(null);
+  const inFlightRef = useRef(
+    new Map<string, Promise<{ result: InventoryActionResult | null; error: string | null }>>()
+  );
+  const [pendingNotice, setPendingNotice] = useState<string | null>(null);
+  // Correction C1 — pending storage that cannot be read is NOT an empty queue:
+  // new stock actions stay refused until it is resolved.
+  const [pendingBlock, setPendingBlock] = useState<{ reason: "storage_unavailable" | "unreadable_record" | "history_uncertain"; keys: string[] } | null>(null);
+  // Correction C4 — the raw bytes of each unreadable record (what the owner reviews
+  // before quarantining it) and the protected quarantine, which is never emptied.
+  const [unreadableRecords, setUnreadableRecords] = useState<{ key: string; raw: string | null }[]>([]);
+  const [quarantineViews, setQuarantineViews] = useState<QuarantineView[]>([]);
+  const [quarantineNotice, setQuarantineNotice] = useState<string | null>(null);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   // v1.3 Task 5A — the business timezone the owner is editing, and the one the
   // database currently holds. TWO VALUES ON PURPOSE: the difference between
@@ -1269,9 +1353,217 @@ export default function EditorShell({
     setSelectedReceiptId(null);
   }
 
-  // Feature 9.6 — restock an inventory-tracked item via the atomic
-  // restock_inventory RPC. The RPC's returned quantityAfter is authoritative;
-  // this handler never computes a new stock number itself.
+  // Batch A/B (Inventory) — "Received +N", "Counted = N" and the tracking switch
+  // go through the owner-only, audited, REQUEST-BOUND actions
+  // (lib/inventoryActions.ts). The server's before/after is authoritative; this
+  // shell never computes a stock number.
+  //
+  // Batch B — the request is written to durable storage (lib/inventoryPending.ts)
+  // BEFORE it is dispatched and removed only on a definitive answer, so a reply
+  // lost before a reload is re-sent with its ORIGINAL request id and replayed by
+  // the server instead of applied twice. Catalog versions come from the server and
+  // are adopted only when this tab's snapshot is provably current
+  // (lib/catalogVersion.ts); otherwise the tab is marked stale.
+  function itemNameFor(itemId: string): string {
+    return projectConfig.menuItems.find((item) => item.id === itemId)?.name || itemId;
+  }
+
+  function adoptStock(itemId: string, after: number) {
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) =>
+        item.id === itemId ? { ...item, stockQuantity: after } : item
+      ),
+    }));
+  }
+
+  function adoptTracking(itemId: string, tracked: boolean) {
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) =>
+        item.id === itemId ? { ...item, trackInventory: tracked } : item
+      ),
+    }));
+  }
+
+  function adoptActionVersion(result: InventoryActionResult) {
+    if (result.catalogVersion === null) return;
+    const decision = afterAction(catalogVersionRef.current, result.catalogVersionBefore, result.catalogVersion);
+    catalogVersionRef.current = decision.version;
+    if (decision.stale) setCatalogStale(true);
+  }
+
+  function recordActivity(
+    requestId: string,
+    itemId: string,
+    transactionType: "restock" | "adjustment",
+    before: number,
+    after: number
+  ) {
+    if (after === before) {
+      return;
+    }
+
+    setInventoryTransactions((prev) => [
+      {
+        id: requestId,
+        orderId: null,
+        itemId,
+        itemName: itemNameFor(itemId),
+        transactionType,
+        quantityChange: after - before,
+        quantityBefore: before,
+        quantityAfter: after,
+        createdAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+  }
+
+  async function refreshHistory(forProjectId: string | null = projectId) {
+    if (forProjectId === null) return;
+    const { entries, error } = await fetchInventoryHistory(forProjectId);
+    setHistoryError(error);
+    if (entries !== null) setHistoryEntries(entries);
+  }
+
+  /**
+   * Dispatch one persisted action; settle it on any DEFINITIVE answer. A request
+   * already in flight in this page is joined, not re-sent (the recovery effect can
+   * run twice, e.g. under React StrictMode). Another tab sending the same request
+   * id is still safe: the server replays it.
+   */
+  function dispatchPending(entry: PendingInventoryAction) {
+    const inFlight = inFlightRef.current.get(entry.requestId);
+    if (inFlight !== undefined) return inFlight;
+    const promise = sendPending(entry).finally(() => inFlightRef.current.delete(entry.requestId));
+    inFlightRef.current.set(entry.requestId, promise);
+    return promise;
+  }
+
+  async function sendPending(entry: PendingInventoryAction) {
+    const call =
+      entry.action === "receive"
+        ? receiveInventory({ projectId: entry.projectId, itemId: entry.itemId, quantity: entry.input as number, requestId: entry.requestId })
+        : entry.action === "count"
+          ? countInventory({ projectId: entry.projectId, itemId: entry.itemId, counted: entry.input as number, requestId: entry.requestId })
+          : setItemTracking({ projectId: entry.projectId, itemId: entry.itemId, enabled: entry.input as boolean, requestId: entry.requestId });
+    const outcome = await call;
+
+    if (outcome.result !== null || (outcome.error !== null && isDefinitiveInventoryActionError(outcome.error))) {
+      await settlePendingStore(entry);
+    }
+    if (outcome.result !== null) {
+      if (typeof outcome.result.after === "number") adoptStock(entry.itemId, outcome.result.after);
+      if (typeof outcome.result.after === "boolean") adoptTracking(entry.itemId, outcome.result.after);
+      adoptActionVersion(outcome.result);
+    }
+    return outcome;
+  }
+
+  /**
+   * Correction C1 — the entry to dispatch, or a refusal message. Nothing is ever
+   * dispatched unless its request identity was written and read back first.
+   */
+  async function startPending(
+    action: InventoryAction,
+    itemId: string,
+    input: number | boolean
+  ): Promise<{ entry: PendingInventoryAction; refusal: null } | { entry: null; refusal: string }> {
+    if (pendingBlock !== null) return { entry: null, refusal: PENDING_BLOCK_MESSAGE[pendingBlock.reason] };
+    const begun = await beginPendingStore(
+      { projectId: projectId as string, action, itemId, input },
+      () => crypto.randomUUID(),
+      browserStorage()
+    );
+    if (begun.ok) return { entry: begun.entry, refusal: null };
+    if (begun.reason !== "persist_failed") {
+      const read = await readPendingStore(projectId as string, browserStorage());
+      if (read.status === "unresolved") await showPendingState(read);
+      else setPendingBlock({ reason: begun.reason, keys: [] });
+      return { entry: null, refusal: PENDING_BLOCK_MESSAGE[begun.reason] };
+    }
+    return { entry: null, refusal: PERSIST_FAILED_MESSAGE };
+  }
+
+  /** Correction C4 — refresh what the owner sees: unresolved records (raw) and the quarantine. */
+  async function showPendingState(read: StoreRead) {
+    setPendingBlock(read.status === "unresolved" ? { reason: read.reason, keys: read.keys } : null);
+    setUnreadableRecords(read.status === "unresolved" ? read.keys.map((key) => ({ key, raw: read.raws[key] ?? null })) : []);
+    if (projectId !== null) setQuarantineViews(await readQuarantineStore(projectId));
+  }
+
+  /**
+   * Correction C4 — the owner's explicit acknowledgement. Archives the exact bytes
+   * (verified) before anything leaves the active pending area; never deletes them.
+   */
+  async function quarantinePending(key: string, expectedRaw: string, reason: string, acknowledged: boolean): Promise<string> {
+    if (projectId === null) return "Save this project first.";
+    let actor: { userId: string | null; label: string } = { userId: null, label: "owner (identity not available in this browser)" };
+    try {
+      const { data } = await createClient().auth.getSession();
+      const user = data.session?.user;
+      if (user) actor = { userId: user.id, label: user.email ?? user.id };
+    } catch {
+      // keep the explicit "not available" label rather than inventing one
+    }
+    const result: QuarantineResult = await quarantineStore(projectId, { key, expectedRaw, actor, reason, acknowledged });
+    await showPendingState(await readPendingStore(projectId, browserStorage()));
+    // Shown at panel level too: on success the record's form disappears with it.
+    setQuarantineNotice(QUARANTINE_RESULT_MESSAGE[result.status]);
+    return QUARANTINE_RESULT_MESSAGE[result.status];
+  }
+
+  // On load (and whenever the project changes): finish anything a previous page
+  // left pending — same business, same payload, same request id.
+  useEffect(() => {
+    if (projectId === null) return;
+    let cancelled = false;
+
+    void (async () => {
+      const read = await readPendingStore(projectId, browserStorage());
+      if (cancelled) return;
+      await showPendingState(read);
+      if (read.status === "unresolved") {
+        await refreshHistory(projectId);
+        return;
+      }
+      const pending = read.entries;
+      let recovered = 0;
+      for (const entry of pending) {
+        if (cancelled) return;
+        const outcome = await dispatchPending(entry);
+        if (outcome.result !== null) recovered += 1;
+      }
+      if (cancelled) return;
+      if (pending.length > 0) {
+        setPendingNotice(
+          recovered === pending.length
+            ? `Finished ${recovered} stock change${recovered === 1 ? "" : "s"} that had not been confirmed.`
+            : `${pending.length - recovered} stock change(s) could not be confirmed yet; they will be retried with the same request.`
+        );
+      }
+      await refreshHistory(projectId);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per project; the helpers read refs/state setters only
+  }, [projectId]);
+
+  // LF-2 Scope 2 — is the Held Sales section available for this business?
+  useEffect(() => {
+    if (projectId === null) return;
+    let cancelled = false;
+    void fetchHoldList(projectId, { state: "held", reason: null, deviceId: null, from: null, to: null }).then(({ list }) => {
+      if (!cancelled) setHeldSalesCount(list !== null && list.enabled ? list.counts.held : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, editorSection]);
+
   async function handleRestock(itemId: string, quantity: number) {
     if (restockStatus === "saving") {
       return;
@@ -1279,14 +1571,14 @@ export default function EditorShell({
 
     if (projectId === null) {
       setRestockStatus("error");
-      setRestockError("Save this project before restocking inventory.");
+      setRestockError("Save this project before recording received stock.");
       setRestockSuccessMessage(null);
       return;
     }
 
     if (!Number.isInteger(quantity) || quantity <= 0) {
       setRestockStatus("error");
-      setRestockError("Quantity must be a positive whole number.");
+      setRestockError("Received quantity must be a positive whole number.");
       setRestockSuccessMessage(null);
       return;
     }
@@ -1295,60 +1587,28 @@ export default function EditorShell({
     setRestockError(null);
     setRestockSuccessMessage(null);
 
-    const { result, error } = await restockInventory({
-      projectId,
-      itemId,
-      quantity,
-    });
-
-    if (error || !result) {
-      // RPC failed — nothing local changes, so this can be retried freely.
+    const { entry, refusal } = await startPending("receive", itemId, quantity);
+    if (entry === null) {
       setRestockStatus("error");
-      setRestockError(error ?? "Something went wrong while restocking.");
+      setRestockError(refusal);
+      return;
+    }
+    const { result, error } = await dispatchPending(entry);
+
+    if (error || !result || typeof result.before !== "number" || typeof result.after !== "number") {
+      setRestockStatus("error");
+      setRestockError(error ? describeInventoryActionError(error) : "Something went wrong while recording received stock.");
       return;
     }
 
-    // Use the RPC's authoritative quantityAfter directly — no client math,
-    // and no markDirty(): the database already persisted this change, so
-    // there is nothing new for Save to do. Any other unsaved edits (or lack
-    // thereof) are left exactly as they were.
-    setProjectConfig((prev) => ({
-      ...prev,
-      menuItems: prev.menuItems.map((item) =>
-        item.id === result.itemId
-          ? { ...item, stockQuantity: result.quantityAfter }
-          : item
-      ),
-    }));
-
-    // Feature 10.4 — use the RPC's own transaction id and before/change/
-    // after values directly (no client math), so Inventory Summary and the
-    // Inventory Activity panel reflect this restock immediately.
-    setInventoryTransactions((prev) => [
-      {
-        id: result.transactionId,
-        orderId: null,
-        itemId: result.itemId,
-        itemName: result.itemName,
-        transactionType: "restock",
-        quantityChange: result.quantityChange,
-        quantityBefore: result.quantityBefore,
-        quantityAfter: result.quantityAfter,
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-
+    recordActivity(entry.requestId, itemId, "restock", result.before, result.after);
     setRestockStatus("success");
     setRestockSuccessMessage(
-      `${result.itemName} restocked by ${result.quantityChange}. New stock: ${result.quantityAfter}.`
+      `${itemNameFor(itemId)}: received ${result.after - result.before}. Stock ${result.before} → ${result.after}.`
     );
+    void refreshHistory();
   }
 
-  // Feature 9.7B — manually adjust an inventory-tracked item's stock to an
-  // exact final value via the atomic adjust_inventory RPC. The RPC's
-  // returned quantityAfter is authoritative; this handler never computes a
-  // new stock number itself. Mirrors handleRestock's conventions.
   async function handleInventoryAdjustment(itemId: string, newQuantity: number) {
     if (adjustStatus === "saving") {
       return;
@@ -1356,14 +1616,14 @@ export default function EditorShell({
 
     if (projectId === null) {
       setAdjustStatus("error");
-      setAdjustError("Save this project before adjusting inventory.");
+      setAdjustError("Save this project before recording a stock count.");
       setAdjustSuccessMessage(null);
       return;
     }
 
     if (!Number.isInteger(newQuantity) || newQuantity < 0) {
       setAdjustStatus("error");
-      setAdjustError("New stock must be a whole number of 0 or more.");
+      setAdjustError("Counted quantity must be a whole number of 0 or more.");
       setAdjustSuccessMessage(null);
       return;
     }
@@ -1372,54 +1632,88 @@ export default function EditorShell({
     setAdjustError(null);
     setAdjustSuccessMessage(null);
 
-    const { result, error } = await adjustInventory({
-      projectId,
-      itemId,
-      newQuantity,
-    });
-
-    if (error || !result) {
-      // RPC failed — nothing local changes, so this can be retried freely.
+    const { entry, refusal } = await startPending("count", itemId, newQuantity);
+    if (entry === null) {
       setAdjustStatus("error");
-      setAdjustError(error ?? "Something went wrong while adjusting inventory.");
+      setAdjustError(refusal);
+      return;
+    }
+    const { result, error } = await dispatchPending(entry);
+
+    if (error || !result || typeof result.before !== "number" || typeof result.after !== "number") {
+      setAdjustStatus("error");
+      setAdjustError(error ? describeInventoryActionError(error) : "Something went wrong while recording the count.");
       return;
     }
 
-    // Use the RPC's authoritative quantityAfter directly — no client math,
-    // and no markDirty(): the database already persisted this change, so
-    // there is nothing new for Save to do. Any other unsaved edits (or lack
-    // thereof) are left exactly as they were.
-    setProjectConfig((prev) => ({
-      ...prev,
-      menuItems: prev.menuItems.map((item) =>
-        item.id === result.itemId
-          ? { ...item, stockQuantity: result.quantityAfter }
-          : item
-      ),
-    }));
-
-    // Feature 10.4 — use the RPC's own transaction id and before/change/
-    // after values directly (no client math), so Inventory Summary and the
-    // Inventory Activity panel reflect this adjustment immediately.
-    setInventoryTransactions((prev) => [
-      {
-        id: result.transactionId,
-        orderId: null,
-        itemId: result.itemId,
-        itemName: result.itemName,
-        transactionType: "adjustment",
-        quantityChange: result.quantityChange,
-        quantityBefore: result.quantityBefore,
-        quantityAfter: result.quantityAfter,
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-
+    recordActivity(entry.requestId, itemId, "adjustment", result.before, result.after);
     setAdjustStatus("success");
     setAdjustSuccessMessage(
-      `${result.itemName} adjusted from ${result.quantityBefore} to ${result.quantityAfter}.`
+      result.before === result.after
+        ? `${itemNameFor(itemId)}: counted ${result.after}. No change.`
+        : `${itemNameFor(itemId)}: counted ${result.after}. Stock ${result.before} → ${result.after}.`
     );
+    void refreshHistory();
+  }
+
+  // Tracking for a SAVED item changes only through set_item_tracking; the
+  // database ignores a tracking change carried by an ordinary save. An item that
+  // has never been saved still sets tracking through the normal edit.
+  async function handleSetTracking(itemId: string, enabled: boolean) {
+    if (projectId === null || !savedItemIds.has(itemId)) {
+      handleUpdateItem(itemId, { trackInventory: enabled });
+      return;
+    }
+
+    setTrackingError(null);
+    const { entry, refusal } = await startPending("tracking", itemId, enabled);
+    if (entry === null) {
+      setTrackingError(refusal);
+      return;
+    }
+    const { result, error } = await dispatchPending(entry);
+
+    if (error || !result || typeof result.after !== "boolean") {
+      setTrackingError(error ? describeInventoryActionError(error) : "Something went wrong while changing stock tracking.");
+      return;
+    }
+
+    void refreshHistory();
+  }
+
+  // Batch A — after a save, the database's copy is authoritative for what it
+  // owns: live stock and tracking of saved items (a save cannot change either),
+  // the catalog version, and the set of saved item ids.
+  function adoptSavedCatalog(
+    project: { config?: unknown; catalog_version?: number },
+    sent: { base: number; structural: boolean } | null
+  ) {
+    const serverItems = Array.isArray((project.config as ProjectConfig | undefined)?.menuItems)
+      ? (project.config as ProjectConfig).menuItems
+      : [];
+    const byId = new Map(serverItems.map((item) => [item.id, item]));
+    const serverVersion = typeof project.catalog_version === "number" ? project.catalog_version : 0;
+
+    // Batch B — never attach a newer version to a stale structural snapshot.
+    if (sent === null) {
+      catalogVersionRef.current = serverVersion;
+      setCatalogStale(false);
+    } else {
+      const decision = afterSave(sent.base, sent.structural, serverVersion);
+      catalogVersionRef.current = decision.version;
+      setCatalogStale(decision.stale);
+    }
+    setSavedItemIds(new Set(serverItems.map((item) => item.id)));
+    setProjectConfig((prev) => ({
+      ...prev,
+      menuItems: prev.menuItems.map((item) => {
+        const live = byId.get(item.id);
+
+        return live === undefined
+          ? item
+          : { ...item, stockQuantity: live.stockQuantity, trackInventory: live.trackInventory };
+      }),
+    }));
   }
 
   async function handleSave() {
@@ -1531,6 +1825,7 @@ export default function EditorShell({
       // fail or interrupt the project save that already succeeded above.
       onboarding.persistProgressForProject(project.id);
 
+      adoptSavedCatalog(project, null);
       setProjectId(project.id);
       setSavedBusinessTimezone(businessTimezone);
       setIsDirty(false);
@@ -1549,6 +1844,8 @@ export default function EditorShell({
       return;
     }
 
+    const sentBase = catalogVersionRef.current;
+    const structural = isStructuralChange(savedItemIds, configToPersist.menuItems.map((item) => item.id));
     const { project, error } = await updateProject({
       projectId,
       name: trimmedName,
@@ -1556,6 +1853,8 @@ export default function EditorShell({
       // Omitted unless the owner changed it; lib/projects.ts treats an omitted
       // value as "leave the column alone".
       ...businessTimezoneUpdate(savedBusinessTimezone, businessTimezone),
+      // Batch A — structural changes (items added/removed) need the current base.
+      baseCatalogVersion: sentBase,
     });
 
     if (error || !project) {
@@ -1567,6 +1866,8 @@ export default function EditorShell({
       return;
     }
 
+    adoptSavedCatalog(project, { base: sentBase, structural });
+    void refreshHistory();
     setSavedBusinessTimezone(businessTimezone);
     setIsDirty(false);
     setSaveStatus("saved");
@@ -1937,6 +2238,7 @@ export default function EditorShell({
         <EditorSidebar
           editorSection={editorSection}
           setEditorSection={handleEditorSectionChange}
+          heldSalesCount={heldSalesCount}
         />
         {editorMode === "edit" && editorSection === "Dashboard" ? (
           <ProjectDashboard
@@ -1986,6 +2288,8 @@ export default function EditorShell({
             orderTotalsError={orderTotalsError}
             currency={projectConfig.receipt.currency}
           />
+        ) : editorMode === "edit" && editorSection === "Held Sales" && projectId !== null && heldSalesCount !== null ? (
+          <HeldSales projectId={projectId} />
         ) : editorMode === "edit" && editorSection === "Inventory Summary" ? (
           <InventorySummary
             menuItems={projectConfig.menuItems}
@@ -2088,6 +2392,22 @@ export default function EditorShell({
           adjustError={adjustError}
           adjustSuccessMessage={adjustSuccessMessage}
           onAdjust={handleInventoryAdjustment}
+          isItemSaved={(itemId: string) => projectId !== null && savedItemIds.has(itemId)}
+          onSetTracking={handleSetTracking}
+          trackingError={trackingError}
+          pendingBlockMessage={pendingBlock === null ? null : PENDING_BLOCK_MESSAGE[pendingBlock.reason]}
+          unreadableRecords={pendingBlock !== null && pendingBlock.reason !== "storage_unavailable" ? unreadableRecords : []}
+          onQuarantine={quarantinePending}
+          quarantineViews={quarantineViews}
+          quarantineNotice={quarantineNotice}
+          historyRequestIds={new Set(historyEntries.flatMap((e) => (e.kind === "action" ? [e.requestId] : [])))}
+          catalogNotice={
+            catalogStale
+              ? "Items were added or removed in another window. Reload before adding or removing items."
+              : pendingNotice
+          }
+          historyLines={describeHistory(historyEntries, itemNameFor)}
+          historyError={historyError}
           runtimeUrl={runtimeUrl}
           exportEligibility={exportEligibility}
           exportStatus={exportStatus}

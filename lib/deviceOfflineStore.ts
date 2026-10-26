@@ -217,58 +217,108 @@ export function withQueueRecordMutation<T>(
   decide: (input: { queued: unknown; uncertain: unknown }) => QueueMutationDecision<T>
 ): Promise<OfflineStoreResult<T>> {
   return new Promise((resolve) => {
-    let settled: T | undefined;
+    let value: T | undefined;
     let decided = false;
+    let finished = false;
+    let transaction: IDBTransaction | null = null;
+
+    // W-02-RETRY-UX-FIX-2 — ONE settlement, whichever path gets there first.
+    const settle = (result: OfflineStoreResult<T>): void => {
+      if (!finished) {
+        finished = true;
+        resolve(result);
+      }
+    };
+
+    // W-02-RETRY-UX-FIX-2 — every failure, wherever it happens, ends the same
+    // way: the transaction is aborted so nothing it issued can commit, and the
+    // caller gets a controlled failure. Aborting an already-finished
+    // transaction throws, which is caught: the outcome is already decided.
+    const fail = (): void => {
+      try {
+        transaction?.abort();
+      } catch {
+        // Already aborted or completed; nothing further can commit.
+      }
+
+      settle({ ok: false, reason: "failed" });
+    };
+
+    // W-02-RETRY-UX-FIX-2 — a synchronous throw inside an IndexedDB request
+    // callback used to escape it: the transaction still aborted, but the
+    // exception surfaced as an uncaught page error in Chromium. Every callback
+    // body now runs inside this guard — the marker read, the decision and the
+    // write alike.
+    const guarded = (body: () => void) => (): void => {
+      try {
+        body();
+      } catch {
+        fail();
+      }
+    };
 
     try {
-      const transaction = db.transaction([SALE_QUEUE_STORE, CACHE_STORE], "readwrite");
+      transaction = db.transaction([SALE_QUEUE_STORE, CACHE_STORE], "readwrite");
 
-      transaction.onabort = () => resolve({ ok: false, reason: "failed" });
-      transaction.onerror = () => resolve({ ok: false, reason: "failed" });
-      transaction.oncomplete = () => {
-        if (decided) resolve({ ok: true, value: settled as T });
-        else resolve({ ok: false, reason: "failed" });
-      };
+      const tx = transaction;
 
-      const queueStore = transaction.objectStore(SALE_QUEUE_STORE);
-      const cacheStore = transaction.objectStore(CACHE_STORE);
+      tx.onabort = () => settle({ ok: false, reason: "failed" });
+      tx.onerror = () => settle({ ok: false, reason: "failed" });
+      // SUCCESS ONLY ON COMPLETION, and only when a decision was reached:
+      // a request that succeeded inside a transaction that later aborted
+      // reports through onabort above, never here.
+      tx.oncomplete = () => settle(decided ? { ok: true, value: value as T } : { ok: false, reason: "failed" });
+
+      const queueStore = tx.objectStore(SALE_QUEUE_STORE);
+      const cacheStore = tx.objectStore(CACHE_STORE);
       const queuedRequest = queueStore.get(queueRecordId);
 
-      queuedRequest.onsuccess = () => {
+      queuedRequest.onerror = () => fail();
+      queuedRequest.onsuccess = guarded(() => {
         const uncertainRequest = cacheStore.get(uncertainKey);
 
-        uncertainRequest.onsuccess = () => {
-          let outcome: QueueMutationDecision<T>;
-
-          try {
-            outcome = decide({
-              queued: queuedRequest.result,
-              uncertain: uncertainRequest.result,
-            });
-          } catch {
-            transaction.abort();
-
-            return;
-          }
-
-          settled = outcome.value;
-          decided = true;
+        uncertainRequest.onerror = () => fail();
+        uncertainRequest.onsuccess = guarded(() => {
+          const outcome = decide({
+            queued: queuedRequest.result,
+            uncertain: uncertainRequest.result,
+          });
 
           // The write goes out on the SAME transaction, so nothing can have
-          // changed the record between the read above and this put.
-          if (outcome.commit) queueStore.put(outcome.record);
-        };
+          // changed the record between the read above and this put. A put
+          // that throws synchronously (e.g. DataCloneError) lands in
+          // `guarded` and aborts; one that fails later aborts the transaction.
+          if (outcome.commit) {
+            const write = queueStore.put(outcome.record);
 
-        uncertainRequest.onerror = () => resolve({ ok: false, reason: "failed" });
-      };
+            write.onerror = () => fail();
+          }
 
-      queuedRequest.onerror = () => resolve({ ok: false, reason: "failed" });
+          value = outcome.value;
+          decided = true;
+        });
+      });
     } catch {
-      resolve({ ok: false, reason: "failed" });
+      fail();
     }
   });
 }
 
+/**
+ * Runs one request in its own transaction and reports the outcome.
+ *
+ * W-02-STORAGE-FIX-1 — SUCCESS MEANS THE TRANSACTION COMMITTED, not that the
+ * request succeeded. A request's `success` fires while its transaction is still
+ * open, and the transaction can abort after it (a commit-time quota or I/O
+ * failure). This used to resolve on request success, so an aborted write was
+ * reported as durable: an uncertain-sale marker the arm believed was on disk,
+ * or a queued sale the till believed was saved. The request's result is now
+ * only captured there, and reported on `complete` — the same rule
+ * insertDrawerEventClaim and withQueueRecordMutation already follow.
+ *
+ * Settles exactly once. A request error, a transaction error and an abort all
+ * report failure; whichever arrives first wins and the rest are ignored.
+ */
 function withStore<T>(
   db: IDBDatabase,
   storeName: string,
@@ -276,22 +326,46 @@ function withStore<T>(
   run: (store: IDBObjectStore) => IDBRequest<T>
 ): Promise<OfflineStoreResult<T>> {
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result: OfflineStoreResult<T>): void => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+
+    let transaction: IDBTransaction | null = null;
     let request: IDBRequest<T>;
+    let succeeded = false;
+    let value: T | undefined;
 
     try {
-      const transaction = db.transaction(storeName, mode);
+      transaction = db.transaction(storeName, mode);
 
-      transaction.onabort = () => resolve({ ok: false, reason: "failed" });
-      transaction.onerror = () => resolve({ ok: false, reason: "failed" });
+      transaction.onabort = () => settle({ ok: false, reason: "failed" });
+      transaction.onerror = () => settle({ ok: false, reason: "failed" });
+      transaction.oncomplete = () =>
+        settle(succeeded ? { ok: true, value: value as T } : { ok: false, reason: "failed" });
 
       request = run(transaction.objectStore(storeName));
     } catch {
-      resolve({ ok: false, reason: "failed" });
+      // A synchronous throw (a non-cloneable value, a closed connection) must
+      // not leave an open transaction able to commit anything behind it.
+      try {
+        transaction?.abort();
+      } catch {
+        // Already finished or never started; nothing to undo.
+      }
+
+      settle({ ok: false, reason: "failed" });
       return;
     }
 
-    request.onsuccess = () => resolve({ ok: true, value: request.result });
-    request.onerror = () => resolve({ ok: false, reason: "failed" });
+    request.onsuccess = () => {
+      succeeded = true;
+      value = request.result;
+    };
+    request.onerror = () => settle({ ok: false, reason: "failed" });
   });
 }
 
@@ -382,6 +456,89 @@ export async function deleteUncertainSaleRecordRaw(
   );
 
   return result.ok ? { ok: true, value: undefined } : result;
+}
+
+/**
+ * G-1-CLIENT-1 — reads the marker, decides, and writes, in ONE readwrite
+ * transaction.
+ *
+ * WHY. A re-arm of an outstanding sale must keep its original attribution and
+ * first-attempt time, so it has to read the stored record before writing. As
+ * two transactions that is a gap: another write could land between the read
+ * and the put, and the put would overwrite it. IndexedDB serialises readwrite
+ * transactions over the same store, so inside one nothing can interleave.
+ *
+ * `decide` MUST BE SYNCHRONOUS, for the same reason withQueueRecordMutation's
+ * is: an `await` would let the transaction auto-commit and reopen the gap.
+ *
+ * Success means the transaction COMMITTED (W-02-STORAGE-FIX-1's rule), and a
+ * throw anywhere aborts it so nothing it issued can land.
+ */
+export type UncertainSaleMutationDecision<T> =
+  | { commit: true; record: unknown; value: T }
+  | { commit: false; value: T };
+
+export function withUncertainSaleMutation<T>(
+  db: IDBDatabase,
+  decide: (stored: unknown) => UncertainSaleMutationDecision<T>
+): Promise<OfflineStoreResult<T>> {
+  return new Promise((resolve) => {
+    let value: T | undefined;
+    let decided = false;
+    let finished = false;
+    let transaction: IDBTransaction | null = null;
+
+    const settle = (result: OfflineStoreResult<T>): void => {
+      if (!finished) {
+        finished = true;
+        resolve(result);
+      }
+    };
+
+    const fail = (): void => {
+      try {
+        transaction?.abort();
+      } catch {
+        // Already aborted or completed; nothing further can commit.
+      }
+
+      settle({ ok: false, reason: "failed" });
+    };
+
+    try {
+      transaction = db.transaction(CACHE_STORE, "readwrite");
+
+      const tx = transaction;
+
+      tx.onabort = () => settle({ ok: false, reason: "failed" });
+      tx.onerror = () => settle({ ok: false, reason: "failed" });
+      tx.oncomplete = () =>
+        settle(decided ? { ok: true, value: value as T } : { ok: false, reason: "failed" });
+
+      const store = tx.objectStore(CACHE_STORE);
+      const read = store.get(UNCERTAIN_SALE_KEY);
+
+      read.onerror = () => fail();
+      read.onsuccess = () => {
+        try {
+          const outcome = decide(read.result);
+
+          if (outcome.commit) {
+            const write = store.put(outcome.record, UNCERTAIN_SALE_KEY);
+
+            write.onerror = () => fail();
+          }
+
+          value = outcome.value;
+          decided = true;
+        } catch {
+          fail();
+        }
+      };
+    } catch {
+      fail();
+    }
+  });
 }
 
 /** Convenience wrappers so callers never spell a key themselves. */

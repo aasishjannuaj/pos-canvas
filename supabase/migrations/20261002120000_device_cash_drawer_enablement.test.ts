@@ -39,20 +39,31 @@ const setter = definition(executable, "set_device_cash_drawer_enabled");
 const sqlFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
 
 describe("migration ordering and inventory", () => {
-  it("is the newest migration before the CP-2B register correction", () => {
-    // v1.3 CP-2B — THE SENTINEL MOVED, IT WAS NOT WEAKENED.
+  it("is followed by exactly the four accepted later migrations, in order, and nothing else", () => {
+    // THE SENTINEL MOVED, IT WAS NOT WEAKENED.
     //
     // This assertion exists so an unreviewed migration cannot be added
-    // silently, and by construction it can only ever be true of ONE file. The
-    // CP-2B register-attribution correction adds
-    // 20261012120000_offline_register_attribution_required.sql under its own
-    // Control Room authorization, so the newest file is now that one. The
-    // check still pins an EXACT filename, so a further unreviewed migration
-    // still trips it.
-    expect(sqlFiles[sqlFiles.length - 1]).toBe(
-      "20261012120000_offline_register_attribution_required.sql"
-    );
-    expect(sqlFiles[sqlFiles.length - 2]).toBe(MIGRATION);
+    // silently: it pins the EXACT tail of the migration chain, so any further
+    // file — or any reordering — trips it. Each later migration was accepted
+    // under its own Control Room authorization:
+    //   - 20261012120000_offline_register_attribution_required.sql (v1.3 CP-2B
+    //     register-attribution correction);
+    //   - 20261015120000_sale_recovery_attribution.sql (G1-SERVER-1A);
+    //   - 20261016120000_claim_build_job_by_id.sql (OFF-2-EXACT-CLAIM-1);
+    //   - 20261024120000_inventory_foundations.sql (Batch A, Inventory
+    //     foundations — local implementation; pending evidence review).
+    //   - 20261025120000_local_first_sale_v6.sql (LF-2 Scope 2 — local
+    //     implementation, disabled by default; pending evidence review).
+    // REL-1 replaced the two positional checks (newest file, and this
+    // migration second-newest) with this one exact assertion.
+    expect(sqlFiles.slice(-6)).toEqual([
+      MIGRATION,
+      "20261012120000_offline_register_attribution_required.sql",
+      "20261015120000_sale_recovery_attribution.sql",
+      "20261016120000_claim_build_job_by_id.sql",
+      "20261024120000_inventory_foundations.sql",
+      "20261025120000_local_first_sale_v6.sql",
+    ]);
   });
 
   it("creates exactly two functions: the setter, and get_device_pairing_state", () => {

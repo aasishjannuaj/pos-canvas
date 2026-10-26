@@ -11,9 +11,11 @@ import {
   buildUncertainSaleRecord,
   ownsUncertainSale,
   readUncertainSaleRecord,
+  rearmUncertainSaleRecord,
   toUncertainSale,
 } from "@/lib/uncertainSaleRecord";
 import type {
+  OriginalSaleAttribution,
   PersistedUncertainSale,
   UncertainSaleIdentity,
 } from "@/lib/uncertainSaleRecord";
@@ -21,8 +23,9 @@ import {
   deleteUncertainSaleRecordRaw,
   openOfflineDb,
   readUncertainSaleRecordRaw,
-  writeUncertainSaleRecordRaw,
+  withUncertainSaleMutation,
 } from "@/lib/deviceOfflineStore";
+import { verifyQueueTransfer } from "@/lib/saleRecovery";
 import type { UncertainSale } from "@/lib/saleSubmission";
 import { getSaleByRequestId } from "@/lib/saleQueueSession";
 
@@ -68,6 +71,12 @@ export async function armUncertainSale(input: {
   sale: UncertainSale;
   identity: UncertainSaleIdentity;
   dispatchedAt: string;
+  /**
+   * G-1-CLIENT-1 — who is ringing this sale and on which register, captured
+   * from the host's established gate. Used ONLY by a first arm; a re-arm of
+   * the same sale keeps whatever was captured the first time.
+   */
+  originalAttribution?: OriginalSaleAttribution | null;
 }): Promise<boolean> {
   const record = buildUncertainSaleRecord(input);
 
@@ -77,11 +86,60 @@ export async function armUncertainSale(input: {
     return false;
   }
 
+  // G-1-CLIENT-1 — ONE TRANSACTION: read what is stored, decide, write.
+  //
+  //   nothing stored            -> the fresh record, originals included;
+  //   this same sale stored     -> the STORED record with only dispatchedAt
+  //                                moved, so a re-arm after an employee change
+  //                                or register rollover cannot rewrite who rang
+  //                                the sale or when it was first attempted, and
+  //                                a legacy record is never upgraded;
+  //   anything else stored      -> refused. Another sale's evidence, or one
+  //                                that cannot be read, is never overwritten.
   return withDb(async (db) => {
-    const written = await writeUncertainSaleRecordRaw(db, record);
+    const written = await withUncertainSaleMutation<boolean>(db, (stored) => {
+      if (stored === null || stored === undefined) {
+        return { commit: true, record, value: true };
+      }
 
-    return written.ok;
+      const parsed = readUncertainSaleRecord(stored);
+
+      if (!parsed.ok) {
+        return { commit: false, value: false };
+      }
+
+      const rearmed = rearmUncertainSaleRecord(parsed.record, record);
+
+      return rearmed === null
+        ? { commit: false, value: false }
+        : { commit: true, record: rearmed, value: true };
+    });
+
+    return written.ok && written.value;
   }, false);
+}
+
+/**
+ * G-1-CLIENT-1 — the outstanding record, as stored, for the session running —
+ * but ONLY if it is the exact sale the caller is about to finish.
+ *
+ * The recovery path needs the ORIGINAL attribution and first-attempt time,
+ * which the in-memory UncertainSale deliberately does not carry. Null for
+ * anything that is not this session's readable record for that same request id
+ * and fingerprint, so a caller can never act on a record it did not name.
+ */
+export async function readOutstandingUncertainRecord(
+  identity: UncertainSaleIdentity,
+  expected: { saleRequestId: string; fingerprint: string }
+): Promise<PersistedUncertainSale | null> {
+  const state = await readUncertainSale(identity);
+
+  if (state.status !== "outstanding") return null;
+
+  return state.record.saleRequestId === expected.saleRequestId &&
+    state.record.fingerprint === expected.fingerprint
+    ? state.record
+    : null;
 }
 
 export type UncertainSaleState =
@@ -242,6 +300,16 @@ export async function reconcileUncertainSaleWithQueue(): Promise<boolean> {
   const queued = await getSaleByRequestId(parsed.record.saleRequestId);
 
   if (!queued.ok) {
+    return false;
+  }
+
+  // G-1-CLIENT-1 — THE SAME KEY IS NOT ENOUGH. The queue record must be a
+  // verified transfer of THIS marker's protection: the same pairing and the
+  // same financial content and, for a marker that carries original
+  // attribution, a strict-recovery record bound to exactly those originals and
+  // that first-attempt time. A record that holds the key but would sync under
+  // anything else does not carry this marker's protection, so the marker stays.
+  if (!verifyQueueTransfer(parsed.record, queued.value).ok) {
     return false;
   }
 

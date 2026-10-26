@@ -80,6 +80,16 @@ type UpdateProjectInput = {
    * client-side timezone rule here to drift from it.
    */
   businessTimezone?: string | null;
+  /**
+   * Batch A (Inventory foundations) — the catalog version the editor's copy was
+   * loaded at. The database refuses a STRUCTURAL change (an item added or
+   * removed) whose base is not the current version, so a stale tab can neither
+   * delete an item added elsewhere nor resurrect one deleted elsewhere. Live
+   * stock and tracking in the payload are ignored by the database (they change
+   * only through the audited stock actions), so they cannot be overwritten.
+   * Omitted means "no base": structural changes are then refused.
+   */
+  baseCatalogVersion?: number | null;
 };
 
 /**
@@ -104,14 +114,36 @@ export function describeProjectUpdateError(message: string): string {
     return BUSINESS_TIMEZONE_INVALID_MESSAGE;
   }
 
+  if (message.includes("catalog_conflict")) {
+    return CATALOG_CONFLICT_MESSAGE;
+  }
+
+  if (message.includes("item_id_retired")) {
+    return ITEM_ID_RETIRED_MESSAGE;
+  }
+
+  if (message.includes("invalid_opening_stock")) {
+    return INVALID_OPENING_STOCK_MESSAGE;
+  }
+
   return message;
 }
+
+export const CATALOG_CONFLICT_MESSAGE =
+  "Items were added or removed in another window since this page was loaded. Reload before saving; nothing was changed.";
+
+export const ITEM_ID_RETIRED_MESSAGE =
+  "A deleted item cannot be brought back. Add it as a new item instead; nothing was changed.";
+
+export const INVALID_OPENING_STOCK_MESSAGE =
+  "Opening stock must be a whole number from 0 to 1,000,000,000.";
 
 export async function updateProject({
   projectId,
   name,
   config,
   businessTimezone,
+  baseCatalogVersion,
 }: UpdateProjectInput) {
   const supabase = createClient();
 
@@ -135,6 +167,8 @@ export async function updateProject({
       // Spread, not a plain key: an omitted businessTimezone must leave the
       // column alone rather than write undefined/null over a real value.
       ...(businessTimezone !== undefined ? { business_timezone: businessTimezone } : {}),
+      // Batch A — checked and cleared by the database on every save.
+      base_catalog_version: baseCatalogVersion ?? null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", projectId)
@@ -193,6 +227,8 @@ export type SavedProject = {
    * the owner has not configured one yet. Null is a real, displayable state.
    */
   business_timezone: string | null;
+  /** Batch A — structural catalog version (items added/removed, tracking changed). */
+  catalog_version?: number;
   created_at: string;
   updated_at: string;
 };

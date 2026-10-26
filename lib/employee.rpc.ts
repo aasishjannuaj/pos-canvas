@@ -246,18 +246,70 @@ export async function employeeLoginByCode(
  *
  * `{ ok: true, session: null }` means nobody is signed in. That is an answer,
  * not an error.
+ *
+ * OFF-3 — `timeoutMs` BOUNDS THE WHOLE CALL, not just the request. supabase-js
+ * prepares authentication (getSession, possibly a token refresh) BEFORE fetch,
+ * and an abort signal reaches only the fetch; so the deadline races the entire
+ * promise, and the abort cancels the request if it has started. A call that
+ * misses the deadline is reported as `offline` (it never produced a server
+ * answer in time) and its late outcome, whatever it is, is discarded. A server
+ * answer that arrives BEFORE the deadline is classified exactly as without one,
+ * so an explicit refusal is never mistaken for a timeout. Without `timeoutMs`
+ * the call is byte-for-byte what it always was.
  */
-export async function fetchCurrentEmployeeSession(): Promise<CurrentEmployeeSessionResult> {
+export async function fetchCurrentEmployeeSession(
+  options: { timeoutMs?: number } = {}
+): Promise<CurrentEmployeeSessionResult> {
+  const { timeoutMs } = options;
+
+  if (timeoutMs === undefined) {
+    return readCurrentEmployeeSession(null);
+  }
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<CurrentEmployeeSessionResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(failure("offline"));
+    }, timeoutMs);
+  });
+
   try {
-    const { data, error, status } = await getDeviceSupabaseClient().rpc(
-      "get_current_employee_session"
-    );
+    return await Promise.race([readCurrentEmployeeSession(controller.signal), deadline]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function readCurrentEmployeeSession(
+  signal: AbortSignal | null
+): Promise<CurrentEmployeeSessionResult> {
+  try {
+    const request = getDeviceSupabaseClient().rpc("get_current_employee_session");
+    const { data, error, status } = await (signal === null
+      ? request
+      : request.abortSignal(signal));
+
+    if (signal?.aborted) {
+      return failure("offline");
+    }
 
     if (error) {
       return failure(unreachedFailure(withStatus(error, status)));
     }
 
-    return parseCurrentEmployeeSessionResult(data);
+    const parsed = parseCurrentEmployeeSessionResult(data);
+
+    // G-1-CLIENT-1 — `offline` is reserved for a request that never reached a
+    // server, because the gate now keeps an established operator on exactly
+    // that answer. A body the server SENT can never mean that, so a server
+    // answer carrying the code is read as the refusal it is.
+    if (!parsed.ok && parsed.error === "offline") {
+      return failure("unavailable");
+    }
+
+    return parsed;
   } catch (thrown) {
     return failure(unreachedFailure(thrown));
   }

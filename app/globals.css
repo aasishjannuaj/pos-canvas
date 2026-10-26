@@ -264,4 +264,56 @@ body {
     margin: 3mm 0 0;
     font-size: 9px;
   }
+
+  /* Batch A (PRINT-1) — ONE copy, the WHOLE copy, from inside the overlay.
+
+     Reproduced locally by printing the shipped stylesheet to an 80 x 297 mm
+     roll page (the Epson TM-T20 driver default) with Chromium:
+
+       - A print area SUPPRESSED by an exclusive one was only visibility:hidden,
+         which keeps its layout. A long just-completed receipt left open under
+         Sales history therefore stretched the printed document to two pages.
+       - The exclusive area lives inside the device overlay, which is
+         `position: fixed`. Chromium repeats a fixed box on EVERY printed page,
+         so that two-page document printed the historical receipt twice, and
+         the Cash Drop slips four times.
+       - A fixed box does not paginate either: a long reprint was cut off at
+         the first page boundary, and the two Cash Drop slips collapsed onto
+         one page (their break-before was never honoured).
+
+     So a suppressed area leaves layout entirely, and the fixed overlay that
+     hosts the exclusive area is laid out in normal flow for print, with its
+     screen-only content removed from layout. `.fixed` is the overlay's own
+     utility class (components/device/DeviceApp.tsx); lib/printOverlay.guards
+     .test.ts pins that dependency. Nothing here applies when no exclusive
+     area is mounted, so the checkout receipt prints exactly as before. */
+  body:has(.receipt-print-area[data-print-exclusive])
+    .receipt-print-area:not([data-print-exclusive]) {
+    display: none;
+  }
+
+  body:has(.receipt-print-area[data-print-exclusive="cash-movement"])
+    .receipt-print-area:not([data-print-exclusive="cash-movement"]) {
+    display: none;
+  }
+
+  .fixed:has(.receipt-print-area[data-print-exclusive]) {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .fixed:has(.receipt-print-area[data-print-exclusive])
+    *:not(:has(.receipt-print-area)):not(.receipt-print-area):not(.receipt-print-area *) {
+    display: none;
+  }
+
+  .fixed:has(.receipt-print-area[data-print-exclusive]) *:has(.receipt-print-area) {
+    min-height: 0;
+    height: auto;
+    padding: 0;
+    border: 0;
+  }
 }

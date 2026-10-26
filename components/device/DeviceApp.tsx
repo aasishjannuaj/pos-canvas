@@ -101,6 +101,7 @@ import {
   completeOfflineSale,
   describeOfflineCheckoutBlock,
   readOfflineSaleStatus,
+  reconstructProvisionalReceipt,
   resolveOfflineCheckoutSession,
 } from "@/lib/offlineCheckoutSession";
 import { decideDeviceResetSafety } from "@/lib/offlineSaleStatus";
@@ -152,6 +153,7 @@ const BLOCKED_SALE_PERSISTENCE_REFUSALS: Readonly<Record<string, string>> = Obje
 });
 import DeviceSettingsScreen from "@/components/device/DeviceSettingsScreen";
 import OperatorMenu from "@/components/device/OperatorMenu";
+import LiveStatusIndicator from "@/components/device/LiveStatusIndicator";
 import SalesHistoryScreen from "@/components/runtime/SalesHistoryScreen";
 import SalesHistoryDetail from "@/components/runtime/SalesHistoryDetail";
 import { classifyStartupFailure } from "@/lib/deviceStartupError";
@@ -181,9 +183,18 @@ import { resolveCashDrawerCapability } from "@/lib/windowsCashDrawer";
 import { claimAutomaticDrawerEvent } from "@/lib/cashDrawerSession";
 import {
   armUncertainSale,
+  readOutstandingUncertainRecord,
   reconcileUncertainSaleWithQueue,
   resolveUncertainSale,
 } from "@/lib/uncertainSaleSession";
+import { toUncertainSale } from "@/lib/uncertainSaleRecord";
+import { RECOVERY_PROTECTED_MESSAGES, describeRecordedSale } from "@/lib/saleRecovery";
+import { recoverOutstandingSale as runSaleRecovery } from "@/lib/saleRecoverySession";
+import {
+  CHECKOUT_RECOVERY_REFUSAL_MESSAGES,
+  isRecoveryActivityUnchanged,
+  readCheckoutRecoveryClearance,
+} from "@/lib/recoveryCheckoutCoordinator";
 import { decideUncertainSale } from "@/lib/saleSubmission";
 import type { UncertainSale } from "@/lib/saleSubmission";
 import { createSaleFingerprint } from "@/lib/saleRequest";
@@ -250,6 +261,7 @@ import type {
   PosRuntimeDiscardOfflineSaleDraft,
   PosRuntimeOnSaleCompleted,
   PosRuntimeQueueOfflineSale,
+  PosRuntimeRecoverOutstandingSale,
 } from "@/lib/posRuntimeHost";
 
 const RESET_NOTE =
@@ -273,6 +285,18 @@ const EMPTY_SALE_STATUS: OfflineSaleStatus = {
   nextRetryAt: null,
   uncertainOnlineSale: false,
 };
+
+/**
+ * OFF-3 — the deadline on deriveGateState's employee re-read, in milliseconds.
+ *
+ * Well above a healthy round trip and below the 30s sale timeout. It bounds the
+ * whole call (authentication preparation included); see fetchCurrentEmployeeSession.
+ */
+export const BACKGROUND_SESSION_READ_TIMEOUT_MS = 10_000;
+
+/** OFF-3 — what a cashier reads if the till went offline between render and dispatch. */
+export const MODE_CHANGED_BEFORE_DISPATCH_MESSAGE =
+  "This till just went offline. Review the order and complete it again.";
 
 /**
  * Which kind of server read a gate derivation is.
@@ -544,6 +568,25 @@ export default function DeviceApp() {
    * the one accepted transition instead of growing a second one.
    */
   const enterOfflineRef = useRef<(() => Promise<void>) | null>(null);
+  /**
+   * OFF-3 — guards for the asynchronous offline entry.
+   *
+   * offlineTransitionGenRef advances whenever a NEWER device-mode decision lands
+   * (the reconnect path confirming online, a revocation, any other status it
+   * sets). An entry that started before it is stale and commits nothing.
+   * offlineEntryRef coalesces concurrent entries that share the SAME authority
+   * epoch and transition generation into one in-flight attempt; a request made
+   * under a newer authority starts its own attempt.
+   * offlineModeRef mirrors "this till is in offline mode" synchronously, for the
+   * one pre-dispatch check in completeSale (see there).
+   */
+  const offlineTransitionGenRef = useRef(0);
+  const offlineEntryRef = useRef<{
+    promise: Promise<void>;
+    authorityEpoch: number;
+    generation: number;
+  } | null>(null);
+  const offlineModeRef = useRef(false);
   const [selectedEmployee, setSelectedEmployee] = useState<LoginEmployee | null>(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
@@ -783,11 +826,27 @@ export default function DeviceApp() {
     []
   );
 
-  /** One employee read, in the shape the pure rules consume. */
-  const readEmployeeSession = useCallback(async (): Promise<SessionRead<EmployeeSession>> => {
-    const result = await fetchCurrentEmployeeSession();
+  /**
+   * One employee read, in the shape the pure rules consume.
+   *
+   * OFF-3 — `timeoutMs` is passed ONLY by deriveGateState (the background /
+   * foreground re-derivation). Sign-in, employee switch and logout keep their
+   * unbounded read, because an abort would change what those operator actions
+   * mean.
+   */
+  const readEmployeeSession = useCallback(async (
+    options: { timeoutMs?: number } = {}
+  ): Promise<SessionRead<EmployeeSession>> => {
+    const result = await fetchCurrentEmployeeSession(options);
 
-    return result.ok ? { ok: true, session: result.session } : { ok: false };
+    if (result.ok) {
+      return { ok: true, session: result.session };
+    }
+
+    // G-1-CLIENT-1 — "offline" is the adapter's word for a failure positively
+    // classified as never reaching a server. Carried through so the gate can
+    // keep an established operator on exactly that, and on nothing else.
+    return result.error === "offline" ? { ok: false, unreached: "offline" } : { ok: false };
   }, []);
 
   /**
@@ -823,7 +882,23 @@ export default function DeviceApp() {
       // v1.3 CP2d — ONE SHAPE FOR EVERY RE-DERIVATION: who is signed in, and
       // what day the server says it is. The register is no longer asked about,
       // because there is no longer a register to choose.
-      const employee = await readEmployeeSession();
+      //
+      // OFF-3 — BOUNDED, AND IGNORED IF AUTHORITY MOVED WHILE IT WAITED.
+      // Without a deadline a dead link left this read waiting on Chromium for
+      // minutes (OFF-3 Windows: ~2 min to the offline banner). A missed
+      // deadline is a never-reached-the-server answer (`offline`), exactly the
+      // case the G-1 rule already handles. And if a sign-in, switch, logout,
+      // auto-lock or reconnect advanced the authority epoch meanwhile, this
+      // read describes a till that no longer exists: it writes nothing and
+      // enters nothing.
+      const epochAtStart = authorityEpochRef.current;
+      const employee = await readEmployeeSession({
+        timeoutMs: BACKGROUND_SESSION_READ_TIMEOUT_MS,
+      });
+
+      if (authorityEpochRef.current !== epochAtStart) {
+        return gateRef.current;
+      }
 
       // The employee read decides whether the till keeps its operator at all,
       // so a failed or empty one short-circuits: there is nobody to establish a
@@ -834,6 +909,26 @@ export default function DeviceApp() {
           employee,
           daily: { ok: false, reason: "unavailable" },
         });
+
+        // G-1-CLIENT-1 — NOTHING CHANGED, SO NOTHING IS ADVANCED. A confirmed
+        // transport failure returns the very same gate object; advancing the
+        // authority epoch for it would invalidate a checkout the cashier has
+        // open over an authority that did not move, purely because the app was
+        // minimised during an outage.
+        //
+        // THE SERVER WAS NEVER REACHED, so the established operator was kept.
+        // The till then enters the EXISTING offline path — the same
+        // validated-cache transition a sale's transport failure uses, with every
+        // one of its checks — so the next sale is saved on this device instead
+        // of first failing online. Nothing here is more permissive than that
+        // path: if the cache does not validate, nothing changes.
+        if (next === gateRef.current) {
+          if (!employee.ok && employee.unreached === "offline" && next.employee !== null) {
+            void enterOfflineRef.current?.();
+          }
+
+          return next;
+        }
 
         // v1.3 CP-2B — the ref FIRST, in the same turn as the state.
         // The effect that mirrors `gate` runs only after React commits, so
@@ -846,6 +941,12 @@ export default function DeviceApp() {
       }
 
       const daily = await acquireDaily();
+
+      // OFF-3 — the same rule after the daily call: an authority change that
+      // landed while it was in flight is newer than this derivation.
+      if (authorityEpochRef.current !== epochAtStart) {
+        return gateRef.current;
+      }
 
       // "observe" follows a stale-expectation refusal and must adopt NOTHING:
       // the server has just proven this till wrong, and a fresh read is an
@@ -1629,6 +1730,66 @@ export default function DeviceApp() {
   }, []);
 
   /**
+   * G-1-CLIENT-1A — re-read the fence after a sync run.
+   *
+   * A strict-recovery conflict is DISCOVERED by sync, not by a state change, so
+   * the hydration effect below never sees it. Without this the fence kept the
+   * verified_clear it read when the marker was deleted at transfer, and a new
+   * checkout was permitted over an unresolved conflict.
+   *
+   * THE SAME RULES AS HYDRATION, AND NO NEW AUTHORITY. It never claims a
+   * generation of its own, so an arm, a resolve or a recovery that starts while
+   * it reads always wins; it never publishes over a sale being armed; and the
+   * fence is rebuilt only from the authoritative four-state read.
+   */
+  const refreshRecoveryProtection = useCallback(async () => {
+    const sessionUserId = sessionUserIdRef.current;
+    const pairing = readyPairingRef.current;
+
+    if (sessionUserId === null || pairing === null) {
+      return;
+    }
+
+    const readGeneration = recoveryGenerationRef.current;
+    const verified = await readRecoveryAuthority({
+      deviceAuthUserId: sessionUserId,
+      deviceId: pairing.deviceId,
+      projectId: pairing.projectId,
+      buildJobId: pairing.buildJobId,
+    });
+
+    if (readGeneration !== recoveryGenerationRef.current || saleFenceRef.current.status === "arming") {
+      return;
+    }
+
+    recoveryRef.current = verified;
+
+    if (verified.status === "outstanding") {
+      saleFenceRef.current = {
+        status: "unresolved",
+        requestId: verified.sale.saleRequestId,
+        fingerprint: verified.sale.fingerprint,
+        checkoutGeneration: 0,
+      };
+      setUncertainSale(verified.sale);
+    } else if (verified.status === "verified_clear") {
+      saleFenceRef.current = { status: "idle" };
+      setUncertainSale(null);
+    }
+    // `blocked` keeps the fence exactly as it is; readHostAuthority refuses.
+  }, []);
+
+  /**
+   * G-1-CLIENT-1A — the same function for the startup-sync effect, which must
+   * stay keyed on the device session alone (the startup latch guard pins it).
+   */
+  const refreshRecoveryProtectionRef = useRef(refreshRecoveryProtection);
+
+  useEffect(() => {
+    refreshRecoveryProtectionRef.current = refreshRecoveryProtection;
+  }, [refreshRecoveryProtection]);
+
+  /**
    * Feature 24.5E — runs the sync engine for a trigger the operator can see.
    *
    * DELIBERATELY DOES NOT HANDLE "startup". That trigger is latched and has
@@ -1647,9 +1808,11 @@ export default function DeviceApp() {
       } finally {
         setSyncing(false);
         await refreshSaleStatus();
+        // G-1-CLIENT-1A — a run may have filed a strict-recovery conflict.
+        await refreshRecoveryProtection();
       }
     },
-    [refreshSaleStatus]
+    [refreshSaleStatus, refreshRecoveryProtection]
   );
 
   /**
@@ -1964,6 +2127,9 @@ export default function DeviceApp() {
 
       if (!cancelled) {
         setSaleStatus(status);
+        // G-1-CLIENT-1A — the startup drain may have filed a conflict too.
+        // Through the ref, so this effect stays keyed on the session alone.
+        await refreshRecoveryProtectionRef.current?.();
       }
     })();
 
@@ -2080,12 +2246,15 @@ export default function DeviceApp() {
         readyPairingRef.current = null;
         advanceAuthorityEpoch();
         void clearOfflineCache();
+        // OFF-3 — a newer mode decision: an offline entry still loading is stale.
+        offlineTransitionGenRef.current += 1;
         setState(next);
         return;
       }
 
       if (next.status !== "loading_config") {
         // unpaired / signing_in / unavailable — the server's answer wins.
+        offlineTransitionGenRef.current += 1;
         setState(next);
         return;
       }
@@ -2106,6 +2275,7 @@ export default function DeviceApp() {
           void clearOfflineCache();
         }
 
+        offlineTransitionGenRef.current += 1;
         setState(resolved);
         return;
       }
@@ -2123,6 +2293,11 @@ export default function DeviceApp() {
       setOfflinePrepared(persisted.stored);
       readyPairingRef.current = resolved.pairing;
       advanceAuthorityEpoch();
+      // OFF-3 — the server has just confirmed this till online. An offline entry
+      // that began before this point is older than that answer and must not
+      // overwrite it.
+      offlineTransitionGenRef.current += 1;
+      offlineModeRef.current = false;
 
       setState((previous) => {
         // Only a live POS may switch modes, and only one that is actually
@@ -2931,9 +3106,12 @@ export default function DeviceApp() {
     const blockedReason =
       recovery.status === "pending"
         ? "Checking for an unfinished sale. Try again in a moment."
-        : recovery.status === "blocked"
-          ? "This device cannot confirm whether an earlier sale finished. Reconnect before selling."
-          : null;
+        : recovery.status === "blocked" && recovery.reason === "recovery_conflict"
+          ? // G-1-CLIENT-1A — an unresolved strict-recovery conflict.
+            "An earlier sale on this till could not be recorded under the employee and register that rang it. It is kept on this till. Ask the account owner to review it before taking new sales."
+          : recovery.status === "blocked"
+            ? "This device cannot confirm whether an earlier sale finished. Reconnect before selling."
+            : null;
 
     const authorityToken = [
       currentGate.employee.employeeSessionId,
@@ -3358,6 +3536,23 @@ export default function DeviceApp() {
     // here rather than assumed, since this callback is what a future host would
     // reuse.
     async (input) => {
+      // G-1-CLIENT-1B — PART 1 OF THE RECOVERY GATE: a fresh DURABLE read, not
+      // the cached recoveryRef. A strict-recovery conflict committed by sync —
+      // or a strict submission in flight — refuses here even if DeviceApp's
+      // post-sync refresh has not run yet. It comes FIRST, before any authority
+      // is captured, so everything below is read after this await.
+      const clearance = await readCheckoutRecoveryClearance();
+
+      if (!clearance.ok) {
+        // Nothing sent; the runtime releases a first-dispatch arm on rolledBack.
+        return {
+          receipt: null,
+          error: CHECKOUT_RECOVERY_REFUSAL_MESSAGES[clearance.reason],
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
       const current = gateRef.current;
 
       if (current.employee === null || current.daily === null) {
@@ -3413,6 +3608,40 @@ export default function DeviceApp() {
         return {
           receipt: null,
           error: dispatch.reason,
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
+      // G-1-CLIENT-1B — PART 2, SYNCHRONOUS, with no await before the dispatch
+      // below: no strict recovery may have started or finished since the
+      // durable read. A recovery that began (or filed a conflict) in that
+      // window moved the counter, and this sale is refused rather than sent.
+      if (!isRecoveryActivityUnchanged(clearance.mark)) {
+        return {
+          receipt: null,
+          error: CHECKOUT_RECOVERY_REFUSAL_MESSAGES.recovery_in_progress,
+          failure: "server_rejected",
+          rolledBack: true,
+        };
+      }
+
+      // OFF-3 — THE MODE-TRANSITION RACE, CLOSED BEFORE DISPATCH.
+      //
+      // PosRuntime takes this ONLINE path because, at its last render, no
+      // offline queue was offered. The till may have entered offline mode after
+      // that render and before this press. Dispatching now would send a sale
+      // the till already believes cannot reach the server. Refused here exactly
+      // like every other pre-dispatch refusal above (nothing sent, rolled back),
+      // so the next press goes through the offline path under the same checks.
+      //
+      // DELIBERATELY NOT a change to the authority token: a sale already
+      // dispatched keeps its identity, and the exact-recovery Retry after a lost
+      // reply (which runs after the till has gone offline) must still pass.
+      if (offlineModeRef.current) {
+        return {
+          receipt: null,
+          error: MODE_CHANGED_BEFORE_DISPATCH_MESSAGE,
           failure: "server_rejected",
           rolledBack: true,
         };
@@ -3578,6 +3807,16 @@ export default function DeviceApp() {
       // identity behind for the retry rather than minting a second one.
       offlineDraftRef.current = drafted.draft;
 
+      // G-1-CLIENT-1B — PART 1 OF THE RECOVERY GATE, the same durable read the
+      // online path makes, before Policy 1 and the dispatch gate below are
+      // evaluated (so both are read after this await). A committed conflict or
+      // a strict submission in flight refuses before anything is written.
+      const clearance = await readCheckoutRecoveryClearance();
+
+      if (!clearance.ok) {
+        return { ok: false, message: CHECKOUT_RECOVERY_REFUSAL_MESSAGES[clearance.reason] };
+      }
+
       // v1.3 Feature 1B — Policy 1, restated at the durable write. The UI is
       // already gated, but this is the last point before money becomes a record
       // and it must not depend on which screen was rendered.
@@ -3618,6 +3857,12 @@ export default function DeviceApp() {
         // Refused before anything durable is written. The existing draft and
         // queue identity are untouched.
         return { ok: false, message: offlineDispatch.reason };
+      }
+
+      // G-1-CLIENT-1B — PART 2, SYNCHRONOUS, with no await before the durable
+      // save below: no strict recovery started or finished since the read.
+      if (!isRecoveryActivityUnchanged(clearance.mark)) {
+        return { ok: false, message: CHECKOUT_RECOVERY_REFUSAL_MESSAGES.recovery_in_progress };
       }
 
       const outcome = await completeOfflineSale({
@@ -3682,44 +3927,181 @@ export default function DeviceApp() {
    * generic "could not be confirmed" message. A failed fallback must never be
    * an escalation.
    */
-  const enterOfflineFromTransportFailure = useCallback(async () => {
-    const sessionUserId = sessionUserIdRef.current;
+  const enterOfflineFromTransportFailure = useCallback((): Promise<void> => {
+    // OFF-3 — COALESCED PER AUTHORITY. Several triggers can fire for one outage
+    // (the browser `offline` hint, a timed-out re-read, a sale's transport
+    // failure); under the same employee authority and transition generation
+    // they share ONE attempt, and none of them grants authority. A request made
+    // after the authority changed (sign-in, switch, Ring Out, auto-lock) is a
+    // NEWER, legitimate attempt: it starts its own instead of joining one that
+    // will be refused as stale.
+    const authorityEpoch = authorityEpochRef.current;
+    const generation = offlineTransitionGenRef.current;
+    const inFlight = offlineEntryRef.current;
 
-    if (sessionUserId === null) {
-      return;
+    if (
+      inFlight !== null &&
+      inFlight.authorityEpoch === authorityEpoch &&
+      inFlight.generation === generation
+    ) {
+      return inFlight.promise;
     }
 
-    const fallback = await loadOfflineFallback({
-      now: Date.now(),
-      sessionUserId,
-    });
+    const holder: { promise: Promise<void> | null } = { promise: null };
 
-    if (!fallback.ok) {
-      return;
-    }
+    const attempt = (async () => {
+      const sessionUserId = sessionUserIdRef.current;
+      const pairing = readyPairingRef.current;
 
-    setState((previous) => {
-      // Only a live POS may switch modes. If the app moved to revoked,
-      // reconnect_required or an error while this was in flight, that answer is
-      // newer than ours and must not be overwritten.
-      if (previous.status !== "ready") {
-        return previous;
+      if (sessionUserId === null || pairing === null) {
+        return;
       }
 
-      // Already offline: nothing to do, and rebuilding the state object would
-      // hand PosRuntime a new config identity for no reason.
-      if (previous.offline) {
-        return previous;
+      const fallback = await loadOfflineFallback({
+        now: Date.now(),
+        sessionUserId,
+      });
+
+      if (!fallback.ok) {
+        return;
       }
 
-      return {
-        ...previous,
-        pairing: fallback.pairing,
-        config: fallback.config,
-        offline: fallback.offline,
-      };
+      // OFF-3 — RE-CHECKED AFTER THE AWAIT. Loading the saved setup takes time,
+      // and anything that landed meanwhile is newer than this attempt: a
+      // reconnect that confirmed the till online, a revocation, an unpair or
+      // re-pair (another device user), a pairing/build change, or a COMPLETED
+      // employee-authority change (sign-in, switch, Ring Out, auto-lock — all of
+      // which advance the authority epoch). Any of those and this attempt
+      // commits nothing; a newer attempt, if one was asked for, decides.
+      const livePairing = readyPairingRef.current;
+
+      if (
+        sessionUserIdRef.current !== sessionUserId ||
+        authorityEpochRef.current !== authorityEpoch ||
+        offlineTransitionGenRef.current !== generation ||
+        livePairing === null ||
+        livePairing.deviceId !== pairing.deviceId ||
+        livePairing.buildJobId !== pairing.buildJobId ||
+        fallback.pairing.deviceId !== pairing.deviceId ||
+        fallback.pairing.buildJobId !== pairing.buildJobId
+      ) {
+        return;
+      }
+
+      // Set before the state commits, for completeSale's pre-dispatch check; the
+      // effect below re-mirrors it from state on every render.
+      offlineModeRef.current = true;
+
+      // NOTE: this changes the device MODE only. It never writes the employee
+      // gate, so it cannot overwrite a newer sign-in, logout, switch or
+      // auto-lock; offline checkout still requires canCheckoutOffline.
+      setState((previous) => {
+        // Only a live POS may switch modes. If the app moved to revoked,
+        // reconnect_required or an error while this was in flight, that answer
+        // is newer than ours and must not be overwritten.
+        if (previous.status !== "ready") {
+          return previous;
+        }
+
+        // Already offline: nothing to do, and rebuilding the state object would
+        // hand PosRuntime a new config identity for no reason.
+        if (previous.offline) {
+          return previous;
+        }
+
+        // OFF-3 — the state's own pairing must still be the one we validated.
+        if (
+          previous.pairing.deviceId !== fallback.pairing.deviceId ||
+          previous.pairing.buildJobId !== fallback.pairing.buildJobId
+        ) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          pairing: fallback.pairing,
+          config: fallback.config,
+          offline: fallback.offline,
+        };
+      });
+    })().finally(() => {
+      // Only clear the slot if it still holds THIS attempt; a newer attempt
+      // started under a newer authority keeps its own slot.
+      if (offlineEntryRef.current?.promise === holder.promise) {
+        offlineEntryRef.current = null;
+      }
     });
+
+    holder.promise = attempt;
+    offlineEntryRef.current = { promise: attempt, authorityEpoch, generation };
+
+    return attempt;
   }, []);
+
+  /**
+   * OFF-3 — offlineModeRef follows the committed state on every render (the
+   * entry above only sets it early, a moment before its own commit).
+   */
+  useEffect(() => {
+    offlineModeRef.current = getDeviceRuntimeMode(state) === "offline";
+  }, [state]);
+
+  /**
+   * OFF-3 — the browser's `offline` event, as a HINT THAT ASKS THE SERVER.
+   *
+   * The event proves nothing about the server (and DEF-01 forbids opening the
+   * cache on the browser's word), so it opens nothing. It only starts the same
+   * BOUNDED employee re-read deriveGateState uses. If that read positively fails
+   * to reach the server (a classified transport failure, or the 10s deadline),
+   * the G-1 rule applies exactly as on a foreground re-read: an established
+   * operator is kept and the EXISTING validated offline entry is asked to try.
+   * If the server answers, nothing at all happens here: no gate write, no daily
+   * call, no state change. The display-only live status indicator listens to
+   * the same event for its own label and is not involved.
+   */
+  const hintCheckInFlightRef = useRef(false);
+
+  const confirmOfflineFromHint = useCallback(async () => {
+    if (hintCheckInFlightRef.current || gateRef.current.employee === null) {
+      return;
+    }
+
+    hintCheckInFlightRef.current = true;
+
+    try {
+      const epochAtStart = authorityEpochRef.current;
+      const employee = await readEmployeeSession({
+        timeoutMs: BACKGROUND_SESSION_READ_TIMEOUT_MS,
+      });
+
+      if (authorityEpochRef.current !== epochAtStart) {
+        return;
+      }
+
+      if (!employee.ok && employee.unreached === "offline" && gateRef.current.employee !== null) {
+        void enterOfflineRef.current?.();
+      }
+    } finally {
+      hintCheckInFlightRef.current = false;
+    }
+  }, [readEmployeeSession]);
+
+  const liveOnlineForOfflineHint =
+    state.status === "ready" && getDeviceRuntimeMode(state) !== "offline";
+
+  useEffect(() => {
+    if (!liveOnlineForOfflineHint || typeof window === "undefined") {
+      return;
+    }
+
+    const onOffline = () => {
+      void confirmOfflineFromHint();
+    };
+
+    window.addEventListener("offline", onOffline);
+
+    return () => window.removeEventListener("offline", onOffline);
+  }, [liveOnlineForOfflineHint, confirmOfflineFromHint]);
 
   /**
    * Hands Ring Out the transition above. One function, two callers: the sale
@@ -3756,6 +4138,26 @@ export default function DeviceApp() {
         buildJobId: state.pairing.buildJobId,
       };
 
+      // G-1-CLIENT-1 — WHO IS RINGING THIS SALE, captured BEFORE dispatch from
+      // the gate this till established. A first arm stores it; a re-arm of the
+      // same sale keeps whatever was stored first (lib/uncertainSaleSession.ts).
+      //
+      // No employee or no register means there is nothing true to record, and a
+      // sale whose attribution cannot be protected is refused like one whose
+      // identity cannot: false here, and PosRuntime does not dispatch.
+      const armingGate = gateRef.current;
+
+      if (armingGate.employee === null || armingGate.daily === null) {
+        return false;
+      }
+
+      const originalAttribution = {
+        employeeId: armingGate.employee.employeeId,
+        employeePosSessionId: armingGate.employee.employeeSessionId,
+        registerSessionId: armingGate.daily.registerSessionId,
+        attemptedAt: new Date().toISOString(),
+      };
+
       // v1.3 CP-2B — THE FENCE GOES UP BEFORE THE AWAIT, NOT AFTER IT.
       //
       // From this statement on, this till is protecting an identity whether or
@@ -3779,6 +4181,7 @@ export default function DeviceApp() {
         sale,
         identity,
         dispatchedAt: new Date().toISOString(),
+        originalAttribution,
       });
 
       if (armed) {
@@ -3876,6 +4279,173 @@ export default function DeviceApp() {
 
     await refreshSaleStatus();
   }, [refreshSaleStatus]);
+
+  /**
+   * G-1-CLIENT-1 — finish an outstanding sale under its ORIGINAL identity and
+   * attribution, or keep it protected.
+   *
+   * THE SAME GATES AS EVERY OTHER DISPATCH, then the recovery:
+   *
+   *   1. the submitted cart's fingerprint is reconstructed HERE and must pass
+   *      verifySubmittedSale as an exact resume of the fenced identity;
+   *   2. the durable record is read back and must be that same id and
+   *      fingerprint — the originals come from it, never from the gate;
+   *   3. offline, the till must be eligible to complete a sale offline at all
+   *      (the same session checks a new offline sale needs);
+   *   4. lib/saleRecoverySession.ts decides and acts: lookup, strict recovery
+   *      or strict queue transfer — never complete_sale_v5, never a new id;
+   *   5. the fence is rebuilt from an authoritative read of the store, exactly
+   *      as resolveOnlineSale does, so nothing is assumed cleared.
+   */
+  const recoverOutstandingSale: PosRuntimeRecoverOutstandingSale = useCallback(
+    async (input) => {
+      const sessionUserId = sessionUserIdRef.current;
+      const pairing = readyPairingRef.current;
+
+      if (sessionUserId === null || pairing === null || state.status !== "ready") {
+        return { kind: "protected", message: RECOVERY_PROTECTED_MESSAGES.unknown_outcome };
+      }
+
+      const identity = {
+        deviceAuthUserId: sessionUserId,
+        deviceId: pairing.deviceId,
+        projectId: pairing.projectId,
+        buildJobId: pairing.buildJobId,
+      };
+
+      const submittedFingerprint = createSaleFingerprint({
+        projectId: pairing.projectId,
+        paymentMethod: input.paymentMethod,
+        tipAmount: input.tipAmount,
+        items: input.cart,
+      });
+
+      const dispatch = verifySubmittedSale({
+        requestId: input.saleRequestId,
+        fingerprint: submittedFingerprint,
+      });
+
+      if (dispatch.decision === "blocked") {
+        return { kind: "protected", message: dispatch.reason };
+      }
+
+      if (dispatch.decision !== "resume_exact" || dispatch.requestId !== input.saleRequestId) {
+        // Nothing is outstanding under this id, so there is nothing to recover
+        // and nothing this path may create.
+        return { kind: "protected", message: RECOVERY_PROTECTED_MESSAGES.unknown_outcome };
+      }
+
+      // The stored record for EXACTLY this id and fingerprint, or nothing.
+      const marker = await readOutstandingUncertainRecord(identity, {
+        saleRequestId: input.saleRequestId,
+        fingerprint: submittedFingerprint,
+      });
+
+      if (marker === null) {
+        return { kind: "protected", message: RECOVERY_PROTECTED_MESSAGES.unknown_outcome };
+      }
+
+      const online = getDeviceRuntimeMode(state) !== "offline";
+
+      if (!online) {
+        // Finishing a sale on this device needs what any offline sale needs: a
+        // valid offline session, and an employee and register this till
+        // established online (Policy 1). A transfer is never a way round it.
+        const eligibility = await resolveOfflineCheckoutSession({
+          now: Date.now(),
+          sessionUserId,
+          pairing,
+        });
+
+        if (!eligibility.ok) {
+          setOfflineCheckout(eligibility);
+          return { kind: "protected", message: describeOfflineCheckoutBlock(eligibility.reason) };
+        }
+
+        const attribution = canCheckoutOffline(gateRef.current);
+
+        if (!attribution.ok) {
+          return { kind: "protected", message: attribution.message };
+        }
+      }
+
+      const currentGate = gateRef.current;
+      const current =
+        currentGate.employee !== null && currentGate.daily !== null
+          ? {
+              employeeId: currentGate.employee.employeeId,
+              employeePosSessionId: currentGate.employee.employeeSessionId,
+              registerSessionId: currentGate.daily.registerSessionId,
+            }
+          : null;
+
+      // The fence stays up for the whole recovery: nothing below may let a new
+      // sale start until an authoritative read says the record is gone.
+      recoveryGenerationRef.current += 1;
+      recoveryRef.current = { status: "outstanding", sale: toUncertainSale(marker) };
+
+      const outcome = await runSaleRecovery({ marker, online, current });
+
+      const verified = await readRecoveryAuthority(identity);
+
+      recoveryRef.current = verified;
+
+      if (verified.status === "verified_clear") {
+        saleFenceRef.current = { status: "idle" };
+        setUncertainSale(null);
+      } else if (verified.status === "outstanding") {
+        saleFenceRef.current = {
+          status: "unresolved",
+          requestId: verified.sale.saleRequestId,
+          fingerprint: verified.sale.fingerprint,
+          checkoutGeneration: checkoutAuthRef.current?.generation ?? 0,
+        };
+        setUncertainSale(verified.sale);
+      }
+
+      if (outcome.kind === "queued") {
+        void refreshSaleStatus();
+
+        // Online, the strict record is submitted straight away by the ordinary
+        // engine — one sale, bounded, with its backoff — rather than waiting
+        // for the next reconnect. Offline, reconnect drains it as usual.
+        if (online) {
+          void runSync("retry");
+        }
+      }
+
+      // The id handed back is the one the runtime presented, which the record
+      // read above was required to match exactly. Nothing is substituted.
+      switch (outcome.kind) {
+        case "completed":
+          return { kind: "completed", receipt: outcome.receipt, saleRequestId: input.saleRequestId };
+        case "recorded":
+          return {
+            kind: "recorded",
+            message: describeRecordedSale(outcome.order),
+            saleRequestId: input.saleRequestId,
+          };
+        case "queued":
+          return {
+            kind: "queued",
+            // Drawn by the existing offline-receipt module from the DURABLE
+            // record, exactly as a reprint is.
+            receipt: await reconstructProvisionalReceipt({
+              queueRecordId: outcome.record.queueRecordId,
+              config: state.config,
+            }),
+            saleRequestId: input.saleRequestId,
+          };
+        case "protected":
+          return {
+            kind: "protected",
+            message: outcome.message,
+            ...(outcome.connectionLost ? { failure: "transport" as const } : {}),
+          };
+      }
+    },
+    [state, verifySubmittedSale, refreshSaleStatus, runSync]
+  );
 
   /**
    * v1.3 Cash Drawer Checkpoint 1A — the automatic drawer event for a sale that
@@ -4457,17 +5027,32 @@ export default function DeviceApp() {
               // Feature 25.3 — ONE control, not two pills. At the 411 CSS px
               // Android viewport two full buttons would leave the business name
               // almost nothing; a menu costs a fixed ~40px and has room to grow.
+              //
+              // IND-1 — the live status indicator sits beside the menu, in the
+              // same slot, so every template gets it. Display only: it reads
+              // this state and writes none of it. EMPTY_SALE_STATUS is replaced
+              // by the first saved-sale read, so identity means "not read yet".
               headerTrailing={
-                <OperatorMenu
-                  onOpenHistory={() => {
-                    setHistoryOrder(null);
-                    setHistoryOpen(true);
-                  }}
-                  onOpenSettings={() => {
-                    setResetNotice(null);
-                    setSettingsOpen(true);
-                  }}
-                />
+                <div className="flex flex-none items-center gap-2 md:gap-3">
+                  <LiveStatusIndicator
+                    expectedDeviceId={state.pairing.deviceId}
+                    runtimeMode={offlineMode ? "offline" : "online"}
+                    saleStatus={saleStatus}
+                    saleStatusLoaded={saleStatus !== EMPTY_SALE_STATUS}
+                    syncing={syncing}
+                    paused={activeOverlay !== null}
+                  />
+                  <OperatorMenu
+                    onOpenHistory={() => {
+                      setHistoryOrder(null);
+                      setHistoryOpen(true);
+                    }}
+                    onOpenSettings={() => {
+                      setResetNotice(null);
+                      setSettingsOpen(true);
+                    }}
+                  />
+                </div>
               }
               // Feature 19 — the logo origin. A device reads its logo from the
               // PINNED snapshot's path, so replacing the owner's logo later cannot
@@ -4524,6 +5109,10 @@ export default function DeviceApp() {
               armOnlineSale={armOnlineSale}
               resolveOnlineSale={resolveOnlineSale}
               persistedUncertainSale={uncertainSale}
+              // G-1-CLIENT-1 — an outstanding sale is finished under its
+              // original identity and attribution, online or offline, never
+              // resubmitted under whoever is signed in now.
+              recoverOutstandingSale={recoverOutstandingSale}
               // v1.3 Cash Drawer Checkpoint 1A — told once per succeeded sale.
               onSaleCompleted={handleSaleCompleted}
               cartLineCountRef={liveCartLineCountRef}

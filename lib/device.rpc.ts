@@ -36,6 +36,7 @@ import type {
   DeviceIdentity,
   PairingStateResult,
 } from "@/lib/deviceSession";
+import type { ReachabilityProbeResult } from "@/lib/liveStatus";
 
 /**
  * Feature 24.5G — attaches the HTTP status supabase-js reports alongside the error.
@@ -345,6 +346,49 @@ export async function fetchDevicePairingState(): Promise<
     return { ok: true, state: parsePairingState(data) };
   } catch (thrown) {
     return { ok: false, failure: classifyDeviceFailure(thrown) };
+  }
+}
+
+/**
+ * IND-1 — ONE display-only reachability read for the live status indicator.
+ *
+ * The SAME read-only RPC as fetchDevicePairingState above (one unique-index row
+ * read of the caller's own paired_devices row; no writes), returning the raw
+ * observation for lib/liveStatus.ts to classify. Nothing reads its result except
+ * the indicator: it never feeds pairing state, offline entry or checkout.
+ *
+ * Retries are disabled explicitly (an RPC is POST and postgrest-js would not
+ * retry it anyway), so one call is exactly one HTTP request. `signal` aborts the
+ * underlying fetch. The device client's own token handling applies, exactly as
+ * for every other device RPC (see the IND-1 preflight).
+ */
+export async function probeDeviceReachability(signal: AbortSignal): Promise<ReachabilityProbeResult> {
+  if (signal.aborted) {
+    return { type: "aborted" };
+  }
+
+  try {
+    const { data, error, status } = await getDeviceSupabaseClient()
+      .rpc("get_device_pairing_state")
+      .retry(false)
+      .abortSignal(signal);
+
+    if (signal.aborted) {
+      return { type: "aborted" };
+    }
+
+    if (error && (typeof status !== "number" || status === 0)) {
+      return { type: "transport" };
+    }
+
+    return {
+      type: "response",
+      status,
+      data: error ? null : data,
+      errorCode: error ? (typeof error.code === "string" && error.code !== "" ? error.code : "unknown") : null,
+    };
+  } catch {
+    return signal.aborted ? { type: "aborted" } : { type: "transport" };
   }
 }
 

@@ -243,6 +243,24 @@ import {
   OFFLINE_RECEIPT_UNAVAILABLE_NOTE,
 } from "@/lib/provisionalReceipt";
 import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
+
+/**
+ * W-02-RETRY-UX-FIX-1 — what the cashier reads after a classified transport
+ * failure, instead of the raw technical error ("TypeError: Failed to fetch").
+ *
+ * The request may have reached the server, so this never says the sale failed
+ * or that nothing was saved: it says the sale is unconfirmed.
+ *
+ * W-02-RETRY-UX-FIX-2 — NO PROMISES THE GATES MAY NOT KEEP. The FIX-1 wording
+ * told the cashier to press Pay again once reconnected and promised the sale
+ * would "not be recorded twice". Reconnecting does not by itself authorize a
+ * retry — the host's checkout gates decide that (employee, register, recovery
+ * state) — so the message now only asks for the order to be left unchanged and
+ * defers to whatever the screen then says. When offline checkout IS available,
+ * displayedSaleError shows OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST instead.
+ */
+export const SALE_CONNECTION_LOST_MESSAGE =
+  "The connection was lost before this sale was confirmed. Keep the order unchanged. Reconnect and follow the on-screen instructions.";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import { saleTimePresentation } from "@/lib/receiptPresentation";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
@@ -261,6 +279,7 @@ import type {
   PosRuntimeOnSaleCompleted,
   PosRuntimeOnSaleRejected,
   PosRuntimeQueueOfflineSale,
+  PosRuntimeRecoverOutstandingSale,
   PosRuntimeRefreshStock,
 } from "@/lib/posRuntimeHost";
 
@@ -467,6 +486,14 @@ type PosRuntimeProps = {
   persistedUncertainSale?: UncertainSale | null;
 
   /**
+   * G-1-CLIENT-1 — finishes an outstanding sale under its original identity
+   * and attribution, instead of resubmitting it. See
+   * PosRuntimeRecoverOutstandingSale. Null — the owner runtime and the Builder
+   * preview — leaves every path exactly as it was.
+   */
+  recoverOutstandingSale?: PosRuntimeRecoverOutstandingSale | null;
+
+  /**
    * v1.3 Cash Drawer Checkpoint 1A — told once per SUCCEEDED sale, after the
    * success boundary on each path. See PosRuntimeOnSaleCompleted. Null — the
    * default, and what the owner runtime and the Builder preview pass — means
@@ -504,6 +531,7 @@ export default function PosRuntime({
   armOnlineSale = null,
   resolveOnlineSale = null,
   persistedUncertainSale = null,
+  recoverOutstandingSale = null,
   onSaleCompleted = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
@@ -521,6 +549,14 @@ export default function PosRuntime({
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
   const [saleSaveStatus, setSaleSaveStatus] = useState<SaleSaveStatus>("idle");
   const [saleSaveError, setSaleSaveError] = useState<string | null>(null);
+  // W-02-RETRY-UX-FIX-1 — where the CURRENT sale error came from. Only an
+  // online attempt that ended in a classified transport failure may be
+  // presented as "connection lost, save it on this device"; every other error
+  // (an offline save failure, an eligibility or conflict refusal, a blocked
+  // gate, the uncertain-sale lock) is shown as itself. Reset at the start of
+  // every attempt and when the checkout closes, so it can never outlive the
+  // error it describes.
+  const [saleErrorOrigin, setSaleErrorOrigin] = useState<"connection_lost" | null>(null);
 
   // Feature 14.3 — deliberately a single most-recent order, not a growing
   // history: the receipt flow only ever needs to show/print the sale that
@@ -721,9 +757,19 @@ export default function PosRuntime({
    * including a lost connection on a till that has NO usable cache — there is
    * nothing better to offer there, and promising offline mode that cannot open
    * would be worse than the plain truth.
+   *
+   * W-02-RETRY-UX-FIX-1 — ONLY FOR THE ERROR IT DESCRIBES. This substitution
+   * used to apply to ANY error while an uncertain sale was held and offline
+   * checkout was available, so an offline save that failed in storage (B-1), an
+   * eligibility or conflict refusal, or the uncertain-sale lock on a changed
+   * cart were all replaced by "press Pay again to save it on this device". It
+   * now requires saleErrorOrigin to say the error IS that connection loss.
    */
   const displayedSaleError =
-    uncertainSale !== null && queueOfflineSale !== null && saleSaveStatus === "error"
+    saleErrorOrigin === "connection_lost" &&
+    uncertainSale !== null &&
+    queueOfflineSale !== null &&
+    saleSaveStatus === "error"
       ? OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST
       : saleSaveError;
 
@@ -1120,6 +1166,7 @@ export default function PosRuntime({
     setCheckoutStatus("idle");
     setSaleSaveStatus("idle");
     setSaleSaveError(null);
+    setSaleErrorOrigin(null);
 
     // Feature 24.5F — uncertainSale is DELIBERATELY NOT cleared here.
     //
@@ -1193,6 +1240,12 @@ export default function PosRuntime({
     // device with a validated cache and a live lease now passes null and
     // supplies queueOfflineSale, while a device that fails any part of that
     // check still lands here with a message saying which part.
+    //
+    // W-02-RETRY-UX-FIX-1 — the previous attempt's error origin is cleared
+    // first. This is a DISPLAY reset, not a guard: it only stops a stale
+    // "connection lost" origin from relabelling whatever this press reports.
+    setSaleErrorOrigin(null);
+
     if (checkoutBlockedReason !== null) {
       setSaleSaveStatus("error");
       setSaleSaveError(checkoutBlockedReason);
@@ -1315,6 +1368,86 @@ export default function PosRuntime({
     let armedUncertainty: UncertainSale | null = null;
 
     try {
+      // G-1-CLIENT-1 — AN OUTSTANDING SALE IS RECOVERED, NEVER RESUBMITTED.
+      //
+      // Before this, pressing Pay on an unanswered sale sent it again: online
+      // through complete_sale_v5 under whoever was signed in NOW, or offline
+      // into an ordinary queue record carrying the current employee and the
+      // current time. Both completed the sale under the wrong person — W-02
+      // finding G-1. The host now finishes it under its original id and its
+      // ORIGINAL attribution, or keeps it protected and says why.
+      //
+      // Placed ahead of both branches because it governs both, and after the
+      // unknown-outcome gate, which is what established `resumed`: only the
+      // EXACT outstanding sale reaches here, never a changed cart.
+      if (resumed !== null && recoverOutstandingSale !== null) {
+        const generation = preparedCheckoutRef.current?.generation ?? -1;
+
+        const resumeAuthorization = authorizeSaleDispatch?.({
+          requestId: resumed.id,
+          fingerprint,
+          checkoutGeneration: generation,
+        }) ?? { decision: "new_sale" as const };
+
+        if (resumeAuthorization.decision === "blocked") {
+          setSaleSaveStatus("error");
+          setSaleSaveError(resumeAuthorization.reason);
+          return;
+        }
+
+        const recovered = await recoverOutstandingSale({
+          saleRequestId: resumed.id,
+          paymentMethod: selectedPaymentMethod,
+          tipAmount: cartSummary.tipAmount,
+          cart,
+          checkoutGeneration: generation,
+        });
+
+        if (recovered.kind === "protected") {
+          // NOTHING CHANGES: the cart, the request id and the durable record
+          // all stay, so the same sale can be finished later.
+          setSaleSaveStatus("error");
+          setSaleSaveError(recovered.message);
+
+          // Only a positively classified transport failure may move the till
+          // into its validated offline mode, exactly as on the online path.
+          if (recovered.failure === "transport") {
+            onSaleRejected?.({ message: recovered.message, failure: "transport" });
+          }
+
+          return;
+        }
+
+        // RESOLVED: by a validated receipt, a validated lookup match, or a
+        // verified durable transfer to a strict queue record. The next sale
+        // mints its own identity.
+        setSaleRequest(null);
+        setUncertainSale(null);
+        setLastCompletedReceipt(recovered.kind === "completed" ? recovered.receipt : null);
+        setLastProvisionalReceipt(recovered.kind === "queued" ? recovered.receipt : null);
+        clearCart();
+        setCheckoutStatus("success");
+        invalidateCheckoutAuthorization?.(generation);
+        setSaleSaveStatus("success");
+        // A recorded sale has no receipt to show — the lookup returns a summary,
+        // not a receipt, and none is invented — so the host's sentence is shown.
+        setSaleSaveError(
+          recovered.kind === "recorded"
+            ? recovered.message
+            : recovered.kind === "queued" && recovered.receipt === null
+              ? OFFLINE_RECEIPT_UNAVAILABLE_NOTE
+              : null
+        );
+        // The completion point for a recovered sale. The drawer ledger is keyed
+        // on the sale request id, so a sale whose completion was already
+        // reported cannot open the drawer a second time. Online, the payment
+        // method is the SERVER's record of it, as on the online path below.
+        const recoveredPaymentMethod =
+          recovered.kind === "completed" ? recovered.receipt.paymentMethod : selectedPaymentMethod;
+
+        reportSaleCompleted(recovered.saleRequestId, recoveredPaymentMethod);
+        return;
+      }
 
       // Feature 24.5E — THE OFFLINE BRANCH, and the ordering below is the whole
       // safety property of this feature:
@@ -1524,7 +1657,30 @@ export default function PosRuntime({
         // committed server-side, so the message must not claim the sale failed —
         // the retry will return the original receipt if it did.
         setSaleSaveStatus("error");
-        setSaleSaveError(error ?? SALE_UNCONFIRMED_MESSAGE);
+
+        // W-02-RETRY-UX-FIX-1 — the WORDS only; classification, the marker and
+        // the retained request id are untouched below.
+        //
+        //   transport         -> plain "connection lost, may have gone through"
+        //                        (never the raw "TypeError: Failed to fetch");
+        //   rolled back       -> the server's own message: PostgreSQL refused
+        //                        it, so it is a definite, meaningful answer
+        //                        (e.g. "One or more items are no longer
+        //                        available");
+        //   any other answer a classifying host could not resolve (a gateway
+        //   504, a malformed response) -> "could not be confirmed", never the
+        //                        raw text, because it may have committed;
+        //   a host that does not classify at all -> unchanged behaviour.
+        const connectionLost = failure === "transport";
+
+        setSaleSaveError(
+          connectionLost
+            ? SALE_CONNECTION_LOST_MESSAGE
+            : failure !== undefined && rolledBack !== true
+              ? SALE_UNCONFIRMED_MESSAGE
+              : error ?? SALE_UNCONFIRMED_MESSAGE
+        );
+        setSaleErrorOrigin(connectionLost ? "connection_lost" : null);
 
         // Feature 24.5F — the request was DISPATCHED and nothing answered, so an
         // order carrying this key may exist. Recorded ONLY on a classified

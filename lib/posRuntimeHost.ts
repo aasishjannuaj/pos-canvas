@@ -234,6 +234,56 @@ export type PosRuntimeArmOnlineSale = (sale: UncertainSale) => Promise<boolean>;
 export type PosRuntimeResolveOnlineSale = () => Promise<void>;
 
 /**
+ * G-1-CLIENT-1 — finishes a sale whose earlier attempt went UNANSWERED, under
+ * its original identity AND its original attribution.
+ *
+ * Called by the runtime instead of resubmitting, whenever the cashier presses
+ * Pay on the exact sale an outstanding request is protecting — online or
+ * offline. The host owns everything a recovery needs and the runtime must not
+ * know about: the durable record, who rang the sale, the server lookup, strict
+ * recovery and the transfer into the queue. The runtime only renders the
+ * outcome.
+ *
+ * NO HOST, NO CHANGE. The owner runtime and the Builder preview omit it.
+ *
+ * `protected` keeps the cart, the request id and the durable record exactly as
+ * they were. Its `failure` is "transport" ONLY when nothing answered, which is
+ * the one signal that may move a till into its validated offline mode.
+ */
+export type PosRuntimeRecoverOutstandingSale = (input: {
+  /** The outstanding request's own id. Never a fresh one. */
+  saleRequestId: string;
+  paymentMethod: PaymentMethod;
+  tipAmount: number;
+  cart: readonly CartItem[];
+  checkoutGeneration: number;
+}) => Promise<
+  | {
+      /** Created or replayed online, under the original attribution. */
+      kind: "completed";
+      receipt: CompletedSaleReceipt;
+      saleRequestId: string;
+    }
+  | {
+      /**
+       * The server already had this exact sale for this device. There is no
+       * receipt to show — the lookup carries a summary, not a receipt — so only
+       * the host's sentence is.
+       */
+      kind: "recorded";
+      message: string;
+      saleRequestId: string;
+    }
+  | {
+      /** Durably saved on this device as a strict-recovery queue record. */
+      kind: "queued";
+      receipt: ProvisionalReceipt | null;
+      saleRequestId: string;
+    }
+  | { kind: "protected"; message: string; failure?: DeviceFailureKind }
+>;
+
+/**
  * v1.3 Cash Drawer Checkpoint 1A — told once a sale has SUCCEEDED.
  *
  * Online: after the server's authoritative receipt is in hand and the runtime

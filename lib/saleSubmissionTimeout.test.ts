@@ -18,6 +18,8 @@
 import "fake-indexeddb/auto";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setLockManagerForTests } from "@/lib/tabLocks";
+import { createLockRegistry } from "@/test/locks/processLocks";
 
 import {
   SALE_SUBMISSION_TIMEOUT_MS,
@@ -122,10 +124,14 @@ beforeEach(() => {
   globalThis.indexedDB = new IDBFactory();
   resetSyncEngineForTests();
   resetStartupSyncForTests();
+  // Batch B: every test is a fresh app instance with its own cross-tab locks;
+  // a submission a test abandons on purpose cannot hold a lock into the next.
+  setLockManagerForTests(createLockRegistry().process());
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  setLockManagerForTests(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -589,6 +595,12 @@ describe("a process killed mid-submission still recovers", () => {
     const before = await getQueuedSale("q-1");
 
     // Model the kill: claim the row, then abandon the promise entirely.
+    // Batch B: the killed process holds its own cross-tab locks, and its death
+    // releases them, as the browser does for a dead tab or app process.
+    const locks = createLockRegistry();
+    const killed = locks.process();
+
+    setLockManagerForTests(killed);
     const abandoned = createSaleSyncEngine({
       submit: () => new Promise<OfflineSaleSubmission>(() => {}),
       now: () => NOW,
@@ -599,6 +611,8 @@ describe("a process killed mid-submission still recovers", () => {
     await waitForState("q-1", "syncing");
 
     // A restart: fresh module state, then the startup reclaim.
+    killed.kill();
+    setLockManagerForTests(locks.process());
     resetSyncEngineForTests();
     resetStartupSyncForTests();
 

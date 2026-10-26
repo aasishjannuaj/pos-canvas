@@ -154,12 +154,15 @@ describe("the sync engine is driven from exactly one place", () => {
     expect(app).toContain("describeOfflineCheckoutBlock(");
   });
 
-  it("enqueueSale is called by ONE library module and no component", () => {
+  // SUPERSEDED IN PART BY G-1-CLIENT-1: two library modules, named exactly —
+  // the offline checkout, and the strict-recovery transfer of an uncertain sale.
+  // Still no component, and still nothing else.
+  it("enqueueSale is called by named library modules only, and no component", () => {
     const callers = productSourceFiles()
       .filter((file) => file !== "lib/saleQueueSession.ts")
       .filter((file) => code(read(file)).includes("enqueueSale"));
 
-    expect(callers).toEqual(["lib/offlineCheckoutSession.ts"]);
+    expect(callers).toEqual(["lib/offlineCheckoutSession.ts", "lib/saleRecoverySession.ts"]);
   });
 
   it("the engine is triggered from the device runtime and nowhere else", () => {

@@ -20,7 +20,7 @@ import {
   readPinnedConfigRecord,
   withQueueRecordMutation,
 } from "@/lib/deviceOfflineStore";
-import { readQueuedSale, transitionQueuedSale } from "@/lib/saleQueue";
+import { beginOperatorRetry, readQueuedSale, transitionQueuedSale } from "@/lib/saleQueue";
 import {
   UNCERTAIN_SALE_KEY,
   ownsUncertainSale,
@@ -30,12 +30,11 @@ import {
 import {
   getQueuedSale,
   listQueuedSales,
-  startOperatorRetry,
   updateQueueState,
 } from "@/lib/saleQueueSession";
 import type { QueuedSale } from "@/lib/saleQueue";
 import { REGISTER_BLOCKED_ERROR_CODE } from "@/lib/saleQueueSession";
-import { readUncertainSale } from "@/lib/uncertainSaleSession";
+import { readRecoveryAuthority } from "@/lib/recoveryAuthority";
 import {
   decideRejectedSaleDiscardSafety,
   decideRejectedSaleRetrySafety,
@@ -74,21 +73,29 @@ export type RejectedSaleReviewResult =
  * Anything unreadable or belonging to another pairing becomes
  * `saleRequestId: null`, which the policy treats as "this might be about the
  * sale in front of you" and refuses. Failing safe is the whole job here.
+ *
+ * W-02-RETRY-UX-FIX-1 — READ THROUGH THE RECOVERY AUTHORITY, not the legacy
+ * readUncertainSale. The legacy reader answers "none" when storage could not be
+ * opened or the read failed, so "I could not look" was reaching the policy as
+ * "nothing there" and a transient failure let Retry through. readRecoveryAuthority
+ * accepts only a successful read of a missing key as absence; every `blocked`
+ * reason — storage unavailable, read failed, unreadable, another pairing's
+ * record — is evidence that something may be outstanding.
  */
 async function readUncertainEvidence(record: QueuedSale): Promise<UncertainSaleEvidence> {
-  const state = await readUncertainSale({
+  const authority = await readRecoveryAuthority({
     deviceAuthUserId: record.deviceAuthUserId,
     deviceId: record.deviceId,
     projectId: record.projectId,
     buildJobId: record.buildJobId,
   });
 
-  if (state.status === "none") {
+  if (authority.status === "verified_clear") {
     return { present: false };
   }
 
-  return state.status === "outstanding"
-    ? { present: true, saleRequestId: state.sale.saleRequestId }
+  return authority.status === "outstanding"
+    ? { present: true, saleRequestId: authority.sale.saleRequestId }
     : { present: true, saleRequestId: null };
 }
 
@@ -349,29 +356,93 @@ export type RetryRejectedSaleResult =
  * leaves the existing engine to do what it already does; there is no second
  * submission path, and nothing here touches complete_sale_v4. The caller
  * triggers a manual drain afterwards.
+ *
+ * W-02-RETRY-UX-FIX-2 — ONE TRANSACTION, exactly as discardRejectedSale.
+ *
+ * The record, the uncertain-sale marker, the policy decision and the move to
+ * `pending` all happen inside a single withQueueRecordMutation readwrite
+ * transaction over both stores. IndexedDB serialises readwrite transactions on
+ * overlapping stores, so the decision is taken against the very record being
+ * written and the marker as it stands at that moment — a marker armed, a
+ * second Retry, or a record advanced by another action cannot slip between the
+ * check and the write. A Retry control rendered earlier authorizes nothing.
+ *
+ * THE SAME TRANSITION startOperatorRetry APPLIED, now applied in-transaction:
+ * the record must exist (not_found), parse (else storage_unavailable, as
+ * before), pass decideRejectedSaleRetrySafety, and pass beginOperatorRetry's
+ * legal-transition check; beginOperatorRetry then resets state, attemptCount,
+ * nextAttemptAt and the last error and stamps updatedAt, leaving the request
+ * id, payload, occurredAt, queuedAt and claims exactly as they were. Any
+ * storage failure — including one inside the transaction — refuses as
+ * storage_unavailable and commits nothing.
  */
 export async function retryRejectedSale(
   queueRecordId: string
 ): Promise<RetryRejectedSaleResult> {
-  const stored = await getQueuedSale(queueRecordId);
+  const db = await openOfflineDb();
 
-  if (!stored.ok) {
-    return { ok: false, reason: stored.reason === "not_found" ? "not_found" : "storage_unavailable" };
+  if (!db.ok) return { ok: false, reason: "storage_unavailable" };
+
+  const now = new Date().toISOString();
+
+  const outcome = await withQueueRecordMutation<RetryRejectedSaleResult>(
+    db.value,
+    queueRecordId,
+    UNCERTAIN_SALE_KEY,
+    ({ queued, uncertain }) => {
+      const refuse = (reason: Exclude<RetryRejectedSaleResult, { ok: true }>["reason"]) => ({
+        commit: false as const,
+        value: { ok: false as const, reason },
+      });
+
+      if (queued === undefined || queued === null) return refuse("not_found");
+
+      const parsed = readQueuedSale(queued);
+
+      if (!parsed.ok) return refuse("storage_unavailable");
+
+      const record = parsed.record;
+      const safety = decideRejectedSaleRetrySafety({
+        record,
+        uncertain: evidenceFromStoredMarker(record, uncertain),
+      });
+
+      if (!safety.allowed) return refuse(safety.reason);
+
+      const moved = beginOperatorRetry(record, now);
+
+      if (!moved.ok) return refuse("storage_unavailable");
+
+      return { commit: true, record: moved.record, value: { ok: true, record: moved.record } };
+    }
+  );
+
+  try {
+    return outcome.ok ? outcome.value : { ok: false, reason: "storage_unavailable" };
+  } finally {
+    db.value.close();
+  }
+}
+
+/**
+ * The uncertain-sale evidence from a marker value read INSIDE a queue
+ * mutation's own transaction — the same mapping discardRejectedSale applies: a
+ * missing key is the only absence; an unparseable value or another pairing's
+ * record is present with no usable id, which the policy refuses.
+ */
+function evidenceFromStoredMarker(record: QueuedSale, uncertain: unknown): UncertainSaleEvidence {
+  const parsed = readUncertainSaleRecord(uncertain);
+
+  if (!parsed.ok) {
+    return parsed.reason === "missing" ? { present: false } : { present: true, saleRequestId: null };
   }
 
-  const record = stored.value;
-  const safety = decideRejectedSaleRetrySafety({
-    record,
-    uncertain: await readUncertainEvidence(record),
-  });
-
-  if (!safety.allowed) {
-    return { ok: false, reason: safety.reason };
-  }
-
-  const moved = await startOperatorRetry(queueRecordId, new Date().toISOString());
-
-  return moved.ok
-    ? { ok: true, record: moved.value }
-    : { ok: false, reason: "storage_unavailable" };
+  return ownsUncertainSale(parsed.record, {
+    deviceAuthUserId: record.deviceAuthUserId,
+    deviceId: record.deviceId,
+    projectId: record.projectId,
+    buildJobId: record.buildJobId,
+  })
+    ? { present: true, saleRequestId: toUncertainSale(parsed.record).saleRequestId }
+    : { present: true, saleRequestId: null };
 }

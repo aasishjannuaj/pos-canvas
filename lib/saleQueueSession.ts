@@ -20,10 +20,14 @@
 import {
   SALE_QUEUE_SCHEMA_VERSION,
   SALE_REQUEST_PAYLOAD_VERSION,
+  STRICT_RECOVERY_PAYLOAD_VERSION,
   appendBlockedSaleReview,
   beginOperatorRetry,
   isDueForAttempt,
   isManuallyRetryable,
+  isRecoveryProtected,
+  isStrictRecoverySale,
+  looksLikeStrictRecoveryRow,
   markQueuedSaleAttempt,
   readQueuedSale,
   recoverInterruptedSale,
@@ -38,6 +42,7 @@ import type {
   QueueSummary,
   QueuedSale,
   QueuedSaleItem,
+  StrictRecoveryClaims,
 } from "@/lib/saleQueue";
 import {
   countQueuedSaleRecords,
@@ -50,6 +55,8 @@ import {
   readQueuedSaleRecord,
 } from "@/lib/deviceOfflineStore";
 import type { PaymentMethod } from "@/lib/cart";
+import { acquireLock, lockManager, submissionLock } from "@/lib/tabLocks";
+import type { HeldLock } from "@/lib/tabLocks";
 
 export type QueueFailure =
   | "storage_unavailable"
@@ -109,6 +116,13 @@ export type EnqueueSaleInput = {
    */
   employeePosSessionId?: string | null;
   registerSessionId?: string | null;
+  /**
+   * G-1-CLIENT-1 — present only for a sale transferred from an uncertain online
+   * attempt. The record is then written as a STRICT-RECOVERY record: its claims
+   * and its occurredAt are the originals, taken from here and from nowhere else,
+   * and it can only ever be submitted through complete_sale_recovery_v1.
+   */
+  strictRecovery?: StrictRecoveryClaims;
 };
 
 /**
@@ -129,9 +143,11 @@ export type EnqueueSaleInput = {
  * fallback for a financial record.
  */
 export async function enqueueSale(input: EnqueueSaleInput): Promise<QueueResult<QueuedSale>> {
+  const strict = input.strictRecovery ?? null;
+
   const record: QueuedSale = {
     queueSchemaVersion: SALE_QUEUE_SCHEMA_VERSION,
-    requestPayloadVersion: SALE_REQUEST_PAYLOAD_VERSION,
+    requestPayloadVersion: strict !== null ? STRICT_RECOVERY_PAYLOAD_VERSION : SALE_REQUEST_PAYLOAD_VERSION,
     queueRecordId: input.queueRecordId,
     saleRequestId: input.saleRequestId,
     deviceAuthUserId: input.deviceAuthUserId,
@@ -143,7 +159,8 @@ export async function enqueueSale(input: EnqueueSaleInput): Promise<QueueResult<
     // record carrying one could never be submitted.
     tipAmount: 0,
     items: input.items,
-    occurredAt: input.occurredAt,
+    // G-1-CLIENT-1 — a strict record happened when it was FIRST attempted.
+    occurredAt: strict !== null ? strict.originalAttemptAt : input.occurredAt,
     source: "offline_queued",
     state: "pending",
     queuedAt: input.now,
@@ -158,8 +175,14 @@ export async function enqueueSale(input: EnqueueSaleInput): Promise<QueueResult<
     serverCreatedAt: null,
     // Claims only. The server decides whether it can prove them; a sale is
     // never refused for lacking them.
-    employeePosSessionId: input.employeePosSessionId ?? null,
-    registerSessionId: input.registerSessionId ?? null,
+    //
+    // G-1-CLIENT-1 — except on a strict record, where they are the ORIGINALS
+    // and the server refuses the whole sale rather than store anything else.
+    employeePosSessionId:
+      strict !== null ? strict.originalEmployeePosSessionId : input.employeePosSessionId ?? null,
+    registerSessionId:
+      strict !== null ? strict.originalRegisterSessionId : input.registerSessionId ?? null,
+    ...(strict !== null ? { strictRecovery: { ...strict } } : {}),
   };
 
   // Validated BEFORE it is written, using the same reader that guards every
@@ -579,9 +602,9 @@ export async function recoverInterruptedSyncs(now: string): Promise<QueueResult<
 
   if (!listing.ok) return listing;
 
-  const stranded = listing.value.sales.filter((sale) => sale.state === "syncing");
+  const syncing = listing.value.sales.filter((sale) => sale.state === "syncing");
 
-  if (stranded.length === 0) {
+  if (syncing.length === 0) {
     return {
       ok: true,
       value: {
@@ -592,17 +615,50 @@ export async function recoverInterruptedSyncs(now: string): Promise<QueueResult<
     };
   }
 
-  const written = await withDb(async (db) => {
-    for (const sale of stranded) {
-      const result = await putQueuedSale(db, recoverInterruptedSale(sale, now));
+  // Batch B — "stranded" now has to be PROVEN, not assumed. Another tab of this
+  // origin may be submitting a `syncing` row right now (Batch A, M2). The
+  // submitting tab holds that row's submission lock from before its claim until
+  // after its final write, so a row is reclaimed only while THIS run holds the
+  // lock itself (taken ifAvailable — never waited for), and keeps holding it
+  // through the write. Without a LockManager nothing can be proven: ordinary
+  // rows are still reclaimed (server idempotency by saleRequestId makes a
+  // concurrent resubmission a replay), but STRICT rows are left in `syncing`,
+  // where the checkout gate keeps refusing — fail closed.
+  const manager = lockManager();
+  const held: HeldLock[] = [];
+  const stranded: QueuedSale[] = [];
 
-      if (!result.ok) return { ok: false as const, reason: "write_failed" as const };
+  try {
+    for (const sale of syncing) {
+      if (manager === null) {
+        if (!isStrictRecoverySale(sale)) stranded.push(sale);
+        continue;
+      }
+
+      const lock = await acquireLock(manager, submissionLock(sale.queueRecordId), { ifAvailable: true });
+
+      if (lock === null) continue; // a live tab owns this submission
+
+      held.push(lock);
+      stranded.push(sale);
     }
 
-    return { ok: true as const, value: undefined };
-  });
+    if (stranded.length > 0) {
+      const written = await withDb(async (db) => {
+        for (const sale of stranded) {
+          const result = await putQueuedSale(db, recoverInterruptedSale(sale, now));
 
-  if (!written.ok) return written;
+          if (!result.ok) return { ok: false as const, reason: "write_failed" as const };
+        }
+
+        return { ok: true as const, value: undefined };
+      });
+
+      if (!written.ok) return written;
+    }
+  } finally {
+    for (const lock of held) lock.release();
+  }
 
   const after = await listQueuedSales();
 
@@ -616,4 +672,70 @@ export async function recoverInterruptedSyncs(now: string): Promise<QueueResult<
         },
       }
     : after;
+}
+
+// ---------------------------------------------------------------------------
+// G-1-CLIENT-1A — persistent recovery-conflict protection, read for the fence
+// ---------------------------------------------------------------------------
+
+/**
+ * Does the queue hold an unresolved strict-recovery conflict?
+ *
+ *   clear       — every row read, none protected. Healthy pending sales,
+ *                 ordinary needs_attention rows and unreadable ORDINARY rows
+ *                 are all "clear": none of them blocks new checkout, exactly
+ *                 as before.
+ *   protected   — a strict record carries recoveryProtection.
+ *   recovering  — G-1-CLIENT-1B: a strict record is in `syncing` — being
+ *                 submitted now, or left mid-submission by a process that died
+ *                 (until startup recovery returns it to pending). Temporary.
+ *                 A strict record merely WAITING between attempts (pending) is
+ *                 not this — unless `unsettledStrictBlocks` (Batch B: no
+ *                 cross-tab locks on this runtime, so it could be claimed by
+ *                 another tab at any moment).
+ *   unreadable  — a row that cannot be read but looks like strict-recovery
+ *                 state: its protection cannot be proven absent.
+ *   read_failed — the queue itself could not be read. Not proof of anything.
+ *
+ * READ-ONLY, through the existing store helpers. Only `clear` permits.
+ */
+export type QueueRecoveryProtection = "clear" | "protected" | "recovering" | "unreadable" | "read_failed";
+
+export async function readQueueRecoveryProtection(
+  options: { unsettledStrictBlocks?: boolean } = {}
+): Promise<QueueRecoveryProtection> {
+  const opened = await openOfflineDb();
+
+  if (!opened.ok) return "read_failed";
+
+  try {
+    const raw = await readAllQueuedSaleRecords(opened.value);
+
+    if (!raw.ok) return "read_failed";
+
+    let unreadable = false;
+    let recovering = false;
+
+    for (const value of raw.value) {
+      const parsed = readQueuedSale(value);
+
+      if (parsed.ok) {
+        if (isRecoveryProtected(parsed.record)) return "protected";
+        if (isStrictRecoverySale(parsed.record) && parsed.record.state === "syncing") recovering = true;
+        // Batch B — without cross-tab locks a PENDING strict row could be claimed
+        // by another tab at any moment, so it blocks too (fail closed).
+        if (options.unsettledStrictBlocks && isStrictRecoverySale(parsed.record) && parsed.record.state === "pending") {
+          recovering = true;
+        }
+      } else if (looksLikeStrictRecoveryRow(value)) {
+        unreadable = true;
+      }
+    }
+
+    return unreadable ? "unreadable" : recovering ? "recovering" : "clear";
+  } catch {
+    return "read_failed";
+  } finally {
+    opened.value.close();
+  }
 }

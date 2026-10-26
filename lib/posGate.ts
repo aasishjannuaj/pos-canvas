@@ -494,7 +494,21 @@ export function applyReconnectDerivation(
   }
 
   if (!observed.employee.ok) {
-    return applyStartupLock();
+    // G-1-CLIENT-1 — A CONFIRMED TRANSPORT FAILURE IS NOT A SHIFT CHANGE.
+    //
+    // This used to lock the till on ANY failed read, so a cashier who
+    // minimised the app during a network outage came back signed out and could
+    // not take the offline sale their established session entitles them to.
+    // Nothing was learned: the server was never reached, so it cannot have
+    // said the session ended. Exactly what this till established is kept —
+    // nothing new is established, nothing is adopted, and the next reachable
+    // read still locks on a changed or missing session.
+    //
+    // ONLY `offline`, which the employee adapter sets solely for a failure
+    // positively classified as never having reached a server. A refusal, an
+    // auth error, a malformed answer or an unclassifiable failure still locks,
+    // exactly as before.
+    return observed.employee.unreached === "offline" ? state : applyStartupLock();
   }
 
   if (
@@ -575,7 +589,17 @@ export function applySaleRegisterAdoption(
  * first is information, the second is the absence of it, and they call for
  * different gates.
  */
-export type SessionRead<T> = { ok: false } | { ok: true; session: T | null };
+export type SessionRead<T> =
+  | {
+      ok: false;
+      /**
+       * G-1-CLIENT-1 — set to "offline" ONLY when the read was positively
+       * classified as never having reached a server. Absent means "not proven
+       * to be transport", never "transport".
+       */
+      unreached?: "offline";
+    }
+  | { ok: true; session: T | null };
 
 /**
  * Whether the employee a recovery retained is still the one signed in.

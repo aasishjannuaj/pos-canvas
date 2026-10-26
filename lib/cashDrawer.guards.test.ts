@@ -131,9 +131,31 @@ describe("PosRuntime reports a sale only after it has succeeded", () => {
     expect(report).toMatch(/try \{\s*onSaleCompleted\(\{ saleRequestId, paymentMethod \}\);\s*\} catch/);
   });
 
-  it("exactly two completion points, both inside completeSale", () => {
-    expect(runtime.match(/reportSaleCompleted\(/g) ?? []).toHaveLength(3); // definition + 2 calls
-    expect(completeSale.match(/reportSaleCompleted\(/g) ?? []).toHaveLength(2);
+  // SUPERSEDED IN PART BY G-1-CLIENT-1: a third completion point — a recovered
+  // sale the host reports resolved. Still all inside completeSale, still after a
+  // success lock (pinned in the RECOVERY test below), and the drawer ledger is
+  // keyed on the sale request id so a sale is opened for at most once.
+  it("exactly three completion points, all inside completeSale", () => {
+    expect(runtime.match(/reportSaleCompleted\(/g) ?? []).toHaveLength(4); // definition + 3 calls
+    expect(completeSale.match(/reportSaleCompleted\(/g) ?? []).toHaveLength(3);
+  });
+
+  it("RECOVERY: only after the host reports a RESOLVED outcome and the success lock", () => {
+    const recover = completeSale.indexOf("const recovered = await recoverOutstandingSale(");
+    const protectedBranch = completeSale.indexOf('if (recovered.kind === "protected") {', recover);
+    const protectedReturn = completeSale.indexOf("return;", protectedBranch);
+    const lock = completeSale.indexOf('setCheckoutStatus("success");', protectedReturn);
+    const call = completeSale.indexOf(
+      "reportSaleCompleted(recovered.saleRequestId, recoveredPaymentMethod);"
+    );
+
+    for (const point of [recover, protectedBranch, protectedReturn, lock, call]) {
+      expect(point).toBeGreaterThan(-1);
+    }
+
+    expect(completeSale.slice(0, recover)).not.toContain("reportSaleCompleted");
+    expect(call).toBeGreaterThan(protectedReturn);
+    expect(call).toBeGreaterThan(lock);
   });
 
   it("OFFLINE: only after the durable save answered ok, never before it", () => {
@@ -179,8 +201,14 @@ describe("PosRuntime reports a sale only after it has succeeded", () => {
   });
 
   it("nothing before the success boundary reports: selection, the fences, planning, arming, dispatch, rejection", () => {
-    const beforeOffline = completeSale.slice(0, completeSale.indexOf("if (!saved.ok) {"));
+    // G-1-CLIENT-1 — measured from the end of the recovery branch, whose own
+    // report is pinned positionally in the RECOVERY test above.
+    const recoveryEnd = completeSale.indexOf(
+      "reportSaleCompleted(recovered.saleRequestId, recoveredPaymentMethod);"
+    );
+    const beforeOffline = completeSale.slice(recoveryEnd + 1, completeSale.indexOf("if (!saved.ok) {"));
 
+    expect(recoveryEnd).toBeGreaterThan(-1);
     expect(beforeOffline).not.toContain("reportSaleCompleted");
 
     const offlineEnd = completeSale.indexOf("reportSaleCompleted(saved.saleRequestId");
