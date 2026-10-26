@@ -118,9 +118,10 @@ export async function readCheckoutRecoveryClearance(): Promise<CheckoutRecoveryC
 
     switch (durable) {
       case "clear":
+      // v1.3.4 owner decision: a set-aside conflict does not stop new sales.
+      // It is preserved and never auto-submitted (see readQueueRecoveryProtection).
+      case "isolated":
         return { ok: true, mark: { epoch: markedEpoch, gate } };
-      case "protected":
-        return { ok: false, reason: "recovery_conflict" };
       case "recovering":
         return { ok: false, reason: "recovery_in_progress" };
       case "unreadable":

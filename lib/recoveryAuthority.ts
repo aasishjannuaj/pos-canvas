@@ -104,7 +104,9 @@ export async function readRecoveryAuthority(
   // and, as everywhere in this file, a read that failed is not "nothing there".
   const queue = await readQueueRecoveryProtection();
 
-  if (queue === "protected") return { status: "blocked", reason: "recovery_conflict" };
+  // v1.3.4 owner decision (2026-10-26): a set-aside conflict ("isolated") no
+  // longer blocks — the till keeps selling and the record stays preserved and
+  // visible for review. Only what cannot be proven still refuses, below.
   // G-1-CLIENT-1B — a strict submission IN FLIGHT is deliberately NOT cached
   // here. This answer is cached until the next refresh, and a transient state
   // cached that way goes stale the moment the submission ends (it showed a

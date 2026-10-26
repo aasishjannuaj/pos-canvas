@@ -679,13 +679,19 @@ export async function recoverInterruptedSyncs(now: string): Promise<QueueResult<
 // ---------------------------------------------------------------------------
 
 /**
- * Does the queue hold an unresolved strict-recovery conflict?
+ * Does the queue hold strict-recovery state that affects a new checkout?
  *
  *   clear       — every row read, none protected. Healthy pending sales,
  *                 ordinary needs_attention rows and unreadable ORDINARY rows
  *                 are all "clear": none of them blocks new checkout, exactly
  *                 as before.
- *   protected   — a strict record carries recoveryProtection.
+ *   isolated    — v1.3.4 owner decision (2026-10-26): a strict record carries
+ *                 recoveryProtection (a clash with what the server holds). It
+ *                 is SET ASIDE, not a reason to stop selling: it stays stored
+ *                 byte-for-byte, is never submitted automatically (it sits in
+ *                 needs_attention, which no automatic path sends), keeps its
+ *                 original attribution, and stays visible for review. New sales
+ *                 are allowed. (G-1-CLIENT-1A blocked here; see REPORT §10, OD-3.)
  *   recovering  — G-1-CLIENT-1B: a strict record is in `syncing` — being
  *                 submitted now, or left mid-submission by a process that died
  *                 (until startup recovery returns it to pending). Temporary.
@@ -699,7 +705,7 @@ export async function recoverInterruptedSyncs(now: string): Promise<QueueResult<
  *
  * READ-ONLY, through the existing store helpers. Only `clear` permits.
  */
-export type QueueRecoveryProtection = "clear" | "protected" | "recovering" | "unreadable" | "read_failed";
+export type QueueRecoveryProtection = "clear" | "isolated" | "recovering" | "unreadable" | "read_failed";
 
 export async function readQueueRecoveryProtection(
   options: { unsettledStrictBlocks?: boolean } = {}
@@ -715,12 +721,15 @@ export async function readQueueRecoveryProtection(
 
     let unreadable = false;
     let recovering = false;
+    let isolated = false;
 
+    // Every row is read: a set-aside conflict must never hide an unreadable
+    // strict row or a strict submission in flight behind it (each still refuses).
     for (const value of raw.value) {
       const parsed = readQueuedSale(value);
 
       if (parsed.ok) {
-        if (isRecoveryProtected(parsed.record)) return "protected";
+        if (isRecoveryProtected(parsed.record)) isolated = true;
         if (isStrictRecoverySale(parsed.record) && parsed.record.state === "syncing") recovering = true;
         // Batch B — without cross-tab locks a PENDING strict row could be claimed
         // by another tab at any moment, so it blocks too (fail closed).
@@ -732,7 +741,7 @@ export async function readQueueRecoveryProtection(
       }
     }
 
-    return unreadable ? "unreadable" : recovering ? "recovering" : "clear";
+    return unreadable ? "unreadable" : recovering ? "recovering" : isolated ? "isolated" : "clear";
   } catch {
     return "read_failed";
   } finally {

@@ -134,8 +134,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout refused", () => {
-  it("THE SEQUENCE: transfer -> conflict -> new checkout refused -> restart -> new checkout still refused", async () => {
+// v1.3.4 owner decision (2026-10-26): a strict-recovery conflict is SET ASIDE and
+// the till keeps selling. These tests previously asserted the G-1-CLIENT-1A
+// refusal; they now assert the new rule AND keep every preservation check.
+describe("v1.3.4: an unresolved strict-recovery conflict is set aside; checkout continues", () => {
+  it("THE SEQUENCE: transfer -> conflict -> set aside, new checkout ALLOWED -> restart -> still allowed; the sale is preserved and never re-sent", async () => {
     let mods = await load();
     const m = model();
 
@@ -150,15 +153,22 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
 
     expect(record.state).toBe("needs_attention");
     expect(record.lastErrorCode).toBe("attribution_conflict");
-    expect(await permitsNewCheckout(mods)).toBe(false);
-    expect(await mods.authority.readRecoveryAuthority(IDENTITY)).toEqual({ status: "blocked", reason: "recovery_conflict" });
+    expect(record.recoveryProtection).toMatchObject({ code: "attribution_conflict" });
+    expect(await permitsNewCheckout(mods)).toBe(true);
+    expect(await mods.authority.readRecoveryAuthority(IDENTITY)).toEqual({ status: "verified_clear" });
+
+    // Later automatic sync runs never send the set-aside sale again.
+    const later = submitter(m, mods);
+    await mods.engine.createSaleSyncEngine({ submit: later.submit, now: () => Date.now() }).run();
+    expect(later.recovery).not.toHaveBeenCalled();
 
     // Restart on the same storage.
     vi.resetModules();
     mods = await load();
 
-    expect(await permitsNewCheckout(mods)).toBe(false);
-    expect(await mods.authority.readRecoveryAuthority(IDENTITY)).toEqual({ status: "blocked", reason: "recovery_conflict" });
+    expect(await permitsNewCheckout(mods)).toBe(true);
+    expect(await mods.authority.readRecoveryAuthority(IDENTITY)).toEqual({ status: "verified_clear" });
+    expect((await stored(mods)).recoveryProtection).toMatchObject({ code: "attribution_conflict" });
     // The sale itself is untouched: same id, payload and originals.
     const after = await stored(mods);
 
@@ -174,7 +184,7 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
     expect(m.state.orders).toHaveLength(1);
   });
 
-  it("Retry (back to pending) does NOT erase the protection; neither does a later no-answer failure", async () => {
+  it("Retry (back to pending) does NOT erase the protection; neither does a later no-answer failure; selling continues throughout", async () => {
     const mods = await load();
     const m = model();
 
@@ -190,7 +200,8 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
     expect((await mods.queue.startOperatorRetry(record.queueRecordId, new Date().toISOString())).ok).toBe(true);
     expect((await stored(mods)).state).toBe("pending");
     expect((await stored(mods)).lastErrorCode).toBeNull();
-    expect(await permitsNewCheckout(mods)).toBe(false);
+    expect((await stored(mods)).recoveryProtection).toMatchObject({ code: "attribution_conflict" });
+    expect(await permitsNewCheckout(mods)).toBe(true);
 
     // The next attempt never gets an answer: retry/backoff, still protected.
     await mods.engine.createSaleSyncEngine({
@@ -204,7 +215,8 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
     }).run();
 
     expect((await stored(mods)).state).toBe("pending");
-    expect(await permitsNewCheckout(mods)).toBe(false);
+    expect((await stored(mods)).recoveryProtection).toMatchObject({ code: "attribution_conflict" });
+    expect(await permitsNewCheckout(mods)).toBe(true);
     expect(server.v5).not.toHaveBeenCalled();
   });
 
@@ -218,7 +230,8 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
     const server = submitter(m, mods);
 
     await mods.engine.createSaleSyncEngine({ submit: server.submit, now: () => Date.now() }).run();
-    expect(await permitsNewCheckout(mods)).toBe(false);
+    expect(await permitsNewCheckout(mods)).toBe(true); // set aside, selling continues
+    expect((await stored(mods)).recoveryProtection).toMatchObject({ code: "attribution_conflict" });
 
     // The server side is corrected (test-only): the conflicting order goes and
     // the strict record is retried, so the server creates it under the originals.
@@ -227,6 +240,7 @@ describe("G-1-CLIENT-1A: an unresolved strict-recovery conflict keeps checkout r
     await mods.engine.createSaleSyncEngine({ submit: server.submit, now: () => Date.now(), manual: true }).run();
 
     expect((await stored(mods)).state).toBe("synced");
+    expect((await stored(mods)).recoveryProtection ?? null).toBeNull();
     expect(m.state.orders[0]).toMatchObject({ saleRequestId: SALE_ID, employeeId: AMY });
     expect(await permitsNewCheckout(mods)).toBe(true);
     expect(server.v5).not.toHaveBeenCalled();

@@ -168,7 +168,8 @@ beforeEach(() => {
 });
 
 describe("G-1-CLIENT-1B: committed conflict and strict submissions gate the final action", () => {
-  it("a COMMITTED protected conflict refuses — fresh read, no cached state involved; also after restart and Retry", async () => {
+  // v1.3.4 owner decision (2026-10-26): a committed conflict is set aside and checkout continues.
+  it("a COMMITTED protected conflict is SET ASIDE — checkout continues, also after restart and Retry; the record stays protected", async () => {
     let mods = await load();
     const m = model();
 
@@ -176,15 +177,17 @@ describe("G-1-CLIENT-1B: committed conflict and strict submissions gate the fina
     legacyConflict(m);
     await mods.engine.createSaleSyncEngine({ submit: submitter(m, mods).submit, now: () => Date.now() }).run();
 
-    expect(await finalGate(mods)).toEqual({ acted: false, reason: "recovery_conflict" });
+    expect(await finalGate(mods)).toEqual({ acted: true });
 
     vi.resetModules();
     mods = await load();
     expect(mods.gate.isStrictRecoveryInFlight()).toBe(false);
-    expect(await finalGate(mods)).toEqual({ acted: false, reason: "recovery_conflict" });
+    expect(await finalGate(mods)).toEqual({ acted: true });
 
     await mods.queue.startOperatorRetry("q-strict", new Date().toISOString());
-    expect(await finalGate(mods)).toEqual({ acted: false, reason: "recovery_conflict" });
+    expect(await finalGate(mods)).toEqual({ acted: true });
+    const listing = await mods.queue.listQueuedSales();
+    expect(listing.ok && listing.value.sales.find((s) => s.saleRequestId === STRICT_ID)?.recoveryProtection).toMatchObject({ code: "attribution_conflict" });
   });
 
   it("a strict submission ACTIVELY IN FLIGHT refuses temporarily; after a clean result the gate opens", async () => {
@@ -254,7 +257,7 @@ describe("G-1-CLIENT-1B: committed conflict and strict submissions gate the fina
     expect(clearance.ok && mods.gate.isRecoveryActivityUnchanged(clearance.mark)).toBe(false);
   });
 
-  it("ORDERING A — checkout acts first, recovery afterwards: both proceed; a later conflict blocks only LATER checkouts", async () => {
+  it("ORDERING A — checkout acts first, recovery afterwards: both proceed; a later conflict is set aside and LATER checkouts continue", async () => {
     const mods = await load();
     const m = model();
 
@@ -271,7 +274,8 @@ describe("G-1-CLIENT-1B: committed conflict and strict submissions gate the fina
     const listing = await mods.queue.listQueuedSales();
 
     expect(listing.ok && listing.value.sales.find((s) => s.saleRequestId !== STRICT_ID)?.state).toBe("synced");
-    expect(await finalGate(mods)).toEqual({ acted: false, reason: "recovery_conflict" });
+    expect(listing.ok && listing.value.sales.find((s) => s.saleRequestId === STRICT_ID)?.recoveryProtection).toMatchObject({ code: "attribution_conflict" });
+    expect(await finalGate(mods)).toEqual({ acted: true });
   });
 
   it("ORDERING B — recovery starts first: the checkout is refused, and allowed after a clean recovery", async () => {
