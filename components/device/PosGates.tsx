@@ -1078,8 +1078,8 @@ export function CashMovementPanel({
         </div>
 
         {/* v1.3 RC-polish — the printed Cash Drop record: TWO slips, one print
-            job. Copy 1 travels with the dropped cash, copy 2 stays for the
-            store. Two slips in one job, NOT a driver copy count: the web
+            job. The original stays in the drawer, the duplicate travels with
+            the dropped cash. Two slips in one job, NOT a driver copy count: the web
             platform has no way to ask for N copies, so asking for two pages is
             the only way to get two slips deterministically.
 
@@ -1099,36 +1099,38 @@ export function CashMovementPanel({
             className="receipt-print-area cash-drop-print-area"
             data-print-exclusive="cash-movement"
           >
+            {/* v1.3.4 — laid out like the owner's existing store slip: centred
+                CASH DROP RECEIPT, the total on one ruled line, date/time and
+                cashier as two-column rows, "Signed:" with a rule, and which
+                copy this is. The ORIGINAL stays in the drawer; the DUPLICATE
+                goes with the cash. The cashier is named, never their login
+                code: this paper travels with money. */}
             {[
-              { label: "Copy 1 — with the cash", footer: "Send this copy with the cash." },
-              { label: "Copy 2 — store record", footer: "Keep this copy for the store record." },
+              { label: "ORIGINAL COPY for DRAWER", footer: "Keep this copy in the drawer." },
+              { label: "DUPLICATE COPY for PICKUP", footer: "Send this copy with the cash." },
             ].map((copy) => (
               <section className="cash-drop-slip" key={copy.label}>
+                <h2 className="cash-drop-slip-title">
+                  {getCashMovementLabel(result.movementType)} Receipt
+                </h2>
+
                 {/* The shop, from the same pinned configuration the till sells
                     from, so this slip and a sale receipt beside it can never
                     name the business differently. */}
                 <p className="cash-drop-slip-shop">{businessName}</p>
 
-                <h2 className="cash-drop-slip-title">
-                  {getCashMovementLabel(result.movementType)}
-                </h2>
-
-                <p className="cash-drop-slip-copy">{copy.label}</p>
-
                 {/* The SERVER's amount, unchanged, with the project's currency
                     symbol in front of it: a slip that travels with money has to
                     say which money. */}
                 <p className="cash-drop-slip-amount">
-                  {currencySymbol}
-                  {result.amount}
+                  <span>Total {getCashMovementLabel(result.movementType)}</span>
+                  <span>
+                    {currencySymbol}
+                    {result.amount}
+                  </span>
                 </p>
 
                 <dl className="cash-drop-slip-rows">
-                  <div className="cash-drop-slip-row">
-                    <dt>Employee</dt>
-                    <dd>{result.employeeName}</dd>
-                  </div>
-
                   <div className="cash-drop-slip-row">
                     <dt>Date / time</dt>
                     {/* THE BUSINESS ZONE, OR THE RAW INSTANT — never the
@@ -1143,6 +1145,11 @@ export function CashMovementPanel({
                     </dd>
                   </div>
 
+                  <div className="cash-drop-slip-row">
+                    <dt>Cashier</dt>
+                    <dd>{result.employeeName}</dd>
+                  </div>
+
                   {result.note !== null && (
                     <div className="cash-drop-slip-row">
                       <dt>Reason</dt>
@@ -1151,9 +1158,10 @@ export function CashMovementPanel({
                   )}
 
                   {/* FULL id, never truncated — it is how this slip is matched
-                      to the ledger. The reference class lets it break anywhere
-                      so a UUID cannot run off a 72 mm roll. */}
-                  <div className="cash-drop-slip-row">
+                      to the ledger. Label above value here only: a UUID needs
+                      the whole width, and the reference class lets it break
+                      anywhere so it cannot run off a 72 mm roll. */}
+                  <div className="cash-drop-slip-row cash-drop-slip-row-stacked">
                     <dt>Reference</dt>
                     <dd className="cash-drop-slip-reference">{result.movementId}</dd>
                   </div>
@@ -1161,9 +1169,12 @@ export function CashMovementPanel({
 
                 {/* A ruled line, not a run of underscores: underscores are a
                     fixed width and overflow the real printable width. */}
-                <p className="cash-drop-slip-signature-label">Employee signature</p>
-                <p className="cash-drop-slip-signature-rule" aria-hidden="true" />
+                <div className="cash-drop-slip-signature">
+                  <p className="cash-drop-slip-signature-label">Signed:</p>
+                  <p className="cash-drop-slip-signature-rule" aria-hidden="true" />
+                </div>
 
+                <p className="cash-drop-slip-copy">{copy.label}</p>
                 <p className="cash-drop-slip-footer">{copy.footer}</p>
               </section>
             ))}

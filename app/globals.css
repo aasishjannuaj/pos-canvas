@@ -171,7 +171,7 @@ body {
   }
 
   /* ONE SLIP PER PAGE, so an 80mm roll feeds twice and the cashier can tear
-     them apart: copy 1 goes with the cash, copy 2 stays for the store. The
+     them apart: the original stays in the drawer, the duplicate goes with the cash. The
      break is BEFORE each slip after the first, so a single slip never emits a
      trailing blank page. */
   .cash-drop-slip {
@@ -182,58 +182,75 @@ body {
     break-before: page;
   }
 
-  /* The shop, quiet above the heading: it identifies the slip without competing
-     with the thing the reader is actually looking for. */
-  .cash-drop-slip-shop {
-    font-size: 12px;
+  /* v1.3.4 — the owner's store-slip layout. Heading first and centred, the
+     shop under it. */
+  .cash-drop-slip-title {
+    font-size: 15px;
     font-weight: 700;
+    letter-spacing: 0.04em;
+    text-align: center;
+    /* Upper-cased by the stylesheet rather than in the markup, so the
+       product's own wording stays the single source of the term. */
+    text-transform: uppercase;
     margin: 0 0 1mm;
   }
 
-  /* THE DOMINANT LINE. Upper-cased by the stylesheet rather than in the markup,
-     so the product's own wording stays the single source of the term. */
-  .cash-drop-slip-title {
-    font-size: 17px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    margin: 0;
-  }
-
-  .cash-drop-slip-copy {
+  .cash-drop-slip-shop {
     font-size: 11px;
-    margin: 0 0 2mm;
+    text-align: center;
+    margin: 0 0 3mm;
   }
 
-  /* The figure the slip exists for. */
+  /* The figure the slip exists for: TOTAL DROP on the left, the amount on the
+     right, ruled underneath like the store's existing slip. */
   .cash-drop-slip-amount {
-    font-size: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 2mm;
+    font-size: 14px;
     font-weight: 700;
-    line-height: 1.15;
-    margin: 0 0 3mm;
+    text-transform: uppercase;
+    margin: 0 0 2mm;
+    padding: 0 0 1.5mm;
+    border-bottom: 2px double #000;
   }
 
   .cash-drop-slip-rows {
     margin: 0;
   }
 
-  /* Label above value, not beside it. A two-column row at 72 mm leaves the
-     value too little space and wraps a name or a UUID mid-word. */
+  /* Label left, value right. The short values (a time, a name, a reason) fit
+     72 mm; a long one wraps inside its own column instead of widening the slip. */
   .cash-drop-slip-row {
-    margin: 0 0 1.5mm;
+    display: flex;
+    justify-content: space-between;
+    gap: 2mm;
+    margin: 0 0 1mm;
   }
 
   .cash-drop-slip-row dt {
-    font-size: 9px;
-    letter-spacing: 0.06em;
+    flex: none;
+    font-size: 10px;
     text-transform: uppercase;
   }
 
   .cash-drop-slip-row dd {
     margin: 0;
+    min-width: 0;
     font-size: 11px;
-    /* A long reason or employee name wraps rather than widening the slip. */
+    text-align: right;
     overflow-wrap: break-word;
+  }
+
+  /* The reference alone stacks: a UUID needs the full width. */
+  .cash-drop-slip-row-stacked {
+    display: block;
+    margin-top: 2mm;
+  }
+
+  .cash-drop-slip-row-stacked dd {
+    text-align: left;
   }
 
   /* A UUID has no spaces, so it needs permission to break mid-token or it
@@ -241,28 +258,45 @@ body {
      to the ledger, so it is never shortened. */
   .cash-drop-slip-reference {
     font-family: "Courier New", Courier, monospace;
-    font-size: 10px;
+    font-size: 9px;
     overflow-wrap: anywhere;
     word-break: break-all;
   }
 
+  /* "Signed:" and the line beside it, like the store's slip. */
+  .cash-drop-slip-signature {
+    display: flex;
+    align-items: flex-end;
+    gap: 2mm;
+    margin: 7mm 0 0;
+  }
+
   .cash-drop-slip-signature-label {
-    font-size: 9px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    margin: 5mm 0 0;
+    flex: none;
+    font-size: 11px;
+    margin: 0;
   }
 
   /* A RULE, NOT UNDERSCORES. A run of underscores is a fixed width that
      overflows a 72 mm roll; a border fills exactly the space available. */
   .cash-drop-slip-signature-rule {
-    margin: 6mm 0 0;
+    flex: 1;
+    margin: 0;
     border-bottom: 1px solid #000;
   }
 
+  /* Which copy this is, centred and bold, then what to do with it. */
+  .cash-drop-slip-copy {
+    font-size: 11px;
+    font-weight: 700;
+    text-align: center;
+    margin: 4mm 0 0;
+  }
+
   .cash-drop-slip-footer {
-    margin: 3mm 0 0;
+    margin: 1mm 0 0;
     font-size: 9px;
+    text-align: center;
   }
 
   /* Batch A (PRINT-1) — ONE copy, the WHOLE copy, from inside the overlay.

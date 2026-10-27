@@ -158,8 +158,8 @@ describe("an overlay receipt is the only thing that prints", () => {
     // Two copies, one array, one slip element — so the count cannot drift from
     // the markup. Each entry now carries its own footer wording, which is why
     // the array holds objects rather than bare labels.
-    expect(gates).toContain('{ label: "Copy 1 — with the cash"');
-    expect(gates).toContain('{ label: "Copy 2 — store record"');
+    expect(gates).toContain('{ label: "ORIGINAL COPY for DRAWER"');
+    expect(gates).toContain('{ label: "DUPLICATE COPY for PICKUP"');
     expect([...gates.matchAll(/className="cash-drop-slip"/g)]).toHaveLength(1);
     expect([...gates.matchAll(/\.map\(\(copy\) =>/g)]).toHaveLength(1);
   });

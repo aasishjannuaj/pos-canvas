@@ -1035,7 +1035,8 @@ describe("printing the Cash Drop is downstream of authority", () => {
 
     // A ruled line replaced the fixed underscores, which overflowed 72 mm.
     expect(gates).toContain('className="cash-drop-slip-signature-label"');
-    expect(gates).toContain("Employee signature");
+    // v1.3.4 — worded like the owner's store slip.
+    expect(gates).toContain(">Signed:<");
     expect(gates).toContain('className="cash-drop-slip-signature-rule"');
     expect(gates).not.toContain("__________________");
 
@@ -1103,10 +1104,11 @@ describe("the Cash Drop slip shows the authorized minimum, from authoritative so
   });
 
   it("keeps both copy labels, each with its own footer", () => {
-    expect(slip).toContain('{ label: "Copy 1 — with the cash"');
-    expect(slip).toContain('{ label: "Copy 2 — store record"');
+    // v1.3.4 — the owner's wording: the original stays, the duplicate travels.
+    expect(slip).toContain('{ label: "ORIGINAL COPY for DRAWER"');
+    expect(slip).toContain('{ label: "DUPLICATE COPY for PICKUP"');
+    expect(slip).toContain("Keep this copy in the drawer.");
     expect(slip).toContain("Send this copy with the cash.");
-    expect(slip).toContain("Keep this copy for the store record.");
     expect(slip).toContain('className="cash-drop-slip-footer"');
   });
 
@@ -1121,7 +1123,8 @@ describe("the Cash Drop slip shows the authorized minimum, from authoritative so
   });
 
   it("labels the employee", () => {
-    expect(slip).toContain("<dt>Employee</dt>");
+    // v1.3.4 — "Cashier", by NAME. The login code stays off (asserted above).
+    expect(slip).toContain("<dt>Cashier</dt>");
     expect(slip).toContain("{result.employeeName}");
   });
 
