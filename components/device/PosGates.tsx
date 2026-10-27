@@ -13,6 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { printPage } from "@/lib/receiptPrint";
 import type { EmployeeSession } from "@/lib/employeeSession";
 import type { LoginEmployee } from "@/lib/employeeSession";
 import type { RosterState } from "@/lib/employeeRoster";
@@ -1037,7 +1038,7 @@ export function CashMovementPanel({
   // purpose — a slip parameterised by movement type would quietly start
   // printing for all three the moment somebody reused it.
   //
-  // FIRE AND FORGET. window.print() is not awaited and its outcome is never
+  // FIRE AND FORGET. printPage() is not awaited and its outcome is never
   // inspected, matching the rule the receipt print paths already follow. A
   // printer that is out of paper, offline or cancelled leaves an authoritative
   // cash movement that simply has no slip — which is a paper problem, not a
@@ -1055,7 +1056,7 @@ export function CashMovementPanel({
 
     printedMovementIdRef.current = result.movementId;
 
-    window.print();
+    printPage();
   }, [result]);
 
   // THE SERVER'S ANSWER, SHOWN AS IT CAME. The amount and the instant are the

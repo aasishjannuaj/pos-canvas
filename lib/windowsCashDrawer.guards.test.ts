@@ -78,8 +78,13 @@ describe("the preload exposes openCashDrawer() and nothing else, to the packaged
         '"),\n    })\n  );'
     );
     expect(preload.match(/posCanvasCashDrawer/g) ?? []).toHaveLength(1);
-    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    // SUPERSEDED BY v1.3.4: the receipt bridge is the one other invoke, also argument-free.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(2);
+    expect(block).toContain(
+      'contextBridge.exposeInMainWorld(\n    "posCanvasReceiptPrint",\n    Object.freeze({\n      printReceipt: () => ipcRenderer.invoke("pos-canvas-shell:print-receipt"),\n    })\n  );'
+    );
     expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
+    expect(preload).not.toMatch(/printReceipt:\s*\([^)]/);
     expect(preload).not.toMatch(/openCashDrawer:\s*\([^)]/);
   });
 
@@ -117,7 +122,10 @@ describe("the main process listens for no payload and validates every request", 
   const main = code(read(MAIN));
 
   it("registers exactly one ipcMain.handle, taking only the event", () => {
-    expect(main.match(/ipcMain\.handle\(/g) ?? []).toHaveLength(1);
+    // SUPERSEDED BY v1.3.4: a second handle, the receipt channel, event only.
+    expect(main.match(/ipcMain\.handle\(/g) ?? []).toHaveLength(2);
+    expect(main).toContain("ipcMain.handle(RECEIPT_PRINT_CHANNEL, (event) => handlePrintReceipt(event));");
+    expect(main).not.toMatch(/ipcMain\.handle\(RECEIPT_PRINT_CHANNEL,\s*\([^)]*,[^)]*\)/);
     expect(main).toContain("ipcMain.handle(CASH_DRAWER_CHANNEL, (event) => handleOpenCashDrawer(event));");
     expect(main).not.toMatch(/ipcMain\.handle\(CASH_DRAWER_CHANNEL,\s*\([^)]*,[^)]*\)/);
   });
@@ -125,14 +133,16 @@ describe("the main process listens for no payload and validates every request", 
   it("the shell has exactly two IPC channels: retry and the drawer — no general print or RAW channel", () => {
     const listeners = main.match(/ipcMain\.(on|handle|once|handleOnce)\(/g) ?? [];
 
-    expect(listeners).toHaveLength(2);
+    // SUPERSEDED BY v1.3.4: three — retry, the drawer, and the argument-free
+    // receipt print (silent page print; never raw bytes).
+    expect(listeners).toHaveLength(3);
 
     // Every channel name anywhere in the shell is one of exactly these two.
     const channels = new Set(
       shellFiles.flatMap((file) => [...code(read(file)).matchAll(/["'`](pos-canvas-shell:[^"'`]*)["'`]/g)].map((m) => m[1]))
     );
 
-    expect([...channels].sort()).toEqual([CHANNEL, "pos-canvas-shell:retry"].sort());
+    expect([...channels].sort()).toEqual([CHANNEL, "pos-canvas-shell:print-receipt", "pos-canvas-shell:retry"].sort());
   });
 
   it("trust is decided from the frame, the main frame, the window and the platform", () => {

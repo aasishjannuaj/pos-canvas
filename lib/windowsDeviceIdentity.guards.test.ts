@@ -279,15 +279,20 @@ describe("each document kind gets exactly one bridge", () => {
     // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
     // app: is never file:, so the retry and drawer bridges never meet; the
     // identity branch (sliced up to that block) still carries only the fact.
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(3);
+    // SUPERSEDED BY v1.3.4: a FOURTH, posCanvasReceiptPrint, in the same app://poscanvas block.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(4);
+    expect(preload).toContain('exposeInMainWorld(\n    "posCanvasReceiptPrint"');
     expect(preload).toContain("if (isPackagedRuntime) {");
   });
 
   it("exposes no Node, IPC, filesystem, shell, or environment access", () => {
     // SUPERSEDED BY Cash Drawer 1C: exactly ONE invoke exists — the drawer
     // channel, with no arguments — asserted below. Everything else stays banned.
-    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    // SUPERSEDED BY v1.3.4 direct receipt printing: a SECOND invoke, the
+    // receipt channel, also with no arguments. Exactly these two.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(2);
     expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:print-receipt")');
     expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
 
     for (const banned of [

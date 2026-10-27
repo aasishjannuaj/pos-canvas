@@ -71,11 +71,16 @@ describe("overlay printing prints one complete copy", () => {
     expect(read("components/device/PosGates.tsx")).toContain('data-print-exclusive="cash-movement"');
   });
 
-  it("no print path gained a second dispatch: each surface calls window.print() exactly once", () => {
-    const count = (file: string) => (read(file).replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").match(/window\.print\(\)/g) ?? []).length;
+  it("no print path gained a second dispatch: each surface calls printPage() exactly once", () => {
+    // SUPERSEDED BY v1.3.4 direct receipt printing: every surface goes through
+    // lib/receiptPrint.ts, which holds the ONE window.print() (the fallback).
+    const strip = (file: string) => read(file).replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const count = (file: string, re: RegExp) => (strip(file).match(re) ?? []).length;
 
-    expect(count("components/runtime/PosCheckoutPanel.tsx")).toBe(1);
-    expect(count("components/runtime/SalesHistoryDetail.tsx")).toBe(1);
-    expect(count("components/device/PosGates.tsx")).toBe(1);
+    for (const file of ["components/runtime/PosCheckoutPanel.tsx", "components/runtime/SalesHistoryDetail.tsx", "components/device/PosGates.tsx"]) {
+      expect(`${file}: ${count(file, /printPage\(\)/g)}`).toBe(`${file}: 1`);
+      expect(`${file}: ${count(file, /window\.print\(\)/g)}`).toBe(`${file}: 0`);
+    }
+    expect(count("lib/receiptPrint.ts", /window\.print\(\)/g)).toBe(1);
   });
 });

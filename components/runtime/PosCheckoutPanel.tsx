@@ -16,6 +16,7 @@ import {
 } from "@/lib/nativeShell";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
 import { saleTimePresentation } from "@/lib/receiptPresentation";
+import { printPage } from "@/lib/receiptPrint";
 import OfflineReceipt from "@/components/runtime/OfflineReceipt";
 import { describeCartModifiers, getItemQuantityInCart } from "@/lib/cart";
 import type { ReactNode } from "react";
@@ -208,7 +209,7 @@ export default function PosCheckoutPanel({
     }
 
     setPrintNotice(null);
-    window.print();
+    printPage();
   }
 
   return (

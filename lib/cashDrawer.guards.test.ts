@@ -539,6 +539,9 @@ describe("the shared boundary carries no hardware parameter and 1A contacts no h
         "cashDrawerProfiles.mjs",
         "cashDrawerRaw.mjs",
         "cashDrawerIpc.mjs",
+        // v1.3.4 — reuses the validated profile only to NAME the receipt
+        // printer for a silent page print; it never sends a drawer command.
+        "receiptPrintIpc.mjs",
         "win32Spooler.mjs",
       ].map((f) => join("windows-shell", f))
     );

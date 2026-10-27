@@ -229,8 +229,8 @@ describe("the receipt is the stored sale, replayed", () => {
 });
 
 describe("reprint tells the truth on every platform", () => {
-  it("web and Windows call window.print()", () => {
-    expect(code(read(DETAIL))).toContain("window.print()");
+  it("web and Windows call printPage() (silent on the Windows till, the print window elsewhere)", () => {
+    expect(code(read(DETAIL))).toContain("printPage()");
   });
 
   it("Android is disabled and explains itself without a press", () => {

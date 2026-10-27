@@ -29,6 +29,7 @@
 // — see resolveReceiptPresentation.
 
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
+import { printPage } from "@/lib/receiptPrint";
 import { historyDisplayTime, toHistoryReceipt } from "@/lib/deviceOrders";
 import type { DeviceHistoryOrder } from "@/lib/deviceOrders";
 import { isCapacitorNativeShell, NATIVE_PRINT_UNAVAILABLE_MESSAGE } from "@/lib/nativeShell";
@@ -65,7 +66,7 @@ export default function SalesHistoryDetail({ order, config, onBack }: SalesHisto
       return;
     }
 
-    window.print();
+    printPage();
   }
 
   return (

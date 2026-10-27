@@ -136,4 +136,12 @@ if (isPackagedRuntime) {
       openCashDrawer: () => ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer"),
     })
   );
+  // v1.3.4 — direct receipt printing. No arguments: the main process picks the
+  // printer (receiptPrintIpc.mjs).
+  contextBridge.exposeInMainWorld(
+    "posCanvasReceiptPrint",
+    Object.freeze({
+      printReceipt: () => ipcRenderer.invoke("pos-canvas-shell:print-receipt"),
+    })
+  );
 }

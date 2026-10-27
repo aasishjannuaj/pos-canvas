@@ -467,7 +467,9 @@ describe("the bridge is invisible to the hosted page", () => {
     // Feature 23.3 added a SECOND exposure, but on the other branch: the hosted
     // page gets identity, the fallback gets retry, and the two never meet.
     // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
-    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(3);
+    // SUPERSEDED BY v1.3.4: a FOURTH, posCanvasReceiptPrint, in the same app://poscanvas block.
+    expect((preload.match(/exposeInMainWorld\(/g) ?? []).length).toBe(4);
+    expect(preload).toContain('exposeInMainWorld(\n    "posCanvasReceiptPrint"');
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
     expect(preload).toContain('ipcRenderer.send("pos-canvas-shell:retry")');
     // No second argument means no destination can cross.
@@ -477,8 +479,11 @@ describe("the bridge is invisible to the hosted page", () => {
   it("hands the page no general IPC or Node access", () => {
     // SUPERSEDED BY Cash Drawer 1C: one invoke, the drawer channel, no
     // arguments, inside the app://poscanvas block — not a general IPC handle.
-    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    // SUPERSEDED BY v1.3.4 direct receipt printing: a SECOND invoke, the
+    // receipt channel, also with no arguments. Exactly these two.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(2);
     expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:print-receipt")');
     expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
     expect(preload.slice(preload.indexOf("if (isPackagedRuntime) {"))).toContain("ipcRenderer.invoke");
     expect(preload.slice(0, preload.indexOf("if (isPackagedRuntime) {"))).not.toContain("ipcRenderer.invoke");

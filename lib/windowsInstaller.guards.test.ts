@@ -321,6 +321,8 @@ describe("the packaged binary is universal", () => {
       "offline.html",
       "package.json",
       "preload.js",
+      // v1.3.4 — direct receipt printing: argument-free silent page print.
+      "receiptPrintIpc.mjs",
       // Feature 24.5F — the PACKAGED device runtime, built from native-device/.
       //
       // The one entry here that is not shell code, and it belongs: it is what

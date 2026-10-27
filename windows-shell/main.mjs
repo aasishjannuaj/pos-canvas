@@ -32,6 +32,7 @@ import {
   createOpenCashDrawerHandler,
   isTrustedCashDrawerSender,
 } from "./cashDrawerIpc.mjs";
+import { RECEIPT_PRINT_CHANNEL, createPrintReceiptHandler } from "./receiptPrintIpc.mjs";
 
 const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
@@ -512,6 +513,30 @@ const handleOpenCashDrawer = createOpenCashDrawerHandler({
 });
 
 ipcMain.handle(CASH_DRAWER_CHANNEL, (event) => handleOpenCashDrawer(event));
+
+/**
+ * v1.3.4 — posCanvasReceiptPrinter.printReceipt(). Same trust rule and no
+ * payload, like the drawer. Decisions live in receiptPrintIpc.mjs; this is
+ * wiring. webContents.print's callback is turned into true/false.
+ */
+const handlePrintReceipt = createPrintReceiptHandler({
+  isTrusted: (event) =>
+    isTrustedCashDrawerSender({
+      senderFrame: event.senderFrame,
+      mainFrame: event.sender.mainFrame,
+      senderWindowId: BrowserWindow.fromWebContents(event.sender)?.id ?? null,
+      shellWindowIds,
+      platform: process.platform,
+    }),
+  listQueueNames: async (event) =>
+    (await event.sender.getPrintersAsync()).map((printer) => printer.name),
+  print: (event, options) =>
+    new Promise((resolve) => {
+      event.sender.print(options, (success) => resolve(success === true));
+    }),
+});
+
+ipcMain.handle(RECEIPT_PRINT_CHANNEL, (event) => handlePrintReceipt(event));
 
 // ---------------------------------------------------------------------------
 // Lifecycle

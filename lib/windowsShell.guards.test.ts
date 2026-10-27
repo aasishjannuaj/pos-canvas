@@ -393,7 +393,9 @@ describe("the preload is minimal and carries no payload", () => {
     // the identity fact for the hosted page. Neither document sees both.
     const exposures = preload.match(/exposeInMainWorld\(/g) ?? [];
     // SUPERSEDED BY Cash Drawer 1C: a THIRD exposure, posCanvasCashDrawer, in its own block gated on app://poscanvas.
-    expect(exposures).toHaveLength(3);
+    // SUPERSEDED BY v1.3.4: a FOURTH, posCanvasReceiptPrint, in the same app://poscanvas block.
+    expect(exposures).toHaveLength(4);
+    expect(preload).toContain('exposeInMainWorld(\n    "posCanvasReceiptPrint"');
     expect(preload).toContain('exposeInMainWorld(\n    "posCanvasCashDrawer"');
     expect(preload).toContain('exposeInMainWorld("posCanvasShell"');
     expect(preload).toContain('exposeInMainWorld(\n    "posCanvasDesktop"');
@@ -408,8 +410,11 @@ describe("the preload is minimal and carries no payload", () => {
   it("does not hand the page ipcRenderer, invoke, or Node", () => {
     expect(preload).not.toContain("exposeInMainWorld(\"ipcRenderer\"");
     // SUPERSEDED BY Cash Drawer 1C: one invoke, the drawer channel, no arguments.
-    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(1);
+    // SUPERSEDED BY v1.3.4 direct receipt printing: a SECOND invoke, the
+    // receipt channel, also with no arguments. Exactly these two.
+    expect(preload.match(/ipcRenderer\.invoke\(/g) ?? []).toHaveLength(2);
     expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:open-cash-drawer")');
+    expect(preload).toContain('ipcRenderer.invoke("pos-canvas-shell:print-receipt")');
     expect(preload).not.toMatch(/invoke\([^)]*,[^)]*\)/);
     expect(preload).not.toMatch(/require\(["'](fs|path|child_process|os)["']\)/);
     expect(preload).not.toContain("process.env");

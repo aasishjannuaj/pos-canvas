@@ -434,7 +434,7 @@ describe("the provisional receipt says the approved thing and nothing more", () 
 
     // The same print-only region and the same Print Receipt button.
     expect((runtime.match(/receipt-print-area/g) ?? []).length).toBe(2);
-    expect((panel.match(/window\.print\(\)/g) ?? []).length).toBe(1);
+    expect((panel.match(/printPage\(\)/g) ?? []).length).toBe(1);
     expect(panel).toContain("<OfflineReceipt");
   });
 });

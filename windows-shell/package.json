@@ -30,6 +30,7 @@
       "cashDrawerProfiles.mjs",
       "cashDrawerRaw.mjs",
       "cashDrawerIpc.mjs",
+      "receiptPrintIpc.mjs",
       "win32Spooler.mjs",
       "offline.html",
       "package.json",

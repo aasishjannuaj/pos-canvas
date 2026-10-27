@@ -233,10 +233,12 @@ describe("nothing claims a print succeeded", () => {
 
     // window.print() returns undefined and resolves nothing. Awaiting it, or
     // branching on it, would be inventing an outcome the browser never reports.
-    expect(detail).toContain("window.print();");
-    expect(detail).not.toContain("await window.print");
-    expect(detail).not.toContain("window.print().then");
-    expect(detail).not.toContain("if (window.print");
+    // SUPERSEDED BY v1.3.4: the call is printPage(), which returns void.
+    expect(detail).toContain("printPage();");
+    expect(detail).not.toContain("await printPage");
+    expect(detail).not.toContain("printPage().then");
+    expect(detail).not.toContain("if (printPage");
+    expect(detail).not.toContain("window.print");
   });
 });
 

@@ -815,7 +815,7 @@ describe("Feature 1D adds no history and no printing", () => {
    */
   it("the authority path still never prints", () => {
     for (const source of [handler(), stripComments(read(CASH_RPC))]) {
-      expect(source).not.toMatch(/window\.print|printReceipt|Printer|bluetooth/i);
+      expect(source).not.toMatch(/window\.print|printPage|printReceipt|Printer|bluetooth/i);
     }
   });
 
@@ -825,7 +825,7 @@ describe("Feature 1D adds no history and no printing", () => {
     // No printer hardware, no native bridge, no second print surface.
     expect(source).not.toMatch(/printReceipt|Printer|bluetooth/i);
     // Exactly one print call, and it is the browser's.
-    expect([...source.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
+    expect([...source.matchAll(/printPage\(\)/g)]).toHaveLength(1);
   });
 });
 
@@ -906,13 +906,13 @@ describe("printing the Cash Drop is downstream of authority", () => {
     // The movement exists before a printer is named: `result.ok` is the
     // server's answer, not a local assumption.
     expect(printEffect).toContain("result === null || !result.ok");
-    expect(printEffect.indexOf("!result.ok")).toBeLessThan(printEffect.indexOf("window.print()"));
+    expect(printEffect.indexOf("!result.ok")).toBeLessThan(printEffect.indexOf("printPage()"));
   });
 
   it("prints for cash_drop and refuses the other two kinds", () => {
     expect(printEffect).toContain('result.movementType !== "cash_drop"');
     expect(printEffect.indexOf('movementType !== "cash_drop"')).toBeLessThan(
-      printEffect.indexOf("window.print()")
+      printEffect.indexOf("printPage()")
     );
 
     // PAID IN AND PAID OUT NEVER AUTO-PRINT. Asserted as the absence of any
@@ -924,11 +924,11 @@ describe("printing the Cash Drop is downstream of authority", () => {
     }
   });
 
-  it("calls window.print() exactly once, from exactly one place", () => {
+  it("calls printPage() exactly once, from exactly one place", () => {
     // Two slips in ONE job. A second call would be a second job, and would
     // also be a second dialog the cashier has to dismiss.
-    expect([...gates.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
-    expect([...printEffect.matchAll(/window\.print\(\)/g)]).toHaveLength(1);
+    expect([...gates.matchAll(/printPage\(\)/g)]).toHaveLength(1);
+    expect([...printEffect.matchAll(/printPage\(\)/g)]).toHaveLength(1);
     // Not a copy count: nothing asks the driver for N copies, because the web
     // platform cannot.
     for (const banned of ["copies", "copyCount", "numCopies"]) {
@@ -942,14 +942,14 @@ describe("printing the Cash Drop is downstream of authority", () => {
     expect(gates).toContain("const printedMovementIdRef = useRef<string | null>(null);");
     expect(printEffect).toContain("printedMovementIdRef.current === result.movementId");
     expect(printEffect.indexOf("printedMovementIdRef.current = result.movementId")).toBeLessThan(
-      printEffect.indexOf("window.print()")
+      printEffect.indexOf("printPage()")
     );
   });
 
   it("is fire-and-forget: the outcome is never inspected or awaited", () => {
     for (const banned of [
-      "await window.print",
-      "window.print().then",
+      "await printPage",
+      "printPage().then",
       "catch",
       "printFailed",
       "printError",
@@ -1001,6 +1001,7 @@ describe("printing the Cash Drop is downstream of authority", () => {
     expect(deviceApp).toContain("cashMovementInFlightRef.current");
     // The host knows nothing about printing.
     expect(deviceApp).not.toContain("window.print()");
+    expect(deviceApp).not.toContain("printPage()");
   });
 
   it("introduces no native print path", () => {
