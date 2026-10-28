@@ -42,14 +42,14 @@ describe("main process: receiptPrintIpc.mjs", () => {
   it("prints silently to the validated receipt printer when exactly one is installed", async () => {
     const { handler, calls } = shell();
     expect(await handler({})).toBe("printed");
-    expect(calls).toEqual([{ silent: true, printBackground: true, usePrinterDefaultPageSize: true, deviceName: QUEUE }]);
+    expect(calls).toEqual([{ silent: true, printBackground: true, usePrinterDefaultPageSize: true, margins: { marginType: "printableArea" }, deviceName: QUEUE }]);
   });
 
   it("otherwise prints silently to the Windows default printer (no deviceName)", async () => {
     for (const queues of [["Some Other Printer"], [QUEUE, `${QUEUE} `.toLowerCase()], [], new Error("enum failed")]) {
       const { handler, calls } = shell({ queues });
       expect(await handler({})).toBe("printed");
-      expect(calls).toEqual([{ silent: true, printBackground: true, usePrinterDefaultPageSize: true }]);
+      expect(calls).toEqual([{ silent: true, printBackground: true, usePrinterDefaultPageSize: true, margins: { marginType: "printableArea" } }]);
     }
   });
 
@@ -103,7 +103,7 @@ describe("main process: receiptPrintIpc.mjs", () => {
   it("always asks for the printer's OWN paper size, never the A4 default (owner's Windows test)", async () => {
     const { handler, calls } = shell();
     await handler({});
-    expect(calls[0]).toMatchObject({ usePrinterDefaultPageSize: true });
+    expect(calls[0]).toMatchObject({ usePrinterDefaultPageSize: true, margins: { marginType: "printableArea" } });
     expect(calls[0]).not.toHaveProperty("pageSize");
   });
 

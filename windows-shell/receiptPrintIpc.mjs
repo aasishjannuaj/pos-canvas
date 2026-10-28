@@ -60,10 +60,18 @@ export function createPrintReceiptHandler({ isTrusted, listQueueNames, print, lo
     // otherwise lays the page out on A4, which put the receipt off the edge of
     // the 80 mm roll and ran the two Cash Drop slips together. The print window
     // always used the printer's default paper; this asks for exactly that.
-    const options =
-      deviceName === undefined
-        ? { silent: true, printBackground: true, usePrinterDefaultPageSize: true }
-        : { silent: true, printBackground: true, usePrinterDefaultPageSize: true, deviceName };
+    //
+    // v1.3.4 (second test round) — THE PRINTER'S OWN PRINTABLE AREA. Windows'
+    // default page margins (~1 cm a side) squeezed the receipt into the middle
+    // of the roll and shrank the text; the receipt now uses the full width the
+    // printer can actually print.
+    const base = {
+      silent: true,
+      printBackground: true,
+      usePrinterDefaultPageSize: true,
+      margins: { marginType: "printableArea" },
+    };
+    const options = deviceName === undefined ? base : { ...base, deviceName };
 
     const startedAt = now();
 
