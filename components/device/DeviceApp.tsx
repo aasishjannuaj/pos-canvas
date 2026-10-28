@@ -4476,7 +4476,12 @@ export default function DeviceApp() {
         isNativeShell: isCapacitorNativeShell(),
         isWindowsShell: isWindowsShell(),
       }).platform,
-      autoOpenEnabled: readyPairingRef.current?.cashDrawerEnabled === true,
+      // v1.3.4 OWNER DECISION — THE DRAWER IS ALWAYS ON for a paired Windows
+      // till: no per-register setting, nothing to turn on in the editor, and
+      // nothing lost when a till re-pairs. Cash only, once per sale, Windows
+      // only — all still decided by runAutomaticDrawerEvent. An unpaired or
+      // revoked till (no ready pairing) still opens nothing.
+      autoOpenEnabled: readyPairingRef.current !== null,
       claim: claimAutomaticDrawerEvent,
       // Cash Drawer 1C — the Windows shell's hardware bridge where it exists,
       // the 1A no-op everywhere else. Called by the coordinator only after the

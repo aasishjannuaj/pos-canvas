@@ -290,58 +290,6 @@ export async function revokePairedDevice(
   return { ok: true, alreadyRevoked: result.already_revoked === true };
 }
 
-/**
- * Cash Drawer 1D — turns automatic drawer opening on or off for ONE register.
- *
- * OWNERSHIP IS THE DATABASE'S. set_device_cash_drawer_enabled is SECURITY
- * DEFINER, resolves the owner from auth.uid(), refuses a caller that is itself
- * a paired device, and matches the register on `owner_id = auth.uid()` in the
- * WHERE clause — so a device belonging to somebody else simply does not match.
- * No owner id and no project id is passed, so there is none to forge, and the
- * ordinary cookie-scoped client is sufficient. No service-role client is used
- * here or anywhere in this module.
- *
- * THE DATABASE VALUE REMAINS AUTHORITATIVE. This function reports whether the
- * write was accepted. It does not return the new setting for display, and the
- * caller must re-read the device list rather than assume: the accepted value
- * is whatever the next authoritative read says it is.
- *
- * The raw Postgres message is never returned — it names the register and the
- * failing check, and a refusal here must not become an oracle for which device
- * ids exist, the same reason revoke and offer collapse their refusals.
- */
-export async function setOwnerDeviceCashDrawerEnabled(
-  deviceId: string,
-  enabled: boolean
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  if (typeof deviceId !== "string" || deviceId.trim() === "") {
-    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
-  }
-
-  if (typeof enabled !== "boolean") {
-    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
-  }
-
-  const supabase = await createClient();
-
-  const { error } = await supabase.rpc("set_device_cash_drawer_enabled", {
-    p_device_id: deviceId,
-    p_enabled: enabled,
-  });
-
-  if (error) {
-    console.error(
-      JSON.stringify({
-        event: "device_cash_drawer_update_failed",
-        deviceId,
-        category: "rpc_failed",
-      })
-    );
-    return { ok: false, message: CASH_DRAWER_UPDATE_FAILED_MESSAGE };
-  }
-
-  return { ok: true };
-}
 
 /**
  * Feature 26.3 — offers a published configuration to ONE paired device.

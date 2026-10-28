@@ -292,7 +292,9 @@ describe("only the real DeviceApp runtime wires the coordinator", () => {
     // running under, through the EXISTING readyPairingRef. The surviving
     // properties: exactly that expression, no literal true anywhere in the
     // wiring, and the locked default itself still off.
-    expect(handler).toContain("autoOpenEnabled: readyPairingRef.current?.cashDrawerEnabled === true,");
+    // v1.3.4 owner decision: always on for a paired till (no per-register setting).
+    expect(handler).toContain("autoOpenEnabled: readyPairingRef.current !== null,");
+    expect(handler).not.toContain("cashDrawerEnabled");
     expect(handler.match(/autoOpenEnabled:/g) ?? []).toHaveLength(1);
     expect(handler).not.toMatch(/autoOpenEnabled:\s*true/);
     expect(handler).not.toMatch(/cashDrawerEnabled\s*(?:\?\?|\|\|)\s*true/);
