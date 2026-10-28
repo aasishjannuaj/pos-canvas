@@ -22,7 +22,7 @@
 //
 // DELIBERATELY NOT HERE — the desktop identity bridge for DevicePlatform is
 // Feature 23.3, and installer/packaging work is 23.4.
-import { app, BrowserWindow, ipcMain, Menu, net, protocol } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, net, protocol, utilityProcess } from "electron";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readDesktopServerUrl } from "./serverUrl.mjs";
 import { createNavigationPolicy } from "./navigationPolicy.mjs";
@@ -34,6 +34,7 @@ import {
 } from "./cashDrawerIpc.mjs";
 import { RECEIPT_PRINT_CHANNEL, createPrintReceiptHandler } from "./receiptPrintIpc.mjs";
 import { createHardwareLog } from "./hardwareLog.mjs";
+import { createEpsonDrawerOpener } from "./epsonDrawer.mjs";
 
 const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
@@ -527,6 +528,18 @@ const handleOpenCashDrawer = createOpenCashDrawerHandler({
     (await event.sender.getPrintersAsync()).map((printer) => printer.name),
   loadSpooler: () => import("./win32Spooler.mjs").then((module) => module.loadWin32Spooler()),
   log: logHardware,
+  // v1.3.4 — Epson Status API first, in a short-lived utility process so a
+  // vendor DLL can never crash or hang the till (epsonDrawer.mjs).
+  openDirect:
+    process.platform === "win32"
+      ? createEpsonDrawerOpener({
+          fork: () =>
+            utilityProcess.fork(fileURLToPath(new URL("./epsonStatusApiWorker.mjs", import.meta.url)), [], {
+              serviceName: "POS Canvas drawer",
+              stdio: "ignore",
+            }),
+        })
+      : null,
 });
 
 ipcMain.handle(CASH_DRAWER_CHANNEL, (event) => handleOpenCashDrawer(event));

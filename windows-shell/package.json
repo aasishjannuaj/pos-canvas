@@ -32,6 +32,8 @@
       "cashDrawerIpc.mjs",
       "receiptPrintIpc.mjs",
       "hardwareLog.mjs",
+      "epsonDrawer.mjs",
+      "epsonStatusApiWorker.mjs",
       "win32Spooler.mjs",
       "offline.html",
       "package.json",

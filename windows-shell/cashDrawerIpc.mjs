@@ -80,6 +80,7 @@ export const CASH_DRAWER_ATTEMPT_TIMEOUT_MS = 15_000;
  *   listQueueNames: (event: unknown) => Promise<unknown[]>,
  *   loadSpooler: () => Promise<Parameters<typeof sendRawCashDrawerCommand>[0]["spooler"]>,
  *   log?: (step: string, fields?: Record<string, unknown>) => void,
+ *   openDirect?: ((queueName: string) => Promise<{ status: string, detail?: string }>) | null,
  *   attemptTimeoutMs?: number,
  *   setTimer?: (run: () => void, ms: number) => unknown,
  *   clearTimer?: (handle: unknown) => void,
@@ -93,6 +94,10 @@ export function createOpenCashDrawerHandler({
   loadSpooler,
   // v1.3.4 — the on-till hardware log (hardwareLog.mjs); a no-op by default.
   log = () => {},
+  // v1.3.4 — Epson's Status API (epsonDrawer.mjs), tried FIRST: it pulses the
+  // drawer outside the Windows print queue, so stuck receipts and an empty
+  // paper roll cannot hold it. Null skips it.
+  openDirect = null,
   attemptTimeoutMs = CASH_DRAWER_ATTEMPT_TIMEOUT_MS,
   setTimer = (run, ms) => setTimeout(run, ms),
   clearTimer = (handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
@@ -121,6 +126,27 @@ export function createOpenCashDrawerHandler({
 
     if (match.status !== "matched") {
       return "not_configured";
+    }
+
+    // v1.3.4 — DIRECT FIRST. Only "unavailable" (no Status API on this till)
+    // falls through to the print-job path below. A refusal or a missing answer
+    // does NOT: a print job queued behind a stuck printer would open the drawer
+    // later, at a moment nobody chose.
+    if (openDirect !== null) {
+      const directAt = now();
+      let direct;
+
+      try {
+        direct = await openDirect(match.queueName);
+      } catch (error) {
+        direct = { status: "failed", detail: String(error) };
+      }
+
+      log("drawer_status_api", { ms: now() - directAt, status: direct.status, detail: direct.detail ?? null });
+
+      if (direct.status === "opened") return "sent";
+      if (direct.status === "failed") return "failed";
+      if (direct.status !== "unavailable") return "unknown";
     }
 
     let spooler;

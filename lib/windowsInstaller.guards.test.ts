@@ -316,6 +316,9 @@ describe("the packaged binary is universal", () => {
       "cashDrawerIpc.mjs",
       "cashDrawerProfiles.mjs",
       "cashDrawerRaw.mjs",
+      // v1.3.4 — Epson Status API drawer path (opener + its utility-process helper).
+      "epsonDrawer.mjs",
+      "epsonStatusApiWorker.mjs",
       // v1.3.4 — the on-till drawer/print step log (%APPDATA%\\POS Canvas\\logs).
       "hardwareLog.mjs",
       "main.mjs",

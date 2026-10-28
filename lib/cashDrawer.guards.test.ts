@@ -546,6 +546,9 @@ describe("the shared boundary carries no hardware parameter and 1A contacts no h
         "receiptPrintIpc.mjs",
         // v1.3.4 — the on-till step log; it names drawer steps, sends nothing.
         "hardwareLog.mjs",
+        // v1.3.4 — Epson Status API drawer path, outside the print queue.
+        "epsonDrawer.mjs",
+        "epsonStatusApiWorker.mjs",
         "win32Spooler.mjs",
       ].map((f) => join("windows-shell", f))
     );

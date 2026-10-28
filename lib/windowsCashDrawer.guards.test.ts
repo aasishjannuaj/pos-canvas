@@ -202,7 +202,9 @@ describe("native code and the command are confined", () => {
   it("koffi is imported only by win32Spooler.mjs, lazily, after the platform check", () => {
     const importers = everyProductionFile.filter((f) => /["']koffi["']/.test(code(read(f))));
 
-    expect(importers).toEqual([SPOOLER]);
+    // v1.3.4 — the Epson Status API helper is the one other importer. It runs
+    // in its own utility process; its own rules are pinned in the next test.
+    expect(importers.sort()).toEqual([join(SHELL, "epsonStatusApiWorker.mjs"), SPOOLER].sort());
 
     const spooler = code(read(SPOOLER));
     const load = spooler.slice(spooler.indexOf("export async function loadWin32Spooler"));
@@ -212,6 +214,23 @@ describe("native code and the command are confined", () => {
       load.indexOf('await import("koffi")')
     );
     expect(load).toContain('koffi.load("winspool.drv")');
+  });
+
+  it("v1.3.4: the Epson helper loads only EpsStmApi.dll from System32, after the platform check, and binds exactly three functions", () => {
+    const worker = code(read(join(SHELL, "epsonStatusApiWorker.mjs")));
+
+    expect(worker).not.toMatch(/^import[^;]*koffi/m);
+    expect(worker.indexOf('process.platform !== "win32" || process.arch !== "x64"')).toBeLessThan(worker.indexOf('await import("koffi")'));
+    expect([...worker.matchAll(/koffi\.load\(/g)]).toHaveLength(1);
+    expect(worker).toContain("koffi.load(`${root}\\\\System32\\\\EpsStmApi.dll`)");
+    expect([...worker.matchAll(/lib\.func\("__stdcall", "(\w+)"/g)].map((m) => m[1]).sort()).toEqual(
+      ["BiCloseMonPrinter", "BiOpenDrawer", "BiOpenMonPrinter"]
+    );
+    // It is started only as a utility process from main, never imported into it.
+    const main = code(read(MAIN));
+    expect(main).toContain('utilityProcess.fork(fileURLToPath(new URL("./epsonStatusApiWorker.mjs", import.meta.url))');
+    expect(main).not.toMatch(/^import[^;]*epsonStatusApiWorker/m);
+    expect(main).not.toContain('import("./epsonStatusApiWorker');
   });
 
   it("binds exactly the eight RAW-job spooler functions, all as async calls — no enumeration or configuration API", () => {
