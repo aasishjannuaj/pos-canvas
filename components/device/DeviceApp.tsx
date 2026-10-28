@@ -52,7 +52,7 @@ import {
   unpairOwnDevice,
   signInDeviceAnonymously,
 } from "@/lib/device.rpc";
-import { checkDeviceServerReachable } from "@/lib/preSaleReachability";
+import { OFFLINE_AUTO_SAVE_WAIT_MS, checkDeviceServerReachable } from "@/lib/preSaleReachability";
 import {
   createDeviceError,
   decideConfigState,
@@ -4498,8 +4498,15 @@ export default function DeviceApp() {
    * shop's internet is down: the same offline transition a transport failure
    * starts. No uncertain sale is created, because no request left the till.
    */
-  const handleServerUnreachableBeforeSale = useCallback(() => {
+  const handleServerUnreachableBeforeSale = useCallback((): Promise<boolean> => {
     void enterOfflineFromTransportFailure();
+
+    // The runtime saves the sale itself as soon as offline saving is available
+    // (a non-null queueOfflineSale). This only bounds the wait: after it, the
+    // cashier is told and presses Pay. Settles false; never true.
+    return new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), OFFLINE_AUTO_SAVE_WAIT_MS);
+    });
   }, [enterOfflineFromTransportFailure]);
 
   const handleSaleRejected = useCallback(

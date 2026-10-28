@@ -19,6 +19,9 @@ import { probeDeviceReachability } from "@/lib/device.rpc";
 
 export const PRE_SALE_CHECK_TIMEOUT_MS = 3_000;
 
+/** How long the till waits for offline saving before handing back to the cashier. */
+export const OFFLINE_AUTO_SAVE_WAIT_MS = 15_000;
+
 export type ReachabilityProbe = (signal: AbortSignal) => Promise<ReachabilityProbeResult>;
 
 export async function isServerReachableBeforeSale(

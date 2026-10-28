@@ -4,6 +4,7 @@ import {
   type MutableRefObject,
   type ReactNode,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -264,8 +265,14 @@ import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
  * host is switching the till to offline mode, where pressing Pay saves the
  * sale on the till.
  */
+export const SALE_SWITCHING_TO_OFFLINE_MESSAGE =
+  "No connection to the server, so this sale was not sent. Switching to offline mode and saving it on this till…";
+
+/** Shown only if offline saving did not become available in time. */
 export const SALE_SERVER_UNREACHABLE_MESSAGE =
-  "No connection to the server, so this sale was not sent. The till is switching to offline mode. Press Pay again to save the sale offline.";
+  "No connection to the server, so this sale was not sent, and offline mode is not available on this till right now. Keep the order unchanged and press Pay to try again.";
+
+
 
 export const SALE_CONNECTION_LOST_MESSAGE =
   "The connection was lost before this sale was confirmed. Keep the order unchanged. Reconnect and follow the on-screen instructions.";
@@ -515,7 +522,13 @@ type PosRuntimeProps = {
    * the owner runtime and the Builder) skips the check.
    */
   checkServerBeforeSale?: (() => Promise<boolean>) | null;
-  onServerUnreachableBeforeSale?: (() => void) | null;
+  /**
+   * Told when that check found no server. The host moves the till offline and
+   * returns a promise that settles FALSE if offline saving did not become
+   * available in time (the host owns that timer); availability itself arrives
+   * as a non-null queueOfflineSale, which triggers the automatic save.
+   */
+  onServerUnreachableBeforeSale?: (() => Promise<boolean>) | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -646,6 +659,14 @@ export default function PosRuntime({
    * see. It belongs here because this is the function that dispatches.
    */
   const saleInFlightRef = useRef(false);
+
+  // v1.3.4 (owner's offline test) — armed when the quick pre-sale check found
+  // no server. Once the host has moved the till offline and offline saving is
+  // available, the till presses Pay ITSELF (the effect below), so every guard
+  // a real press passes still applies; the cashier does not press it twice.
+  // Closing the checkout, any real press and the timeout all disarm it.
+  const offlineAutoSaveRef = useRef(false);
+  const [offlineAutoSaveToken, setOfflineAutoSaveToken] = useState(0);
 
   /**
    * The host authority this checkout was prepared under.
@@ -1153,6 +1174,9 @@ export default function PosRuntime({
       setScanFocusRequest((previous) => previous + 1);
     }
 
+    // v1.3.4 — a closed checkout is never saved on the cashier's behalf.
+    offlineAutoSaveRef.current = false;
+
     // v1.3 CP-2B — the prepared authority dies with the checkout; reopening
     // captures a fresh one, never inheriting one across a close.
     //
@@ -1222,6 +1246,23 @@ export default function PosRuntime({
     }
   }
 
+  // v1.3.4 — THE AUTOMATIC SECOND PRESS. Runs when offline saving becomes
+  // available (queueOfflineSale non-null) while armed, and only for an open
+  // checkout. It calls the same completeSale a Pay press calls, so the offline
+  // fence, authorization and every other guard decide exactly as for a person.
+  const runOfflineAutoSave = useEffectEvent(() => {
+    if (!offlineAutoSaveRef.current || queueOfflineSale === null || !checkoutOpen) {
+      return;
+    }
+
+    offlineAutoSaveRef.current = false;
+    void completeSale();
+  });
+
+  useEffect(() => {
+    runOfflineAutoSave();
+  }, [queueOfflineSale, offlineAutoSaveToken]);
+
   function closeReceipt() {
     setReceiptOpen(false);
   }
@@ -1263,6 +1304,9 @@ export default function PosRuntime({
     // first. This is a DISPLAY reset, not a guard: it only stops a stale
     // "connection lost" origin from relabelling whatever this press reports.
     setSaleErrorOrigin(null);
+
+    // v1.3.4 — any press (the cashier's or the auto-save's) consumes the arm.
+    offlineAutoSaveRef.current = false;
 
     if (checkoutBlockedReason !== null) {
       setSaleSaveStatus("error");
@@ -1581,12 +1625,28 @@ export default function PosRuntime({
 
         if (!reachable) {
           setSaleSaveStatus("error");
-          setSaleSaveError(SALE_SERVER_UNREACHABLE_MESSAGE);
+          setSaleSaveError(SALE_SWITCHING_TO_OFFLINE_MESSAGE);
+          offlineAutoSaveRef.current = true;
+          setOfflineAutoSaveToken((previous) => previous + 1);
+
+          // If offline saving never became available, hand the sale back to
+          // the cashier with a message that says so. Nothing was sent either way.
+          const giveUp = () => {
+            if (offlineAutoSaveRef.current) {
+              offlineAutoSaveRef.current = false;
+              setSaleSaveError(SALE_SERVER_UNREACHABLE_MESSAGE);
+            }
+          };
 
           try {
-            onServerUnreachableBeforeSale?.();
+            void Promise.resolve(onServerUnreachableBeforeSale?.() ?? false).then(
+              (available) => {
+                if (available !== true) giveUp();
+              },
+              giveUp
+            );
           } catch {
-            // The host's mode switch cannot change what happened here: nothing was sent.
+            giveUp();
           }
 
           return;

@@ -31,8 +31,9 @@ describe("the pre-sale server check", () => {
 
   it("on silence it sends nothing: shows the message, tells the host, returns", () => {
     const block = complete.slice(at("if (!reachable) {"), at("const plan = planSaleSubmission("));
-    expect(block).toContain("setSaleSaveError(SALE_SERVER_UNREACHABLE_MESSAGE);");
-    expect(block).toContain("onServerUnreachableBeforeSale?.();");
+    expect(block).toContain("setSaleSaveError(SALE_SWITCHING_TO_OFFLINE_MESSAGE);");
+    expect(block).toContain("offlineAutoSaveRef.current = true;");
+    expect(block).toContain("onServerUnreachableBeforeSale?.() ?? false");
     expect(block).toContain("return;");
     for (const banned of ["submitSale", "armOnlineSale", "setUncertainSale", "setSaleRequest", "onSaleRejected"]) {
       expect(block, banned).not.toContain(banned);
@@ -51,6 +52,28 @@ describe("the pre-sale server check", () => {
     expect(deviceApp).toContain("const checkServerBeforeSale = checkDeviceServerReachable;");
     expect([...deviceApp.matchAll(/canReachServer: checkDeviceServerReachable/g)]).toHaveLength(2);
     const handler = deviceApp.slice(deviceApp.indexOf("const handleServerUnreachableBeforeSale"));
-    expect(handler.slice(0, handler.indexOf("}, ["))).toContain("void enterOfflineFromTransportFailure();");
+    expect(handler.slice(0, handler.indexOf("}, [enterOffline"))).toContain("void enterOfflineFromTransportFailure();");
+  });
+
+  it("v1.3.4: the till presses Pay itself once offline saving is available — through completeSale, never around it", () => {
+    const event = runtime.slice(runtime.indexOf("const runOfflineAutoSave = useEffectEvent("));
+    const body = event.slice(0, event.indexOf("});") + 3);
+    expect(body).toContain("if (!offlineAutoSaveRef.current || queueOfflineSale === null || !checkoutOpen) {");
+    expect(body).toContain("offlineAutoSaveRef.current = false;\n    void completeSale();");
+    for (const banned of ["queueOfflineSale(", "submitSale", "armOnlineSale"]) {
+      expect(body, banned).not.toContain(banned);
+    }
+    expect(runtime).toContain("runOfflineAutoSave();\n  }, [queueOfflineSale, offlineAutoSaveToken]);");
+  });
+
+  it("v1.3.4: every press, a closed checkout and the timeout disarm it", () => {
+    expect(complete.slice(0, complete.indexOf("if (checkoutBlockedReason !== null)"))).toContain("offlineAutoSaveRef.current = false;");
+    const close = runtime.slice(runtime.indexOf("function closeCheckout()"));
+    expect(close.slice(0, close.indexOf("\n  }\n"))).toContain("offlineAutoSaveRef.current = false;");
+    // The wait is the HOST's timer (the runtime tree may not hold timers).
+    expect(deviceApp).toContain("setTimeout(() => resolve(false), OFFLINE_AUTO_SAVE_WAIT_MS);");
+    expect(runtime).toContain("if (available !== true) giveUp();");
+    expect(runtime).toContain("setSaleSaveError(SALE_SERVER_UNREACHABLE_MESSAGE);");
+    expect(runtime).not.toContain("setTimeout");
   });
 });
