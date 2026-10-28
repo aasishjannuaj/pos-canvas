@@ -1126,7 +1126,8 @@ describe("the cashier is told the truth about what is waiting", () => {
 
     // One call site, carrying the session key, and the effect keys on it.
     expect((app.match(/await triggerStartupSaleSyncOnce\(/g) ?? [])).toHaveLength(1);
-    expect(app).toContain("triggerStartupSaleSyncOnce(syncSessionKey)");
+    // v1.3.4: the startup run also gets the pre-sync server check.
+    expect(app).toContain("triggerStartupSaleSyncOnce(syncSessionKey, { canReachServer: checkDeviceServerReachable })");
     expect(app).toContain("}, [syncSessionKey]);");
     expect(app).not.toContain('triggerSaleSync("startup")');
   });

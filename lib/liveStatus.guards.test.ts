@@ -136,6 +136,15 @@ describe("the one backend call", () => {
     expect(code(read(APP))).not.toContain("probeDeviceReachability");
     expect(code(read(APP))).not.toContain("startServerReachability");
   });
+
+  it("v1.3.4: the one other caller is the bounded pre-sale check, which sends no sale", () => {
+    const pre = code(read("lib/preSaleReachability.ts"));
+    expect(pre).toContain("return isServerReachableBeforeSale(probeDeviceReachability);");
+    expect(pre).toContain("export const PRE_SALE_CHECK_TIMEOUT_MS = 3_000;");
+    for (const banned of ["submit", "rpc(", "complete_sale", "queue", "Sync"]) {
+      expect(`${banned}: ${pre.includes(banned)}`).toBe(`${banned}: false`);
+    }
+  });
 });
 
 describe("DeviceApp: placement only", () => {

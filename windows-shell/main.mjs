@@ -33,6 +33,7 @@ import {
   isTrustedCashDrawerSender,
 } from "./cashDrawerIpc.mjs";
 import { RECEIPT_PRINT_CHANNEL, createPrintReceiptHandler } from "./receiptPrintIpc.mjs";
+import { createHardwareLog } from "./hardwareLog.mjs";
 
 const shellDirectory = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD_SCRIPT = fileURLToPath(new URL("./preload.js", import.meta.url));
@@ -498,6 +499,21 @@ ipcMain.on(RETRY_CHANNEL, (event) => {
  *   loadSpooler    — koffi and winspool.drv, imported lazily on first use, so
  *                    the shell boots without loading any native code.
  */
+/**
+ * v1.3.4 — %APPDATA%\\POS Canvas\\logs\\hardware.log: one line per drawer and
+ * receipt-print step. Resolved lazily (getPath before ready is not allowed) and
+ * never able to throw into a sale, a print or a drawer request.
+ */
+let hardwareLog = null;
+function logHardware(step, fields) {
+  try {
+    hardwareLog ??= createHardwareLog({ directory: app.getPath("logs") });
+    hardwareLog(step, fields);
+  } catch {
+    // Logging is never worth a failure.
+  }
+}
+
 const handleOpenCashDrawer = createOpenCashDrawerHandler({
   isTrusted: (event) =>
     isTrustedCashDrawerSender({
@@ -510,6 +526,7 @@ const handleOpenCashDrawer = createOpenCashDrawerHandler({
   listQueueNames: async (event) =>
     (await event.sender.getPrintersAsync()).map((printer) => printer.name),
   loadSpooler: () => import("./win32Spooler.mjs").then((module) => module.loadWin32Spooler()),
+  log: logHardware,
 });
 
 ipcMain.handle(CASH_DRAWER_CHANNEL, (event) => handleOpenCashDrawer(event));
@@ -532,8 +549,11 @@ const handlePrintReceipt = createPrintReceiptHandler({
     (await event.sender.getPrintersAsync()).map((printer) => printer.name),
   print: (event, options) =>
     new Promise((resolve) => {
-      event.sender.print(options, (success) => resolve(success === true));
+      event.sender.print(options, (success, failureReason) =>
+        resolve({ success: success === true, failureReason: failureReason || undefined })
+      );
     }),
+  log: logHardware,
 });
 
 ipcMain.handle(RECEIPT_PRINT_CHANNEL, (event) => handlePrintReceipt(event));

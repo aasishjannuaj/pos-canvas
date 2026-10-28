@@ -259,6 +259,14 @@ import type { ProvisionalReceipt } from "@/lib/provisionalReceipt";
  * defers to whatever the screen then says. When offline checkout IS available,
  * displayedSaleError shows OFFLINE_AVAILABLE_AFTER_CONNECTION_LOST instead.
  */
+/**
+ * v1.3.4 — the quick pre-sale check found no server. NOTHING was sent: the
+ * host is switching the till to offline mode, where pressing Pay saves the
+ * sale on the till.
+ */
+export const SALE_SERVER_UNREACHABLE_MESSAGE =
+  "No connection to the server, so this sale was not sent. The till is switching to offline mode. Press Pay again to save the sale offline.";
+
 export const SALE_CONNECTION_LOST_MESSAGE =
   "The connection was lost before this sale was confirmed. Keep the order unchanged. Reconnect and follow the on-screen instructions.";
 import AuthoritativeReceipt from "@/components/runtime/AuthoritativeReceipt";
@@ -500,6 +508,14 @@ type PosRuntimeProps = {
    * nothing is told and nothing changes.
    */
   onSaleCompleted?: PosRuntimeOnSaleCompleted | null;
+  /**
+   * v1.3.4 — a quick server check run BEFORE a new online sale is armed or
+   * sent (lib/preSaleReachability.ts). False means nothing answered: the sale
+   * is not sent and onServerUnreachableBeforeSale is told. Null (the default,
+   * the owner runtime and the Builder) skips the check.
+   */
+  checkServerBeforeSale?: (() => Promise<boolean>) | null;
+  onServerUnreachableBeforeSale?: (() => void) | null;
 };
 
 const LEAVE_CONFIRM_MESSAGE = "Your current cart will be lost. Leave the POS?";
@@ -533,6 +549,8 @@ export default function PosRuntime({
   persistedUncertainSale = null,
   recoverOutstandingSale = null,
   onSaleCompleted = null,
+  checkServerBeforeSale = null,
+  onServerUnreachableBeforeSale = null,
 }: PosRuntimeProps) {
   // Feature 14.3 — a local, independent copy of the menu, seeded once from
   // config.menuItems. Only ever updated field-by-field (stockQuantity/
@@ -1546,6 +1564,35 @@ export default function PosRuntime({
       // behavior, so the Builder Preview's own v3 checkout runs the exact same
       // rules rather than a second copy of them. See that module's header for why
       // sharing these three specifically is what matters.
+      // v1.3.4 — THE QUICK SERVER CHECK, before anything is planned, armed or
+      // sent. Only for a NEW sale: a resumed (uncertain) one went through
+      // recovery above, and an existing saleRequest is a retry whose earlier
+      // attempt may already exist, so it is never diverted. Silence means the
+      // sale is not sent at all — no identity was armed, so nothing can be
+      // recorded twice — and the host moves the till offline.
+      if (checkServerBeforeSale !== null && resumed === null && saleRequest === null) {
+        let reachable = false;
+
+        try {
+          reachable = (await checkServerBeforeSale()) === true;
+        } catch {
+          reachable = false;
+        }
+
+        if (!reachable) {
+          setSaleSaveStatus("error");
+          setSaleSaveError(SALE_SERVER_UNREACHABLE_MESSAGE);
+
+          try {
+            onServerUnreachableBeforeSale?.();
+          } catch {
+            // The host's mode switch cannot change what happened here: nothing was sent.
+          }
+
+          return;
+        }
+      }
+
       const plan = planSaleSubmission({
         projectId: config.project.projectId,
         paymentMethod: selectedPaymentMethod,

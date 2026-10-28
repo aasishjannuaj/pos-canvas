@@ -55,6 +55,15 @@ export function isTrustedCashDrawerSender({ senderFrame, mainFrame, senderWindow
 }
 
 /**
+ * v1.3.4 — NO ATTEMPT CAN BLOCK THE NEXT ONE. A native spooler call that never
+ * returned used to hold the serialized queue forever, so every later drawer
+ * request waited behind it until the app restarted. Each attempt now answers
+ * `unknown` after this long and the queue moves on; the stuck call is left to
+ * finish on its own worker thread and is never retried.
+ */
+export const CASH_DRAWER_ATTEMPT_TIMEOUT_MS = 15_000;
+
+/**
  * Builds the ipcMain.handle listener.
  *
  * ATTEMPTS ARE SERIALIZED, one after another, so two quick cash sales each get
@@ -70,22 +79,45 @@ export function isTrustedCashDrawerSender({ senderFrame, mainFrame, senderWindow
  *   isTrusted: (event: unknown) => boolean,
  *   listQueueNames: (event: unknown) => Promise<unknown[]>,
  *   loadSpooler: () => Promise<Parameters<typeof sendRawCashDrawerCommand>[0]["spooler"]>,
+ *   log?: (step: string, fields?: Record<string, unknown>) => void,
+ *   attemptTimeoutMs?: number,
+ *   setTimer?: (run: () => void, ms: number) => unknown,
+ *   clearTimer?: (handle: unknown) => void,
+ *   now?: () => number,
  * }} dependencies
  * @returns {(event: unknown) => Promise<"sent" | "not_configured" | "failed" | "unknown" | "unavailable">}
  */
-export function createOpenCashDrawerHandler({ isTrusted, listQueueNames, loadSpooler }) {
+export function createOpenCashDrawerHandler({
+  isTrusted,
+  listQueueNames,
+  loadSpooler,
+  // v1.3.4 — the on-till hardware log (hardwareLog.mjs); a no-op by default.
+  log = () => {},
+  attemptTimeoutMs = CASH_DRAWER_ATTEMPT_TIMEOUT_MS,
+  setTimer = (run, ms) => setTimeout(run, ms),
+  clearTimer = (handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
+  now = () => Date.now(),
+}) {
   let queue = Promise.resolve();
 
   async function attemptOnce(event) {
     let queueNames;
+    const listedAt = now();
 
     try {
       queueNames = await listQueueNames(event);
-    } catch {
+    } catch (error) {
+      log("drawer_list_failed", { ms: now() - listedAt, error: String(error) });
       return "failed";
     }
 
     const match = matchCashDrawerProfile(queueNames);
+
+    log("drawer_queues", {
+      ms: now() - listedAt,
+      queues: Array.isArray(queueNames) ? queueNames.map(String) : [],
+      match: match.status === "matched" ? match.queueName : match.reason,
+    });
 
     if (match.status !== "matched") {
       return "not_configured";
@@ -95,20 +127,47 @@ export function createOpenCashDrawerHandler({ isTrusted, listQueueNames, loadSpo
 
     try {
       spooler = await loadSpooler();
-    } catch {
+    } catch (error) {
+      log("drawer_spooler_unavailable", { error: String(error) });
       return "failed";
     }
 
+    const sentAt = now();
+
     try {
-      return await sendRawCashDrawerCommand({
+      const status = await sendRawCashDrawerCommand({
         spooler,
         queueName: match.queueName,
         command: match.profile.command,
         datatype: match.profile.datatype,
       });
-    } catch {
+
+      log("drawer_spooled", { ms: now() - sentAt, status });
+      return status;
+    } catch (error) {
+      log("drawer_spool_threw", { ms: now() - sentAt, error: String(error) });
       return "unknown";
     }
+  }
+
+  /** One attempt, answered within attemptTimeoutMs whatever the native calls do. */
+  function boundedAttempt(event) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (status) => {
+        if (!settled) {
+          settled = true;
+          clearTimer(timer);
+          resolve(status);
+        }
+      };
+      const timer = setTimer(() => {
+        log("drawer_attempt_timed_out", { ms: attemptTimeoutMs });
+        settle("unknown");
+      }, attemptTimeoutMs);
+
+      attemptOnce(event).then(settle, () => settle("unknown"));
+    });
   }
 
   return function handleOpenCashDrawer(event) {
@@ -122,11 +181,13 @@ export function createOpenCashDrawerHandler({ isTrusted, listQueueNames, loadSpo
       trusted = false;
     }
 
+    log("drawer_request", { trusted });
+
     if (!trusted) {
       return Promise.resolve("unavailable");
     }
 
-    const run = queue.then(() => attemptOnce(event));
+    const run = queue.then(() => boundedAttempt(event));
 
     queue = run.catch(() => undefined);
 

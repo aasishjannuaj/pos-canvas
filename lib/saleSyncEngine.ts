@@ -48,12 +48,21 @@ export type SyncDeps = {
    * either way, and it never softens a server's answer.
    */
   manual: boolean;
+  /**
+   * v1.3.4 (owner's offline test) — a quick "is the server there?" check run
+   * once per drain, BEFORE any row is claimed. Silence means no row is touched:
+   * nothing moves to `syncing`, so no strict-recovery submission starts, and new
+   * checkouts are not paused for a send that could only time out. Rows stay
+   * `pending` for the next trigger. Null (the default) skips the check.
+   */
+  canReachServer: (() => Promise<boolean>) | null;
 };
 
 const defaultDeps: SyncDeps = {
   submit: submitQueuedSale,
   now: () => Date.now(),
   manual: false,
+  canReachServer: null,
 };
 
 export type SyncedOutcome = {
@@ -203,6 +212,27 @@ async function drain(deps: SyncDeps): Promise<SyncRunReport> {
 
   if (!due.ok) {
     return report;
+  }
+
+  // v1.3.4 — no server, no claims. Checked only when there is something to
+  // send, and before syncOne, so the recovery-activity counter is never held
+  // while the till is merely offline.
+  if (due.value.length > 0 && deps.canReachServer !== null) {
+    let reachable = false;
+
+    try {
+      reachable = (await deps.canReachServer()) === true;
+    } catch {
+      reachable = false;
+    }
+
+    if (!reachable) {
+      const summary = await getQueueSummary();
+
+      report.summary = summary.ok ? summary.value : null;
+
+      return report;
+    }
   }
 
   // FIFO, and STRICTLY SEQUENTIAL. Financial writes are not parallelised: a

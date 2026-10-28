@@ -52,6 +52,7 @@ import {
   unpairOwnDevice,
   signInDeviceAnonymously,
 } from "@/lib/device.rpc";
+import { checkDeviceServerReachable } from "@/lib/preSaleReachability";
 import {
   createDeviceError,
   decideConfigState,
@@ -1804,7 +1805,8 @@ export default function DeviceApp() {
       setSyncing(true);
 
       try {
-        await triggerSaleSync(trigger);
+        // v1.3.4 — no claim, and so no paused checkout, while the server is silent.
+        await triggerSaleSync(trigger, { canReachServer: checkDeviceServerReachable });
       } finally {
         setSyncing(false);
         await refreshSaleStatus();
@@ -2121,7 +2123,7 @@ export default function DeviceApp() {
       // lint rules) would rather nothing set state before the first paint. The
       // startup drain is background work at boot; what the operator needs from
       // it is the resulting count, which is exactly what this stores.
-      await triggerStartupSaleSyncOnce(syncSessionKey);
+      await triggerStartupSaleSyncOnce(syncSessionKey, { canReachServer: checkDeviceServerReachable });
 
       const status = await readOfflineSaleStatus();
 
@@ -4485,6 +4487,21 @@ export default function DeviceApp() {
 
 
 
+  /**
+   * v1.3.4 — the quick pre-sale check (lib/preSaleReachability.ts), using the
+   * same read as the live indicator. It sends no sale.
+   */
+  const checkServerBeforeSale = checkDeviceServerReachable;
+
+  /**
+   * v1.3.4 — nothing answered the pre-sale check, and NOTHING WAS SENT, so the
+   * shop's internet is down: the same offline transition a transport failure
+   * starts. No uncertain sale is created, because no request left the till.
+   */
+  const handleServerUnreachableBeforeSale = useCallback(() => {
+    void enterOfflineFromTransportFailure();
+  }, [enterOfflineFromTransportFailure]);
+
   const handleSaleRejected = useCallback(
     (rejection: { message: string | null; failure?: DeviceFailureKind }) => {
       // Feature 24.5F (DEF-01) — NOTHING ANSWERED, so the shop's internet is
@@ -5115,6 +5132,10 @@ export default function DeviceApp() {
               recoverOutstandingSale={recoverOutstandingSale}
               // v1.3 Cash Drawer Checkpoint 1A — told once per succeeded sale.
               onSaleCompleted={handleSaleCompleted}
+              // v1.3.4 — online only: a 3 s server check before a new sale is
+              // sent; silence moves the till offline without sending it.
+              checkServerBeforeSale={offlineSaleAllowed ? null : checkServerBeforeSale}
+              onServerUnreachableBeforeSale={offlineSaleAllowed ? null : handleServerUnreachableBeforeSale}
               cartLineCountRef={liveCartLineCountRef}
             />
           </div>

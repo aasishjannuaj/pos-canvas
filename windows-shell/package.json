@@ -31,6 +31,7 @@
       "cashDrawerRaw.mjs",
       "cashDrawerIpc.mjs",
       "receiptPrintIpc.mjs",
+      "hardwareLog.mjs",
       "win32Spooler.mjs",
       "offline.html",
       "package.json",

@@ -187,7 +187,9 @@ describe("the main process listens for no payload and validates every request", 
     const handler = ipc.slice(ipc.indexOf("return function handleOpenCashDrawer"));
 
     expect(handler).toContain("return function handleOpenCashDrawer(event) {");
-    expect(handler.indexOf("isTrusted(event)")).toBeLessThan(handler.indexOf("attemptOnce(event)"));
+    // v1.3.4: the attempt is wrapped in a deadline (boundedAttempt); trust still comes first.
+    expect(handler.indexOf("isTrusted(event)")).toBeLessThan(handler.indexOf("boundedAttempt(event)"));
+    expect(handler.indexOf("boundedAttempt(event)")).toBeGreaterThan(-1);
     expect(handler).toContain('return Promise.resolve("unavailable");');
   });
 });

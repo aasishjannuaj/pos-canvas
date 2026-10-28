@@ -39,10 +39,12 @@ export function chooseReceiptPrinter(installedQueueNames) {
  * @param {{
  *   isTrusted: (event: unknown) => boolean,
  *   listQueueNames: (event: unknown) => Promise<readonly unknown[]>,
- *   print: (event: unknown, options: { silent: true, printBackground: true, deviceName?: string }) => Promise<boolean>,
+ *   print: (event: unknown, options: Record<string, unknown>) => Promise<{ success: boolean, failureReason?: string } | boolean>,
+ *   log?: (step: string, fields?: Record<string, unknown>) => void,
+ *   now?: () => number,
  * }} deps
  */
-export function createPrintReceiptHandler({ isTrusted, listQueueNames, print }) {
+export function createPrintReceiptHandler({ isTrusted, listQueueNames, print, log = () => {}, now = () => Date.now() }) {
   // One job at a time: a double tap queues behind the first, it never races it.
   let queue = Promise.resolve();
 
@@ -54,14 +56,26 @@ export function createPrintReceiptHandler({ isTrusted, listQueueNames, print }) 
       deviceName = undefined; // the default printer is still a valid choice
     }
 
+    // v1.3.4 (owner's Windows test) — THE PRINTER'S OWN PAPER. A silent print
+    // otherwise lays the page out on A4, which put the receipt off the edge of
+    // the 80 mm roll and ran the two Cash Drop slips together. The print window
+    // always used the printer's default paper; this asks for exactly that.
     const options =
       deviceName === undefined
-        ? { silent: true, printBackground: true }
-        : { silent: true, printBackground: true, deviceName };
+        ? { silent: true, printBackground: true, usePrinterDefaultPageSize: true }
+        : { silent: true, printBackground: true, usePrinterDefaultPageSize: true, deviceName };
+
+    const startedAt = now();
 
     try {
-      return (await print(event, options)) === true ? "printed" : "failed";
-    } catch {
+      const answer = await print(event, options);
+      const success = answer === true || (typeof answer === "object" && answer !== null && answer.success === true);
+      const failureReason = typeof answer === "object" && answer !== null ? answer.failureReason ?? null : null;
+
+      log("receipt_print", { printer: deviceName ?? "(windows default)", success, failureReason, ms: now() - startedAt });
+      return success ? "printed" : "failed";
+    } catch (error) {
+      log("receipt_print_threw", { printer: deviceName ?? "(windows default)", error: String(error), ms: now() - startedAt });
       return "failed";
     }
   }

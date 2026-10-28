@@ -542,6 +542,8 @@ describe("the shared boundary carries no hardware parameter and 1A contacts no h
         // v1.3.4 — reuses the validated profile only to NAME the receipt
         // printer for a silent page print; it never sends a drawer command.
         "receiptPrintIpc.mjs",
+        // v1.3.4 — the on-till step log; it names drawer steps, sends nothing.
+        "hardwareLog.mjs",
         "win32Spooler.mjs",
       ].map((f) => join("windows-shell", f))
     );
